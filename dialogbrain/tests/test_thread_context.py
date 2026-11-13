@@ -110,9 +110,19 @@ class TestThreadContext(DialogBrainTestCase):
 		ctx = self.verify(make_request(path=FIND_PATH, body=b"", method="GET", headers=headers))
 		self.assertTrue(ctx.identified)
 
-	def test_query_string_is_not_signed(self):
-		ctx = self.verify(make_request(query="a=1", headers=signed_headers()))
-		self.assertTrue(ctx and ctx.identified)
+	def test_query_string_is_refused(self):
+		"""Ruling R9: Frappe merges query args into the tool arguments and the signature
+		does not cover them, so a signed empty-body call replayed with ``?order_no=``
+		must not verify."""
+		headers = signed_headers(body=b"")
+		self.assertTrue(self.verify(make_request(body=b"", headers=headers)).identified)
+		req = make_request(body=b"", query="order_no=SAL-ORD-2026-00099", headers=headers)
+		self.assertEqual(tc.resolve(req, now=TS), (None, tc.QUERY_STRING))
+		raw = ORDER_PATH + "?order_no=SAL-ORD-2026-00099"
+		req = make_request(body=b"", raw_uri=raw, headers=headers)
+		self.assertEqual(tc.resolve(req, now=TS), (None, tc.QUERY_STRING))
+		# an empty query ("...?") carries no arguments
+		self.assertTrue(self.verify(make_request(body=b"", raw_uri=ORDER_PATH + "?", headers=headers)).identified)
 
 	def test_auto_verified_link_is_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_verified")
@@ -130,8 +140,7 @@ class TestThreadContext(DialogBrainTestCase):
 
 	def test_uses_the_raw_request_uri(self):
 		"""The signature covers the path as sent (RAW_URI), not a re-built one."""
-		raw = "/api/method/dialogbrain.agent_api.order_status?b=2"
-		ctx = self.verify(make_request(raw_uri=raw, headers=signed_headers()))
+		ctx = self.verify(make_request(raw_uri=ORDER_PATH, headers=signed_headers()))
 		self.assertTrue(ctx and ctx.identified)
 		# percent-encoded path: werkzeug decodes request.path, RAW_URI keeps the bytes as sent
 		encoded = "/api/method/dialogbrain.agent_api.order%5Fstatus"
@@ -143,7 +152,7 @@ class TestThreadContext(DialogBrainTestCase):
 	def test_request_uri_fallback(self):
 		builder = EnvironBuilder(path=ORDER_PATH, method="POST", data=ORDER_BODY, headers=signed_headers(),
 								 content_type="application/json",
-								 environ_overrides={"REQUEST_URI": ORDER_PATH + "?x=1"})
+								 environ_overrides={"REQUEST_URI": ORDER_PATH})
 		req = Request(builder.get_environ())
 		self.assertTrue(self.verify(req).identified)
 
@@ -153,6 +162,15 @@ class TestThreadContext(DialogBrainTestCase):
 		spaced = b'{"order_no": "SAL-ORD-2026-00001"}'
 		req = make_request(body=spaced, headers=signed_headers(body=ORDER_BODY))
 		self.assertIsNone(self.verify(req))
+
+	def test_form_body_read_like_frappe_still_verifies(self):
+		"""make_form_dict calls get_data() before .form, so a form body hashes its real bytes."""
+		body = b"order_no=SAL-ORD-2026-00001"
+		req = make_request(body=body, headers=signed_headers(body=body),
+						   content_type="application/x-www-form-urlencoded")
+		req.get_data(as_text=True)
+		self.assertEqual(req.form.get("order_no"), "SAL-ORD-2026-00001")
+		self.assertTrue(self.verify(req).identified)
 
 	def test_body_already_read_by_frappe_still_verifies(self):
 		req = make_request(headers=signed_headers())
@@ -254,3 +272,41 @@ class TestThreadContext(DialogBrainTestCase):
 	def test_manual_link_without_party_is_not_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, {"party_type": None, "party": None})
 		self.assertFalse(self.verify(make_request(headers=signed_headers())).identified)
+
+	# --- reason codes (Ruling R8) ------------------------------------------------------
+
+	def reason(self, request, now=TS):
+		return tc.resolve(request, now=now)[1]
+
+	def test_reason_codes(self):
+		self.assertEqual(tc.resolve(make_request(headers=signed_headers()), now=TS)[1], None)
+		self.assertEqual(tc.resolve(None, now=TS), (None, tc.NO_HEADERS))
+		self.assertEqual(self.reason(make_request()), tc.NO_HEADERS)
+		headers = signed_headers()
+		del headers["X-DialogBrain-Timestamp"]
+		self.assertEqual(self.reason(make_request(headers=headers)), tc.NO_HEADERS)
+		self.assertEqual(self.reason(make_request(query="x=1", headers=signed_headers())), tc.QUERY_STRING)
+		bad = signed_headers()
+		bad["X-DialogBrain-Context-Signature"] = "sha256=" + "0" * 64
+		self.assertEqual(self.reason(make_request(headers=bad)), tc.BAD_SIGNATURE)
+		self.assertEqual(self.reason(make_request(headers=signed_headers(thread="x1"))), tc.BAD_SIGNATURE)
+		self.assertEqual(self.reason(make_request(headers=signed_headers()), now=TS + 301), tc.STALE)
+		self.assertEqual(self.reason(make_request(headers=signed_headers(thread="999999"))), tc.UNKNOWN_THREAD)
+
+	def test_reason_unlinked_and_unverified(self):
+		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_unverified")
+		ctx, reason = tc.resolve(make_request(headers=signed_headers()), now=TS)
+		self.assertEqual((ctx.conversation, ctx.identified, reason), (self.conv, False, tc.UNVERIFIED))
+		frappe.db.set_value("DB Conversation", self.conv, {"party_type": None, "party": None})
+		self.assertEqual(self.reason(make_request(headers=signed_headers())), tc.UNLINKED)
+		# a manual link to a party that no longer exists is not identified either
+		frappe.db.set_value("DB Conversation", self.conv,
+							{"party_type": "Customer", "party": "Ctx Gone", "link_source": "manual"})
+		ctx, reason = tc.resolve(make_request(headers=signed_headers()), now=TS)
+		self.assertEqual((ctx.identified, reason), (False, tc.UNLINKED))
+
+	def test_reason_no_secret(self):
+		from frappe.utils.password import remove_encrypted_password
+
+		remove_encrypted_password(SETTINGS, SETTINGS, "thread_context_secret")
+		self.assertEqual(self.reason(make_request(headers=signed_headers())), tc.NO_SECRET)

@@ -23,13 +23,15 @@ Output is compact JSON for an LLM: document names only, and amounts rounded to t
 currency precision.
 """
 
+import math
+
 import frappe
 from frappe import _
 from frappe.utils import cint, escape_html, flt, getdate, today
 
 from dialogbrain.compat import sum_field
 from dialogbrain.install import AGENT_ROLE, create_roles
-from dialogbrain.thread_context import Context, verify
+from dialogbrain.thread_context import Context, query_string, resolve
 
 SETTINGS = "DialogBrain Settings"
 LOG = "DB Agent Call Log"
@@ -99,9 +101,10 @@ def agent_guard() -> None:
 # --- plumbing ------------------------------------------------------------------------
 
 
-def _context() -> Context | None:
-	"""The verified thread context of this call, or None (B2: signed headers)."""
-	return verify(getattr(frappe.local, "request", None))
+def _context() -> tuple[Context | None, str | None]:
+	"""``(context, reason)`` of this call: the verified thread context (or None) and, when
+	the call is not identified, a reason code for the call log (Ruling R8)."""
+	return resolve(getattr(frappe.local, "request", None))
 
 
 def _log(tool, ctx, result_count, error=None) -> str:
@@ -125,6 +128,9 @@ def _log(tool, ctx, result_count, error=None) -> str:
 
 def _error_text(exc) -> str:
 	message = str(exc).strip() or type(exc).__name__
+	detail = getattr(exc, "log_detail", None)
+	if detail:  # the caller saw only the generic message; the log keeps the cause
+		message = f"{message} ({detail})"
 	return f"{type(exc).__name__}: {message}"[:ERROR_LENGTH]
 
 
@@ -146,20 +152,30 @@ def _log_failure(tool, ctx, exc) -> None:
 
 
 def _run(tool, impl, extra=None, **kwargs):
-	"""Guard, resolve the context, refuse ``extra`` arguments, run
-	``impl(ctx, **kwargs) -> (result, count)``, log."""
+	"""Guard, refuse a query string, resolve the context, refuse ``extra`` arguments, run
+	``impl(ctx, **kwargs) -> (result, count)``, log (with the reason code when the call
+	is not identified, Ruling R8)."""
 	ctx = None
 	try:
 		agent_guard()
-		ctx = _context()
+		_refuse_query_string()
+		ctx, reason = _context()
 		if extra is not None:
 			_refuse_extra(extra)
 		result, count = impl(ctx, **kwargs)
 	except Exception as exc:
 		_log_failure(tool, ctx, exc)
 		raise
-	_log(tool, ctx, count)
+	_log(tool, ctx, count, reason)
 	return result
+
+
+def _refuse_query_string() -> None:
+	"""Ruling R9: Frappe merges ``request.args`` into the tool arguments, and the
+	signature does not cover the query string. Arguments come in the JSON body only."""
+	request = getattr(frappe.local, "request", None)
+	if request is not None and query_string(request):
+		raise frappe.ValidationError(_("Query parameters are not accepted; send arguments in the JSON body"))
 
 
 # Keys Frappe itself puts into ``form_dict`` (``cmd``) or that its JS client adds (``_``
@@ -383,6 +399,15 @@ PARTY_TYPES = ("Customer", "Lead")
 MAX_ORDERS = 5
 MAX_INVOICES = 10
 MAX_ORDER_LINES = 20
+MAX_QTY = 100000
+DRAFT_FAILED = "Could not create the draft order"
+
+
+class DraftOrderFailed(frappe.ValidationError):
+	"""The generic error the agent sees when ERPNext refuses the draft; ``log_detail``
+	(the real cause) goes to the call log only."""
+
+	log_detail = None
 
 
 def _not_identified():
@@ -604,12 +629,9 @@ def _order_lines(items) -> list:
 			frappe.throw(_("Unexpected item field(s): {0}; only item_code and qty are accepted").format(
 				", ".join(map(str, unexpected))), frappe.ValidationError)
 		code = row.get("item_code")
-		qty = flt(row.get("qty"))
 		if not isinstance(code, str) or not code.strip():
 			frappe.throw(_("Each item needs an item_code"), frappe.ValidationError)
-		if qty <= 0:
-			frappe.throw(_("Quantity must be greater than 0 for {0}").format(code), frappe.ValidationError)
-		lines.append((code.strip(), qty))
+		lines.append((code.strip(), _qty(row.get("qty"), code)))
 	codes = {code for code, _qty in lines}
 	sellable = set(
 		frappe.get_all(
@@ -624,6 +646,30 @@ def _order_lines(items) -> list:
 	return lines
 
 
+def _qty(value, code) -> float:
+	"""A finite real quantity, 0 < qty <= MAX_QTY: an int, a float or a numeric string;
+	never a bool, NaN or infinity."""
+	qty = None
+	if isinstance(value, bool):
+		qty = None
+	elif isinstance(value, (int, float)):
+		try:
+			qty = float(value)
+		except OverflowError:
+			qty = None
+	elif isinstance(value, str):
+		try:
+			qty = float(value.strip())
+		except ValueError:
+			qty = None
+	if qty is None or not math.isfinite(qty) or not 0 < qty <= MAX_QTY:
+		frappe.throw(
+			_("Quantity for {0} must be a number greater than 0 and at most {1}").format(code, MAX_QTY),
+			frappe.ValidationError,
+		)
+	return qty
+
+
 def _insert_elevated(doc) -> None:
 	"""Insert ``doc`` (ignore_permissions) as Administrator, then record the agent user as
 	its owner.
@@ -632,12 +678,23 @@ def _insert_elevated(doc) -> None:
 	permissions (``item.check_permission()``, ``check_account_permission``), and the agent
 	role has none by design (Ruling R5). This runs only after the guard, the
 	``allow_agent_writes`` switch, the context check and ``_order_lines``.
+
+	Ruling R9: nothing ERPNext says inside the elevated window reaches the caller. Messages
+	queued during the insert are dropped, and a failure becomes :class:`DraftOrderFailed`
+	with a generic message; the cause goes to the call log only.
 	"""
 	agent = frappe.session.user
+	messages = len(frappe.local.message_log or [])
 	frappe.set_user("Administrator")
 	try:
 		doc.insert(ignore_permissions=True)
+	except Exception as exc:  # noqa: BLE001 - every cause becomes the generic error (R9)
+		failed = DraftOrderFailed(_(DRAFT_FAILED))
+		failed.log_detail = _error_text(exc)
+		raise failed from None
 	finally:
 		frappe.set_user(agent)
+		if frappe.local.message_log:
+			del frappe.local.message_log[messages:]
 	frappe.db.set_value(doc.doctype, doc.name, {"owner": agent, "modified_by": agent}, update_modified=False)
 	doc.owner = doc.modified_by = agent

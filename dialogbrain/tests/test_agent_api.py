@@ -228,7 +228,7 @@ class TestAgentApi(DialogBrainTestCase):
 		conv = _conv(ch)
 		ctx = Context(thread_id="inbox-x", conversation=conv, party_type=None, party=None, identified=False)
 		self._as_agent()
-		with patch.object(agent_api, "_context", return_value=ctx):
+		with patch.object(agent_api, "_context", return_value=(ctx, None)):
 			self.assertEqual(agent_api.get_item("laptop")["items"][0]["stock_qty"], 100.0)
 
 	def test_non_stock_item_is_in_stock(self):
@@ -253,7 +253,7 @@ class TestAgentApi(DialogBrainTestCase):
 		frappe.set_user("Administrator")
 		logs = _logs()
 		self.assertEqual([(r.tool, r.result_count, r.identified, r.error) for r in logs],
-						 [("get_item", 1, 0, None), ("get_item", 0, 0, None)])
+						 [("get_item", 1, 0, "no_headers"), ("get_item", 0, 0, "no_headers")])  # R8
 
 	# --- create_lead -----------------------------------------------------------------
 
@@ -282,14 +282,14 @@ class TestAgentApi(DialogBrainTestCase):
 		self.assertTrue(frappe.db.exists("Comment", {"reference_doctype": "Lead", "reference_name": lead.name,
 													  "content": ["like", "%Wants 3 laptops%"]}))
 		(log,) = _logs()
-		self.assertEqual((log.tool, log.result_count, log.error), ("create_lead", 1, None))
+		self.assertEqual((log.tool, log.result_count, log.error), ("create_lead", 1, "no_headers"))
 
 	def test_create_lead_with_context_links_an_unlinked_conversation(self):
 		_set_settings(allow_agent_writes=1)
 		conv = _conv(_channel("agent-ch2", "livechat"))
 		ctx = Context(thread_id="t-1", conversation=conv, party_type=None, party=None, identified=False)
 		self._as_agent()
-		with patch.object(agent_api, "_context", return_value=ctx):
+		with patch.object(agent_api, "_context", return_value=(ctx, None)):
 			out = agent_api.create_lead("Visitor Petro")
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("Lead", out["lead"], "db_conversation"), conv)
@@ -309,7 +309,7 @@ class TestAgentApi(DialogBrainTestCase):
 					 link_source="auto_unverified")
 		ctx = Context(thread_id="t-2", conversation=conv, party_type="Customer", party=customer, identified=False)
 		self._as_agent()
-		with patch.object(agent_api, "_context", return_value=ctx):
+		with patch.object(agent_api, "_context", return_value=(ctx, None)):
 			out = agent_api.create_lead("Someone Else")
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "party"), customer)
@@ -322,7 +322,7 @@ class TestAgentApi(DialogBrainTestCase):
 		ctx = Context(thread_id="t-3", conversation=conv, party_type="Lead", party=existing, identified=False)
 		before = frappe.db.count("Lead")
 		self._as_agent()
-		with patch.object(agent_api, "_context", return_value=ctx):
+		with patch.object(agent_api, "_context", return_value=(ctx, None)):
 			out = agent_api.create_lead("Existing Again")
 		frappe.set_user("Administrator")
 		self.assertEqual(out, {"lead": existing, "existing": True})
@@ -334,7 +334,7 @@ class TestAgentApi(DialogBrainTestCase):
 		conv = _conv(_channel("agent-ch5", "livechat"), party_type="Customer", party=customer, link_source="manual")
 		ctx = Context(thread_id="t-4", conversation=conv, party_type="Customer", party=customer, identified=True)
 		self._as_agent()
-		with patch.object(agent_api, "_context", return_value=ctx):
+		with patch.object(agent_api, "_context", return_value=(ctx, None)):
 			first = agent_api.create_lead("Visitor One")
 			second = agent_api.create_lead("Visitor One Again")
 		frappe.set_user("Administrator")
@@ -354,7 +354,7 @@ class TestAgentApi(DialogBrainTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual((frappe.db.count("Lead"), frappe.db.count("Contact")), (leads, contacts))
 		(log,) = _logs()
-		self.assertEqual((log.tool, log.result_count, log.error), ("create_lead", 0, None))
+		self.assertEqual((log.tool, log.result_count, log.error), ("create_lead", 0, "no_headers"))
 
 	# --- call log --------------------------------------------------------------------
 
@@ -511,17 +511,22 @@ class TestCustomerTools(DialogBrainTestCase):
 		if hasattr(frappe.local, "request"):
 			del frappe.local.request
 
-	def call(self, tool, thread=None, headers=None, body=None, **kwargs):
+	def call(self, tool, thread=None, headers=None, body=None, query=None, **kwargs):
 		"""POST ``tool`` the way DialogBrain does: JSON body (httpx spacing), signed for
-		``thread``, dispatched through ``frappe.call`` like Frappe's handler."""
+		``thread``, dispatched through ``frappe.call`` like Frappe's handler. ``query``
+		args are put on the URL (unsigned) and merged into the arguments, as Frappe does
+		for an empty or non-JSON body."""
+		from urllib.parse import parse_qsl
+
 		path = f"/api/method/dialogbrain.agent_api.{tool}"
 		raw = json.dumps(kwargs).encode() if body is None else body
 		if headers is None:
 			headers = signed_headers(thread=thread or self.thread, ts=int(time.time()), path=path, body=raw)
-		frappe.local.request = make_request(path=path, body=raw, headers=headers)
+		frappe.local.request = make_request(path=path, body=raw, headers=headers, query=query)
+		args = dict(kwargs, **dict(parse_qsl(query or "")))
 		frappe.set_user(self.agent)
 		try:
-			return frappe.call(getattr(agent_api, tool), **frappe._dict(kwargs, cmd=f"dialogbrain.agent_api.{tool}"))
+			return frappe.call(getattr(agent_api, tool), **frappe._dict(args, cmd=f"dialogbrain.agent_api.{tool}"))
 		finally:
 			del frappe.local.request
 			frappe.set_user("Administrator")
@@ -614,7 +619,7 @@ class TestCustomerTools(DialogBrainTestCase):
 
 	# --- not identified (Review Focus 1, 2) -------------------------------------------
 
-	def _assert_not_identified_everywhere(self, label, **call_kwargs):
+	def _assert_not_identified_everywhere(self, label, reason, **call_kwargs):
 		_so(self.customer, 100)
 		_si(self.customer, 40)
 		_set_settings(allow_agent_writes=1)
@@ -625,7 +630,8 @@ class TestCustomerTools(DialogBrainTestCase):
 			self.assertEqual(out, NOT_IDENTIFIED, f"{label}: {tool}")
 		logs = _logs()
 		self.assertEqual([r.tool for r in logs], list(CUSTOMER_TOOLS), label)
-		self.assertTrue(all(r.identified == 0 and r.result_count == 0 and not r.error for r in logs), label)
+		# Ruling R8: the reason code is in the log, never in the answer
+		self.assertEqual({(r.identified, r.result_count, r.error) for r in logs}, {(0, 0, reason)}, label)
 		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}), label)
 		return logs
 
@@ -639,17 +645,32 @@ class TestCustomerTools(DialogBrainTestCase):
 			headers = self._headers(tool)
 			headers["X-DialogBrain-Context-Signature"] = "sha256=" + "0" * 64
 			self.assertEqual(self.call(tool, headers=headers), NOT_IDENTIFIED, tool)
-		self.assertTrue(all(r.identified == 0 and not r.conversation for r in _logs()))
+		self.assertEqual({(r.identified, r.conversation, r.error) for r in _logs()}, {(0, None, "bad_signature")})
 
 	def test_signed_with_another_secret(self):
 		"""Another workspace's secret (or a forger without the secret)."""
 		self.assertEqual(self.call("find_customer", headers=self._headers(secret="e" * 64)), NOT_IDENTIFIED)
+		(log,) = _logs()
+		self.assertEqual(log.error, "bad_signature")
+
+	def test_no_secret_reason_is_logged(self):
+		from frappe.utils.password import remove_encrypted_password
+
+		remove_encrypted_password(SETTINGS, SETTINGS, "thread_context_secret")
+		self.assertEqual(self.call("find_customer"), NOT_IDENTIFIED)
+		(log,) = _logs()
+		self.assertEqual(log.error, "no_secret")
+
+	def test_identified_calls_log_no_reason(self):
+		self.call("find_customer")
+		(log,) = _logs()
+		self.assertEqual((log.identified, log.error), (1, None))
 
 	def test_stale_timestamp(self):
 		headers = self._headers(ts=int(time.time()) - 301)
 		self.assertEqual(self.call("find_customer", headers=headers), NOT_IDENTIFIED)
 		(log,) = _logs()
-		self.assertEqual((log.identified, log.conversation), (0, None))
+		self.assertEqual((log.identified, log.conversation, log.error), (0, None, "stale"))
 
 	def test_missing_header(self):
 		for header in ("X-DialogBrain-Thread-Id", "X-DialogBrain-Timestamp", "X-DialogBrain-Context-Signature"):
@@ -657,6 +678,7 @@ class TestCustomerTools(DialogBrainTestCase):
 			del headers[header]
 			self.assertEqual(self.call("find_customer", headers=headers), NOT_IDENTIFIED, header)
 		self.assertEqual(self.call("find_customer", headers={}), NOT_IDENTIFIED)
+		self.assertEqual({r.error for r in _logs()}, {"no_headers"})
 
 	def test_signature_replayed_for_another_chat_or_tool(self):
 		other_conv = _conv(self.channel, thread_id="73002", party_type="Customer", party=self.other,
@@ -676,26 +698,59 @@ class TestCustomerTools(DialogBrainTestCase):
 		self.assertNotIn(other_conv, [r.conversation for r in _logs()])
 
 	def test_unknown_thread(self):
-		self._assert_not_identified_everywhere("unknown thread", thread="999999")
+		self._assert_not_identified_everywhere("unknown thread", "unknown_thread", thread="999999")
 
 	def test_auto_unverified_link_is_not_identified(self):
 		"""Review Focus 2: e.g. a phone typed into livechat matched a customer."""
 		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_unverified")
-		logs = self._assert_not_identified_everywhere("auto_unverified")
+		logs = self._assert_not_identified_everywhere("auto_unverified", "unverified")
 		self.assertTrue(all(r.conversation == self.conv for r in logs))
 
 	def test_unlinked_conversation_is_not_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, {"party_type": None, "party": None, "link_source": None})
-		self._assert_not_identified_everywhere("unlinked")
+		self._assert_not_identified_everywhere("unlinked", "unlinked")
 
 	def test_party_that_no_longer_exists_is_not_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, "party", "Agent Deleted Customer")
 		self.assertEqual(self.call("find_customer"), NOT_IDENTIFIED)
+		(log,) = _logs()
+		self.assertEqual((log.identified, log.error), (0, "unlinked"))
 
 	def test_no_context_at_all(self):
 		frappe.set_user(self.agent)
 		for tool in ("find_customer", "order_status", "unpaid_invoices"):
 			self.assertEqual(getattr(agent_api, tool)(), NOT_IDENTIFIED, tool)
+
+	# --- query strings (Ruling R9) -------------------------------------------------------
+
+	def test_signed_empty_body_replayed_with_a_query_string_is_refused(self):
+		"""Frappe merges ``?order_no=`` into the arguments when the body is empty, and the
+		signature does not cover it: refuse any query string."""
+		theirs = _so(self.other, 200)
+		mine = _so(self.customer, 100)
+		path = "/api/method/dialogbrain.agent_api.order_status"
+		headers = signed_headers(thread=self.thread, ts=int(time.time()), path=path, body=b"")
+		self.assertEqual([o["name"] for o in self.call("order_status", headers=headers, body=b"")["orders"]],
+						 [mine])
+		for order_no in (theirs, mine):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self.call("order_status", headers=headers, body=b"", query=f"order_no={order_no}")
+			self.assertIn("Query parameters are not accepted", str(cm.exception))
+			self.assertNotIn(theirs, frappe.as_json(frappe.local.message_log or []))
+		logs = _logs()
+		self.assertEqual(len(logs), 3)
+		self.assertTrue(all("Query parameters" in r.error for r in logs[1:]))
+
+	def test_every_tool_refuses_a_query_string(self):
+		_set_settings(allow_agent_writes=1)
+		for tool in ("get_item", "create_lead", *CUSTOMER_TOOLS):
+			with self.assertRaises(frappe.ValidationError, msg=tool):
+				self.call(tool, query="x=1")
+		with self.assertRaises(frappe.ValidationError):
+			self.call("get_item", query="query=laptop", headers={}, body=b"")
+		frappe.set_user("Administrator")
+		self.assertFalse(frappe.db.exists("Lead", {"db_conversation": self.conv}))
+		self.assertEqual(len(_logs()), len(CUSTOMER_TOOLS) + 3)
 
 	# --- extra arguments (Review Focus 3) ----------------------------------------------
 
@@ -800,7 +855,7 @@ class TestCustomerTools(DialogBrainTestCase):
 								party=self.customer, identified=True)
 		frappe.set_user(self.agent)
 		with (
-			patch.object(agent_api, "_context", return_value=ctx),
+			patch.object(agent_api, "_context", return_value=(ctx, None)),
 			patch("frappe.model.document.Document.insert", side_effect=frappe.ValidationError("boom")),
 			self.assertRaises(frappe.ValidationError),
 		):
@@ -828,6 +883,61 @@ class TestCustomerTools(DialogBrainTestCase):
 			with self.assertRaises(frappe.ValidationError, msg=repr(items)[:60]):
 				self.call("create_draft_order", items=items)
 		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}))
+
+	def test_create_draft_order_validates_qty(self):
+		self._order_ready()
+		bad = [float("nan"), float("inf"), float("-inf"), "nan", "inf", "1e300", 1e300, True, False, -1, "-2",
+			   0, "0", agent_api.MAX_QTY + 1, 10**400, None, "", "two", [1], {"n": 1}]
+		for qty in bad:
+			with self.assertRaises(frappe.ValidationError, msg=repr(qty)[:40]) as cm:
+				# the body is built here: json.dumps cannot carry 10**400 as a float
+				self.call("create_draft_order", body=b"{}", items=[{"item_code": "AGT-LAPTOP-14", "qty": qty}])
+			self.assertIn("Quantity", str(cm.exception), repr(qty)[:40])
+		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}))
+		for qty, expected in (("2", 2.0), (1.5, 1.5), (agent_api.MAX_QTY, float(agent_api.MAX_QTY))):
+			out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": qty}])
+			self.assertEqual(out["items"][0]["qty"], expected)
+
+	def test_create_draft_order_failure_is_generic_for_the_caller(self):
+		"""Ruling R9: ERPNext's message from the elevated insert (account / warehouse names)
+		reaches only the call log."""
+		from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
+
+		self._order_ready()
+
+		def leaky_validate(doc):
+			frappe.throw("Account Debtors - AOR is frozen for Agent Mallory")
+
+		frappe.local.message_log = []
+		with patch.object(SalesOrder, "validate", leaky_validate), self.assertRaises(frappe.ValidationError) as cm:
+			self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertIsInstance(cm.exception, agent_api.DraftOrderFailed)
+		self.assertEqual(str(cm.exception), agent_api.DRAFT_FAILED)
+		self.assertIsNone(cm.exception.__cause__)
+		self.assertTrue(cm.exception.__suppress_context__)
+		self.assertNotIn("Debtors", frappe.as_json(frappe.local.message_log or []))
+		(log,) = _logs()
+		self.assertIn(agent_api.DRAFT_FAILED, log.error)
+		self.assertIn("Account Debtors - AOR is frozen", log.error)
+
+	def test_create_draft_order_drops_messages_from_the_elevated_insert(self):
+		from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
+
+		self._order_ready()
+		original = SalesOrder.validate
+
+		def chatty_validate(doc):
+			frappe.msgprint("internal elevated note: Debtors - AOR")
+			original(doc)
+
+		frappe.local.message_log = []
+		frappe.msgprint("kept note")
+		with patch.object(SalesOrder, "validate", chatty_validate):
+			out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertTrue(out["order"])
+		log = frappe.as_json(frappe.local.message_log)
+		self.assertIn("kept note", log)
+		self.assertNotIn("internal elevated note", log)
 
 	def test_create_draft_order_for_a_lead(self):
 		self._order_ready()
