@@ -264,15 +264,118 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
 	if internal and current.thread_id != internal:
 		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)
-	if ref and not current.thread_ref:
-		updates["thread_ref"] = ref
-	if channel and not current.channel:
-		updates["channel"] = channel
+	new_ref = ref if ref and not current.thread_ref else None
+	new_channel = channel if channel and not current.channel else None
+	if new_ref or new_channel:
+		holder = _ref_holder(name, current.channel or channel, current.thread_ref or ref)
+		if holder and _mergeable(holder, internal or current.thread_id):
+			_merge_conversation(name, holder)
+		elif holder:  # another DialogBrain thread holds this ref: keep ours without it
+			new_ref = new_channel = None
+		if new_ref:
+			updates["thread_ref"] = new_ref
+		if new_channel:
+			updates["channel"] = new_channel
 	if updates:
 		frappe.db.set_value("DB Conversation", name, updates)
 		if "phone" in updates or "email" in updates:
 			link_party(name)
 	return name, False
+
+
+# --- merging a ref-only duplicate ---------------------------------------------
+
+# Rows that point at a conversation (re-pointed when two rows are merged).
+CONVERSATION_LINKS = (
+	("DB Message", "conversation", None),
+	("DB Draft", "conversation", None),
+	("Notification Log", "document_name", "document_type"),
+	("Comment", "reference_name", "reference_doctype"),
+	("ToDo", "reference_name", "reference_type"),
+	("File", "attached_to_name", "attached_to_doctype"),
+)
+MERGE_FIELDS = (
+	"title",
+	*CONTACT_FIELDS,
+	"party_type",
+	"party",
+	"contact",
+	"link_source",
+	"assigned_to",
+	"needs_human",
+	"status",
+	"agent_override",
+	"unread_count",
+	"last_message_at",
+	"last_message_preview",
+	"last_message_direction",
+	"last_inbound_at",
+	"opened_at",
+	"closed_at",
+	"first_response_seconds",
+)
+
+
+def _ref_holder(name, channel, ref):
+	"""Another conversation holding ``(channel, ref)`` (locking read: sees committed rows)."""
+	if not (channel and ref):
+		return None
+	return frappe.db.get_value(
+		"DB Conversation",
+		{"channel": channel, "thread_ref": ref, "name": ["!=", name]},
+		for_update=True,
+	)
+
+
+def _mergeable(holder, internal):
+	"""The holder is the same thread when it has no internal id (or the same one)."""
+	holder_id = frappe.db.get_value("DB Conversation", holder, "thread_id")
+	return not holder_id or holder_id == internal
+
+
+def _merge_conversation(target, source):
+	"""Fold ``source`` (a ref-only duplicate of the same thread) into ``target`` and delete
+	it, in the caller's transaction. Messages, drafts, notifications, comments, ToDos and
+	files are re-pointed; party link, assignment and contact details are taken from
+	``source`` where ``target`` has none; counters are combined."""
+	for doctype, field, type_field in CONVERSATION_LINKS:
+		where = f"`{field}` = %(source)s"
+		if type_field:
+			where += f" and `{type_field}` = 'DB Conversation'"
+		frappe.db.sql(
+			f"update `tab{doctype}` set `{field}` = %(target)s where {where}",
+			{"target": target, "source": source},
+		)
+
+	tgt = frappe.db.get_value("DB Conversation", target, list(MERGE_FIELDS), as_dict=True)
+	src = frappe.db.get_value("DB Conversation", source, list(MERGE_FIELDS), as_dict=True)
+	updates = {}
+	for field in ("title", *CONTACT_FIELDS, "assigned_to", "opened_at", "first_response_seconds"):
+		if not tgt.get(field) and src.get(field):
+			updates[field] = src.get(field)
+	if src.party and (not tgt.party or (src.link_source == "manual" and tgt.link_source != "manual")):
+		updates.update({f: src.get(f) for f in ("party_type", "party", "contact", "link_source")})
+	if src.needs_human and not tgt.needs_human:
+		updates["needs_human"] = 1
+	if (tgt.agent_override or "default") == "default" and (src.agent_override or "default") != "default":
+		updates["agent_override"] = src.agent_override
+	if src.status == "Open" and tgt.status == "Closed":
+		updates.update({"status": "Open", "closed_at": None})
+	if src.unread_count:
+		updates["unread_count"] = (tgt.unread_count or 0) + src.unread_count
+	if src.last_message_at and (
+		not tgt.last_message_at or get_datetime(src.last_message_at) > get_datetime(tgt.last_message_at)
+	):
+		for field in ("last_message_at", "last_message_preview", "last_message_direction"):
+			updates[field] = src.get(field)
+	if src.last_inbound_at and (
+		not tgt.last_inbound_at or get_datetime(src.last_inbound_at) > get_datetime(tgt.last_inbound_at)
+	):
+		updates["last_inbound_at"] = src.last_inbound_at
+
+	frappe.db.delete("DB Conversation", {"name": source})  # frees (channel, thread_ref)
+	if updates:
+		frappe.db.set_value("DB Conversation", target, updates)
 
 
 # --- message ----------------------------------------------------------------

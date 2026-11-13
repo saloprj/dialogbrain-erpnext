@@ -163,6 +163,69 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(frappe.db.count("DB Conversation"), 1)
 		self.assertEqual(frappe.db.get_value("DB Conversation", conv.name, "thread_id"), "1001")
 
+	def test_thread_ref_collision_merges_ref_only_row(self):
+		"""F6: a conversation known by internal id only (``conversation.started`` without a
+		ref) and one known by ref only (a ref-only event) are the same thread. The first
+		event with both ids must merge them, not hit the (channel, thread_ref) unique index
+		on every delivery."""
+		from dialogbrain.sync.processor import process_event
+
+		process_event("conversation.started", {"account_id": "155", "channel": "telegram", "thread_id": 1001})
+		id_row = _conv_by_thread("1001")
+		self.assertIsNone(frappe.db.get_value("DB Conversation", id_row, "thread_ref"))
+		_process(UPDATED, db_id="9000002", is_outgoing=False, html="earlier", sent_at="2026-11-13T11:00:00+00:00")
+		ref_row = frappe.db.get_value("DB Conversation", {"thread_ref": "telegram:100000001"})
+		self.assertNotEqual(ref_row, id_row)
+		customer = frappe.get_doc(
+			{"doctype": "Customer", "customer_name": "F6 Merge Customer", "customer_type": "Individual"}
+		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		frappe.db.set_value(
+			"DB Conversation",
+			ref_row,
+			{
+				"party_type": "Customer",
+				"party": customer.name,
+				"link_source": "manual",
+				"assigned_to": self.agent,
+				"needs_human": 1,
+			},
+		)
+		draft = frappe.get_doc(
+			{"doctype": "DB Draft", "draft_id": "f6-draft", "conversation": ref_row, "text": "hi", "status": "pending"}
+		).insert(ignore_permissions=True)
+
+		_process(INBOUND)  # carries both: db_id 1001 and telegram:100000001
+
+		self.assertEqual(frappe.get_all("DB Conversation", pluck="name"), [id_row])
+		conv = frappe.get_doc("DB Conversation", id_row)
+		self.assertEqual((conv.thread_id, conv.thread_ref, conv.channel), ("1001", "telegram:100000001", "155"))
+		self.assertEqual((conv.party_type, conv.party, conv.link_source), ("Customer", customer.name, "manual"))
+		self.assertEqual(conv.assigned_to, self.agent)
+		self.assertEqual(conv.needs_human, 1)
+		self.assertEqual(conv.unread_count, 2)
+		self.assertEqual(conv.last_message_preview, "Hi, please send me the offer for the project, thanks.")
+		self.assertEqual(
+			sorted(frappe.get_all("DB Message", {"conversation": id_row}, pluck="db_id")), ["9000001", "9000002"]
+		)
+		self.assertEqual(frappe.db.get_value("DB Draft", draft.name, "conversation"), id_row)
+		self.assertFalse(frappe.db.exists("DB Conversation", ref_row))
+		_process(INBOUND, db_id="9000003")  # later events just land
+		self.assertEqual(frappe.db.count("DB Message", {"conversation": id_row}), 3)
+
+	def test_thread_ref_collision_with_other_internal_id_does_not_merge(self):
+		"""Two rows with different internal ids are different DialogBrain threads: keep
+		both, leave the ref where it is (no unique-index error)."""
+		from dialogbrain.sync.processor import process_event
+
+		process_event("conversation.started", {"account_id": "155", "channel": "telegram", "thread_id": 1001})
+		process_event(
+			"conversation.started",
+			{"account_id": "155", "channel": "telegram", "thread_id": 999, "thread_ref": "telegram:100000001"},
+		)
+		_process(INBOUND)
+		self.assertEqual(frappe.db.count("DB Conversation"), 2)
+		self.assertEqual(frappe.db.count("DB Message", {"conversation": _conv_by_thread("1001")}), 1)
+
 	def test_same_ref_on_two_accounts_is_two_conversations(self):
 		from dialogbrain.sync.processor import process_event
 
