@@ -1,0 +1,451 @@
+"""Whitelisted inbox read & action API (Plan 2, Task 1).
+
+Every method that names a conversation calls :func:`assert_can_access` first. Lists apply
+the same channel restriction as the registered ``permission_query_conditions``
+(:func:`conversation_query`). DB Conversation fields other than ``status`` are permlevel 1,
+so actions write them server-side with ``frappe.db.set_value`` after their own checks.
+"""
+
+import html as html_lib
+import json
+from datetime import timedelta
+
+import frappe
+from frappe import _
+from frappe.utils import cint, get_datetime, now_datetime, strip_html
+from frappe.utils.html_utils import sanitize_html
+
+from dialogbrain.permissions import (
+	allowed_channels,
+	assert_can_access,
+	conversation_query,
+	is_manager,
+	permitted_users,
+)
+from dialogbrain.sync.notify import publish
+
+C = "`tabDB Conversation`"
+SORT_KEY = f"COALESCE({C}.`last_message_at`, {C}.`creation`)"
+PREVIEW_MAX = 120
+MESSAGE_SEARCH_DAYS = 90
+MESSAGE_SEARCH_MIN = 3
+MAX_LIMIT = 500
+DRAFT_WEBHOOK_LIMIT = 500
+DRAFT_LIST_LIMIT = 300
+
+ROW_FIELDS = (
+	f"{C}.`name`",
+	f"{C}.`title`",
+	f"{C}.`contact_name`",
+	f"{C}.`channel`",
+	"ch.`channel_type` AS channel_type",
+	"ch.`title` AS channel_title",
+	f"{C}.`avatar_url`",
+	f"{C}.`assigned_to`",
+	"u.`full_name` AS assigned_to_name",
+	f"{C}.`status`",
+	f"{C}.`unread_count`",
+	f"{C}.`needs_human`",
+	f"{C}.`last_message_at`",
+	f"{C}.`last_message_preview`",
+	f"{C}.`last_message_direction`",
+	f"{C}.`party_type`",
+	f"{C}.`party`",
+)
+DETAIL_FIELDS = (
+	f"{C}.`phone`",
+	f"{C}.`email`",
+	f"{C}.`handle`",
+	f"{C}.`opened_at`",
+	f"{C}.`closed_at`",
+	f"{C}.`first_response_seconds`",
+	f"{C}.`link_source`",
+	f"{C}.`agent_override`",
+	f"{C}.`contact`",
+	"ch.`agent_mode` AS agent_mode",
+)
+FROM = (
+	f"FROM {C} LEFT JOIN `tabDB Channel` ch ON ch.`name` = {C}.`channel` "
+	f"LEFT JOIN `tabUser` u ON u.`name` = {C}.`assigned_to`"
+)
+
+
+# --- helpers ----------------------------------------------------------------
+
+
+def _parse(value):
+	"""dict/list, or its JSON string as posted by the browser; None for empty."""
+	if value in (None, ""):
+		return None
+	if isinstance(value, str):
+		try:
+			return json.loads(value)
+		except ValueError:
+			frappe.throw(_("Invalid JSON argument"))
+	return value
+
+
+def _truthy(value):
+	if isinstance(value, str):
+		return value.strip().lower() in ("1", "true", "yes", "on")
+	return bool(value)
+
+
+def _limit(value, default=50):
+	return min(max(cint(value) or default, 1), MAX_LIMIT)
+
+
+def _escape_like(text):
+	return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _require_read():
+	if not frappe.has_permission("DB Conversation", "read"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+
+def _can_see_channel(channel, user):
+	channels = allowed_channels(user)
+	return channels is None or channel in channels
+
+
+def _plain(value):
+	return html_lib.unescape(strip_html(value or "")).strip()
+
+
+def _row(r):
+	r = dict(r)
+	r.pop("_sort_key", None)
+	r["last_message_preview"] = strip_html(r.get("last_message_preview") or "")[:PREVIEW_MAX]
+	return r
+
+
+def _list_conditions(filters, user):
+	"""SQL conditions (all parameterised) and their params for :func:`list_conversations`."""
+	conditions, params = [], {}
+	perm = conversation_query(user)
+	if perm:
+		conditions.append(perm)
+
+	status = filters.get("status") or "Open"
+	if status not in ("Open", "Closed", "All"):
+		frappe.throw(_("Invalid status filter"))
+	if status != "All":
+		conditions.append(f"{C}.`status` = %(status)s")
+		params["status"] = status
+
+	scope = filters.get("scope") or "all"
+	if scope == "mine":
+		conditions.append(f"{C}.`assigned_to` = %(me)s")
+		params["me"] = user
+	elif scope == "unassigned":
+		conditions.append(f"COALESCE({C}.`assigned_to`, '') = ''")
+	elif scope != "all":
+		frappe.throw(_("Invalid scope filter"))
+
+	if _truthy(filters.get("unanswered")):
+		conditions.append(f"{C}.`last_message_direction` = 'in' AND {C}.`status` = 'Open'")
+
+	channel = filters.get("channel")
+	if channel:
+		if not _can_see_channel(channel, user):
+			frappe.throw(_("You do not have access to this channel"), frappe.PermissionError)
+		conditions.append(f"{C}.`channel` = %(channel)s")
+		params["channel"] = channel
+
+	if filters.get("channel_type"):
+		conditions.append("ch.`channel_type` = %(channel_type)s")
+		params["channel_type"] = filters["channel_type"]
+
+	if filters.get("assigned_to") and is_manager(user):
+		conditions.append(f"{C}.`assigned_to` = %(assigned_to)s")
+		params["assigned_to"] = filters["assigned_to"]
+
+	search = str(filters.get("search") or "").strip()
+	if search:
+		params["like"] = f"%{_escape_like(search)}%"
+		ors = [f"{C}.`{f}` LIKE %(like)s" for f in ("title", "contact_name", "phone", "email", "handle")]
+		if len(search) >= MESSAGE_SEARCH_MIN:
+			params["since"] = now_datetime() - timedelta(days=MESSAGE_SEARCH_DAYS)
+			ors.append(
+				f"EXISTS (SELECT 1 FROM `tabDB Message` m WHERE m.`conversation` = {C}.`name` "
+				"AND m.`sent_at` >= %(since)s AND m.`text` LIKE %(like)s)"
+			)
+		conditions.append("(" + " OR ".join(ors) + ")")
+	return conditions, params
+
+
+def _get_row(name, detail=False):
+	fields = ROW_FIELDS + (DETAIL_FIELDS if detail else ())
+	rows = frappe.db.sql(
+		f"SELECT {', '.join(fields)} {FROM} WHERE {C}.`name` = %(name)s", {"name": name}, as_dict=True
+	)
+	return rows[0] if rows else None
+
+
+def _changed(conversation, payload=None):
+	publish(conversation, "conversation", payload or {})
+	return _row(_get_row(conversation))
+
+
+# --- list / counters ----------------------------------------------------------
+
+
+@frappe.whitelist()
+def list_conversations(filters=None, cursor=None, limit=50) -> dict:
+	"""Conversation list, newest activity first, keyset-paged.
+
+	Sort key ``COALESCE(last_message_at, creation)`` desc, then ``name`` desc; the cursor is
+	``{"key", "name"}`` of the last row returned.
+	"""
+	_require_read()
+	user = frappe.session.user
+	filters = _parse(filters) or {}
+	cursor = _parse(cursor)
+	limit = _limit(limit)
+	if not isinstance(filters, dict):
+		frappe.throw(_("Invalid filters"))
+
+	conditions, params = _list_conditions(filters, user)
+	if cursor:
+		if not isinstance(cursor, dict) or not cursor.get("key") or not cursor.get("name"):
+			frappe.throw(_("Invalid cursor"))
+		params["ck"] = get_datetime(cursor["key"])
+		params["cn"] = str(cursor["name"])
+		conditions.append(
+			f"({SORT_KEY} < %(ck)s OR ({SORT_KEY} = %(ck)s AND {C}.`name` < %(cn)s))"
+		)
+	params["n"] = limit + 1
+	where = " AND ".join(conditions) or "1=1"
+	rows = frappe.db.sql(
+		f"SELECT {', '.join(ROW_FIELDS)}, {SORT_KEY} AS _sort_key {FROM} WHERE {where} "
+		f"ORDER BY {SORT_KEY} DESC, {C}.`name` DESC LIMIT %(n)s",
+		params,
+		as_dict=True,
+	)
+	next_cursor = None
+	if len(rows) > limit:
+		rows = rows[:limit]
+		last = rows[-1]
+		next_cursor = {"key": str(last["_sort_key"]), "name": last["name"]}
+	return {"rows": [_row(r) for r in rows], "next_cursor": next_cursor}
+
+
+@frappe.whitelist()
+def counters() -> dict:
+	"""Counts over the Open conversations the user can see."""
+	_require_read()
+	user = frappe.session.user
+	conditions = [f"{C}.`status` = 'Open'"]
+	perm = conversation_query(user)
+	if perm:
+		conditions.append(perm)
+	row = frappe.db.sql(
+		f"""SELECT
+			COALESCE(SUM({C}.`unread_count`), 0),
+			COALESCE(SUM(CASE WHEN {C}.`last_message_direction` = 'in' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN {C}.`assigned_to` = %(me)s THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE({C}.`assigned_to`, '') = '' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN {C}.`needs_human` = 1 THEN 1 ELSE 0 END), 0)
+		FROM {C} WHERE {' AND '.join(conditions)}""",
+		{"me": user},
+	)[0]
+	keys = ("unread_total", "unanswered", "mine", "unassigned", "needs_human")
+	return {k: cint(v) for k, v in zip(keys, row)}
+
+
+# --- one conversation -----------------------------------------------------------
+
+
+@frappe.whitelist()
+def get_conversation(name: str) -> dict:
+	assert_can_access(name)
+	r = _get_row(name, detail=True)
+	data = _row(r)
+	data["channel"] = {
+		"name": r["channel"],
+		"title": data.pop("channel_title"),
+		"channel_type": data.pop("channel_type"),
+		"agent_mode": data.pop("agent_mode"),
+	}
+	data["permissions"] = {"can_assign_any": is_manager()}
+	return data
+
+
+def _message_rows(where, params, order="DESC", limit=None):
+	key = "COALESCE(m.`sent_at`, m.`creation`)"
+	sql = (
+		f"SELECT m.`name`, m.`client_ref`, m.`direction`, m.`author_type`, m.`sent_by`, "
+		f"u.`full_name` AS sent_by_name, m.`text`, m.`sent_at`, m.`delivery_status`, m.`error`, "
+		f"m.`creation`, {key} AS _key "
+		f"FROM `tabDB Message` m LEFT JOIN `tabUser` u ON u.`name` = m.`sent_by` "
+		f"WHERE {where} ORDER BY {key} {order}, m.`creation` {order}, m.`name` {order}"
+	)
+	if limit:
+		sql += " LIMIT %(n)s"
+		params["n"] = limit
+	return frappe.db.sql(sql, params, as_dict=True)
+
+
+def _format_messages(rows):
+	names = tuple(r["name"] for r in rows)
+	attachments = {}
+	if names:
+		for a in frappe.db.sql(
+			"""SELECT `parent`, `file_id`, `filename`, `mime_type`, `media_type`, `size`
+			FROM `tabDB Message Attachment`
+			WHERE `parenttype` = 'DB Message' AND `parent` IN %(names)s ORDER BY `parent`, `idx`""",
+			{"names": names},
+			as_dict=True,
+		):
+			parent = a.pop("parent")
+			attachments.setdefault(parent, []).append(dict(a))
+	out = []
+	for r in rows:
+		raw = r["text"] or ""
+		out.append(
+			{
+				"name": r["name"],
+				"client_ref": r["client_ref"],
+				"direction": r["direction"],
+				"author_type": r["author_type"],
+				"sent_by": r["sent_by"],
+				"sent_by_name": r["sent_by_name"],
+				"html": sanitize_html(raw, always_sanitize=True),
+				"text": _plain(raw),
+				"sent_at": r["sent_at"],
+				"delivery_status": r["delivery_status"],
+				"error": r["error"] if r["delivery_status"] == "failed" else None,
+				"attachments": attachments.get(r["name"], []),
+			}
+		)
+	return out
+
+
+@frappe.whitelist()
+def get_messages(conversation: str, before=None, limit=50) -> dict:
+	"""Messages newest first. Order: ``sent_at`` (``creation`` when unset), then ``creation``,
+	then ``name``; ``next_before`` is ``{"sent_at", "creation", "name"}`` of the last row."""
+	assert_can_access(conversation)
+	before = _parse(before)
+	limit = _limit(limit)
+	params = {"conversation": conversation}
+	where = "m.`conversation` = %(conversation)s"
+	if before:
+		if not isinstance(before, dict) or not before.get("sent_at") or not before.get("name"):
+			frappe.throw(_("Invalid cursor"))
+		key = "COALESCE(m.`sent_at`, m.`creation`)"
+		params.update(
+			{
+				"bk": get_datetime(before["sent_at"]),
+				"bc": get_datetime(before.get("creation") or before["sent_at"]),
+				"bn": str(before["name"]),
+			}
+		)
+		where += (
+			f" AND ({key} < %(bk)s OR ({key} = %(bk)s AND (m.`creation` < %(bc)s "
+			"OR (m.`creation` = %(bc)s AND m.`name` < %(bn)s))))"
+		)
+	rows = _message_rows(where, params, limit=limit + 1)
+	next_before = None
+	if len(rows) > limit:
+		rows = rows[:limit]
+		last = rows[-1]
+		next_before = {"sent_at": str(last["_key"]), "creation": str(last["creation"]), "name": last["name"]}
+	return {"rows": _format_messages(rows), "next_before": next_before}
+
+
+@frappe.whitelist()
+def get_messages_by_name(conversation: str, names=None) -> list:
+	"""Rows for ``names`` (realtime refresh). Every name must belong to ``conversation``."""
+	assert_can_access(conversation)
+	names = _parse(names) or []
+	if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+		frappe.throw(_("Invalid message names"))
+	if not names:
+		return []
+	wanted = set(names)
+	rows = _message_rows(
+		"m.`conversation` = %(conversation)s AND m.`name` IN %(names)s",
+		{"conversation": conversation, "names": tuple(wanted)},
+	)
+	if {r["name"] for r in rows} != wanted:
+		frappe.throw(_("Message does not belong to this conversation"), frappe.PermissionError)
+	return _format_messages(rows)
+
+
+@frappe.whitelist()
+def get_drafts(conversation: str) -> list:
+	"""Pending AI drafts, newest first. ``truncated``: DialogBrain cut the text (webhook
+	``draft.created`` at 500 chars; ``agents.list_drafts`` at 300 + "...")."""
+	assert_can_access(conversation)
+	rows = frappe.db.sql(
+		"""SELECT `name`, `draft_id`, `text`, `created_at` FROM `tabDB Draft`
+		WHERE `conversation` = %(conversation)s AND `status` = 'pending'
+		ORDER BY COALESCE(`created_at`, `creation`) DESC, `creation` DESC, `name` DESC""",
+		{"conversation": conversation},
+		as_dict=True,
+	)
+	for r in rows:
+		text = r["text"] or ""
+		r["truncated"] = len(text) == DRAFT_WEBHOOK_LIMIT or (
+			len(text) >= DRAFT_LIST_LIMIT and text.endswith("...")
+		)
+	return [dict(r) for r in rows]
+
+
+# --- actions -------------------------------------------------------------------
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_read(conversation: str) -> dict:
+	assert_can_access(conversation)
+	frappe.db.set_value("DB Conversation", conversation, "unread_count", 0)
+	return _changed(conversation, {"unread_count": 0})
+
+
+@frappe.whitelist(methods=["POST"])
+def assign(conversation: str, user: "str | None" = None) -> dict:
+	"""Assign (or with ``user`` empty, unassign).
+
+	Chat Agent: only to themself, and only when unassigned or already theirs; may unassign
+	only their own. Chat Manager / System Manager: anyone, or nobody. The target must be a
+	user permitted on the conversation's channel.
+	"""
+	assert_can_access(conversation)
+	me = frappe.session.user
+	user = user or None
+	current = frappe.db.get_value("DB Conversation", conversation, ["assigned_to", "channel"], as_dict=True)
+	if not is_manager(me):
+		if user and user != me:
+			frappe.throw(_("You can only assign conversations to yourself"), frappe.PermissionError)
+		if user is None and current.assigned_to != me:
+			frappe.throw(_("You can only unassign your own conversations"), frappe.PermissionError)
+		if user and current.assigned_to and current.assigned_to != me:
+			frappe.throw(_("This conversation is assigned to someone else"), frappe.PermissionError)
+	if user and user not in permitted_users(current.channel):
+		frappe.throw(_("{0} cannot be assigned to this conversation").format(user))
+	if (current.assigned_to or None) != user:
+		frappe.db.set_value("DB Conversation", conversation, "assigned_to", user)
+	return _changed(conversation, {"assigned_to": user})
+
+
+@frappe.whitelist(methods=["POST"])
+def set_status(conversation: str, status: str) -> dict:
+	"""Close (``closed_at`` = now, ``needs_human`` cleared) or reopen (``opened_at`` = now,
+	``closed_at`` cleared)."""
+	assert_can_access(conversation)
+	if status not in ("Open", "Closed"):
+		frappe.throw(_("Invalid status"))
+	current = frappe.db.get_value("DB Conversation", conversation, "status")
+	if current == status:
+		return _row(_get_row(conversation))
+	if status == "Closed":
+		updates = {"status": "Closed", "closed_at": now_datetime(), "needs_human": 0}
+	else:
+		updates = {"status": "Open", "opened_at": now_datetime(), "closed_at": None}
+	frappe.db.set_value("DB Conversation", conversation, updates)
+	payload = {"status": status}
+	if status == "Closed":
+		payload["needs_human"] = 0
+	return _changed(conversation, payload)

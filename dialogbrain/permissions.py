@@ -25,6 +25,12 @@ from frappe import _
 SEE_ALL_ROLES = ("System Manager", "Chat Manager")
 
 
+def is_manager(user=None) -> bool:
+	"""True for roles that see every channel and may assign anyone (``SEE_ALL_ROLES``)."""
+	user = user or frappe.session.user
+	return bool(set(frappe.get_roles(user)) & set(SEE_ALL_ROLES))
+
+
 def allowed_channels(user):
 	"""Channel names the user may access, or None meaning all channels."""
 	user = user or frappe.session.user
