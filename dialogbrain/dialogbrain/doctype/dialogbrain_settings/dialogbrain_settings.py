@@ -5,9 +5,12 @@ from frappe.model.document import Document
 class DialogBrainSettings(Document):
 	def onload(self):
 		from dialogbrain.setup.connect import scheduler_warning
+		from dialogbrain.setup.oauth import pop_result
 
 		# shown by the form whenever network_mode is (or is switched to) private
 		self.set_onload("scheduler_warning", scheduler_warning("private"))
+		# outcome of a "Connect with DialogBrain" (OAuth) round trip, shown once
+		self.set_onload("oauth_result", pop_result(frappe.session.user))
 
 	def validate(self):
 		if self.flags.dialogbrain_server_write:

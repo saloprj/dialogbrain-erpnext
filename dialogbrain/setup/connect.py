@@ -49,6 +49,9 @@ SERVER_FIELDS = (
 	"reconcile_status",
 	"backfill_status",
 	"connected",
+	"oauth_client_id",
+	"oauth_redirect_uri",
+	"oauth_base_url",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
@@ -156,7 +159,13 @@ def configure_webhook(doc, mode: str, client=None, hooks=None) -> None:
 @frappe.whitelist(methods=["POST"])
 def connect() -> dict:
 	frappe.only_for(ROLE)
-	doc = frappe.get_single(SETTINGS)
+	return _connect(frappe.get_single(SETTINGS))
+
+
+def _connect(doc) -> dict:
+	"""Verify the stored key, mirror channels, set up the webhook and start the backfill.
+
+	Shared by ``connect`` (pasted key) and the OAuth callback; the caller checks the role."""
 	mode = doc.network_mode or "public"
 	if mode == "public":
 		webhook_url(doc)
