@@ -31,7 +31,9 @@ def _conv(thread_id, unread, channel="patch-ch", **kw):
 	)
 
 
-def _msg(conversation, db_id, minutes, direction="in", author_type=None, delivery_status=None):
+def _msg(conversation, db_id, minutes, direction="in", author_type=None, delivery_status=None, imported=False):
+	"""A row mirrored live (stored a few seconds after it was sent) or, ``imported``, by a
+	history import long after."""
 	doc = frappe.get_doc(
 		{
 			"doctype": "DB Message",
@@ -45,6 +47,8 @@ def _msg(conversation, db_id, minutes, direction="in", author_type=None, deliver
 	).insert(ignore_permissions=True)
 	if delivery_status is not None:  # bypass the doctype default, like rows stored before the fix
 		frappe.db.set_value("DB Message", doc.name, "delivery_status", delivery_status)
+	stored = doc.sent_at + (timedelta(days=3) if imported else timedelta(seconds=5))
+	frappe.db.sql("update `tabDB Message` set creation = %s where name = %s", (stored, doc.name))
 	return doc.name
 
 
@@ -55,8 +59,8 @@ class TestPatches(DialogBrainTestCase):
 			frappe.db.delete(dt)
 
 	def test_recompute_unread_counts(self):
-		"""F1: last message outgoing -> 0; else inbound non-system after the last outgoing,
-		never more than the stored count."""
+		"""F1: last message outgoing -> 0; else live-mirrored inbound non-system messages
+		after the last outgoing, never more than the stored count."""
 		from dialogbrain.patches.v0_1.recompute_unread_counts import execute
 
 		answered = _conv("p1", 17763)
@@ -80,6 +84,11 @@ class TestPatches(DialogBrainTestCase):
 		_msg(seeded_lower, "d2", 2)
 		_msg(seeded_lower, "d3", 3)
 
+		history = _conv("p4h", 8443)  # a group whose history was imported, never answered
+		for i in range(5):
+			_msg(history, f"h{i}", i, imported=True)
+		_msg(history, "h-live", 10)
+
 		execute()
 		execute()  # idempotent
 
@@ -88,6 +97,7 @@ class TestPatches(DialogBrainTestCase):
 		self.assertEqual(get(waiting), 2)
 		self.assertEqual(get(never_answered), 2)
 		self.assertEqual(get(seeded_lower), 1)
+		self.assertEqual(get(history), 1)  # imported history is not unread, the live one is
 
 	def test_clear_inbound_delivery_status(self):
 		"""F4: inbound rows stored with the old Select default "pending" are cleared;
