@@ -13,8 +13,10 @@ Streaming: the method returns a werkzeug ``Response`` over a chunk generator
 (``direct_passthrough``); Frappe's handler passes it through and ``sync_database`` rolls back
 the (GET) transaction before the WSGI server iterates it, so the generator touches no
 frappe state. The upstream ``requests`` response stays open until the generator is consumed,
-and is closed in ``finally`` (or by ``call_on_close`` if the body is never iterated).
+and is closed in the generator's ``finally``.
 """
+
+from urllib.parse import quote
 
 import requests
 import frappe
@@ -26,7 +28,16 @@ from dialogbrain.permissions import assert_can_access
 
 MEDIA_MAX_BYTES = 50 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
-INLINE_PREFIXES = ("image/", "audio/", "video/")
+# Served inline only when the normalized mime is on this list; everything else (svg, html,
+# xml, text/*, malformed types) is a download, so it can never run script on our origin.
+INLINE_MIMES = frozenset(
+	(
+		"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
+		"audio/mpeg", "audio/ogg", "audio/wav", "audio/webm", "audio/aac", "audio/mp4",
+		"audio/x-m4a",
+		"video/mp4", "video/webm", "video/ogg", "video/quicktime",
+	)
+)
 
 
 class MediaTooLarge(frappe.ValidationError):
@@ -35,6 +46,9 @@ class MediaTooLarge(frappe.ValidationError):
 
 class MediaBadGateway(frappe.ValidationError):
 	http_status_code = 502
+	# Frappe's error snapshot would record frame locals and the chained exception, which
+	# carry the presigned URL.
+	skip_error_log = True
 
 
 def _bad_gateway():
@@ -44,6 +58,30 @@ def _bad_gateway():
 def _safe_filename(name):
 	name = (name or "file").replace("\r", " ").replace("\n", " ").replace('"', "'")
 	return name.encode("latin-1", "replace").decode("latin-1") or "file"
+
+
+def _disposition(kind, filename):
+	return f"{kind}; filename=\"{_safe_filename(filename)}\"; filename*=UTF-8''{quote(filename or 'file', safe='')}"
+
+
+def _open_upstream(file_id, numeric_id):
+	"""Resolve the URL and open the stream. Returns None on any failure; the URL never
+	leaves this frame (the caller raises outside any except block)."""
+	try:
+		data = DialogBrainClient.from_settings().execute("files.info", {"file_ids": [numeric_id]})
+		files = data.get("files") if isinstance(data, dict) else None
+		if not isinstance(files, list):
+			return None
+		url = next(
+			(f.get("download_url") for f in files
+			 if isinstance(f, dict) and str(f.get("file_id")) == file_id),
+			None,
+		)
+		if not url:
+			return None
+		return requests.get(url, stream=True, timeout=30)
+	except (DialogBrainError, requests.RequestException):
+		return None
 
 
 @frappe.whitelist(methods=["GET"])
@@ -67,14 +105,8 @@ def get(message, file_id):
 	except ValueError:
 		frappe.throw(_("Invalid file id"), frappe.PermissionError)
 
-	try:
-		data = DialogBrainClient.from_settings().execute("files.info", {"file_ids": [numeric_id]})
-		files = (data or {}).get("files") or []
-		url = next((f.get("download_url") for f in files if str(f.get("file_id")) == file_id), None)
-		if not url:
-			raise DialogBrainError("no download url")
-		upstream = requests.get(url, stream=True, timeout=30)
-	except (DialogBrainError, requests.RequestException):
+	upstream = _open_upstream(file_id, numeric_id)
+	if upstream is None:
 		_bad_gateway()
 
 	try:
@@ -91,11 +123,14 @@ def get(message, file_id):
 		raise
 
 	mime = att.mime_type or upstream.headers.get("Content-Type") or "application/octet-stream"
-	disposition = "inline" if mime.lower().startswith(INLINE_PREFIXES) else "attachment"
+	normalized = mime.split(";", 1)[0].strip().lower()
+	kind = "inline" if normalized in INLINE_MIMES else "attachment"
 	headers = {
 		"Content-Type": mime,
 		"Cache-Control": "private, max-age=300",
-		"Content-Disposition": f'{disposition}; filename="{_safe_filename(att.filename)}"',
+		"Content-Disposition": _disposition(kind, att.filename),
+		"X-Content-Type-Options": "nosniff",
+		"Content-Security-Policy": "sandbox; default-src 'none'",
 	}
 	if length:
 		headers["Content-Length"] = str(length)
@@ -113,6 +148,4 @@ def get(message, file_id):
 		finally:
 			upstream.close()
 
-	response = Response(stream(), headers=headers, direct_passthrough=True)
-	response.call_on_close(upstream.close)
-	return response
+	return Response(stream(), headers=headers, direct_passthrough=True)

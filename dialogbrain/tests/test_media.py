@@ -153,3 +153,49 @@ class TestMedia(DialogBrainTestCase):
 		c.from_settings.return_value.execute.return_value = {"files": [], "not_found": [42]}
 		with patch(CLIENT, c):
 			self.assertRaises(media.MediaBadGateway, media.get, self.msg_a, "42")
+
+	def test_dangerous_types_are_attachments_with_hardening_headers(self):
+		frappe.set_user(self.agent_a)
+		for i, mime in enumerate(("image/svg+xml", "text/html", "image/ png", "application/xml",
+								  "image/png; charset=x", "IMAGE/PNG")):
+			fid = str(60 + i)
+			msg = _att_msg(self.conv_a, fid, mime=mime, filename="x.bin")
+			with patch(CLIENT, _client(file_id=int(fid))), patch(REQUESTS_GET, return_value=_upstream()):
+				resp = media.get(msg, fid)
+			expect = "inline" if mime in ("image/png; charset=x", "IMAGE/PNG") else "attachment"
+			self.assertTrue(resp.headers["Content-Disposition"].startswith(expect), mime)
+			self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
+			self.assertEqual(resp.headers["Content-Security-Policy"], "sandbox; default-src 'none'")
+
+	def test_unicode_filename(self):
+		msg = _att_msg(self.conv_a, "70", mime="application/pdf", filename="Договор.pdf")
+		frappe.set_user(self.agent_a)
+		with patch(CLIENT, _client(file_id=70)), patch(REQUESTS_GET, return_value=_upstream()):
+			resp = media.get(msg, "70")
+		self.assertIn("filename*=UTF-8''%D0%94%D0%BE%D0%B3%D0%BE%D0%B2%D0%BE%D1%80.pdf",
+					  resp.headers["Content-Disposition"])
+
+	def test_bad_files_info_shape_is_502(self):
+		frappe.set_user(self.agent_a)
+		for data in (None, [], "x", {"files": "x"}, {"files": [None]}):
+			c = MagicMock()
+			c.from_settings.return_value.execute.return_value = data
+			with patch(CLIENT, c):
+				self.assertRaises(media.MediaBadGateway, media.get, self.msg_a, "42")
+
+	def test_502_has_no_context_and_no_error_log(self):
+		import requests
+
+		frappe.set_user(self.agent_a)
+		before = frappe.db.count("Error Log")
+		with patch(CLIENT, _client()), patch(
+			REQUESTS_GET, side_effect=requests.ConnectionError(f"x {SECRET_URL}")):
+			with self.assertRaises(media.MediaBadGateway) as cm:
+				media.get(self.msg_a, "42")
+		exc = cm.exception
+		self.assertTrue(exc.__context__ is None or exc.__suppress_context__)
+		self.assertNotIn("SECRETSIG", repr(exc.__context__))
+		self.assertTrue(media.MediaBadGateway.skip_error_log)
+		from frappe.utils.error import log_error_snapshot
+		log_error_snapshot(exc)
+		self.assertEqual(frappe.db.count("Error Log"), before)
