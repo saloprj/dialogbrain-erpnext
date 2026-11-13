@@ -88,12 +88,16 @@ def _existing_reply(client_ref, conversation, user):
 	return {"name": row.name, "delivery_status": row.delivery_status}
 
 
-def _auto_assign(conversation, user):
+def _auto_assign(conversation, user) -> bool:
+	"""Assign an unassigned conversation to the replying user; True when it did."""
+	if frappe.db.get_value("DB Conversation", conversation, "assigned_to"):
+		return False
 	frappe.db.sql(
 		"""UPDATE `tabDB Conversation` SET assigned_to = %s
 		WHERE name = %s AND (assigned_to IS NULL OR assigned_to = '')""",
 		(user, conversation),
 	)
+	return frappe.db.get_value("DB Conversation", conversation, "assigned_to") == user
 
 
 def deliver_job_id(message_name: str) -> str:
@@ -175,7 +179,9 @@ def create_reply(conversation, text, client_ref, file_urls=None, user=None) -> d
 			raise frappe.DuplicateEntryError("DB Message", client_ref)
 		return existing
 
-	_auto_assign(conversation, user)
+	if _auto_assign(conversation, user):
+		# the open conversation's header (assignee) refreshes on `conversation`
+		publish(conversation, "conversation", {})
 	publish(conversation, "message", {"message": doc.name, "direction": "out"})
 	_enqueue(doc.name)
 	return {"name": doc.name, "delivery_status": doc.delivery_status}
