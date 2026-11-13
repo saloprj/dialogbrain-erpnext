@@ -1,7 +1,9 @@
-"""OAuth 2.1 (authorization code + PKCE, public client) helpers for connecting to DialogBrain.
+"""OAuth 2.1 (authorization code + PKCE, public client) connect to DialogBrain.
 
-Pure protocol functions: no Frappe document access. Secrets (authorization code, PKCE
-verifier, returned API key) never appear in error messages.
+The protocol helpers (``discover`` … ``redirect_allowed``) are pure functions with no
+Frappe document access. ``start`` / ``callback`` / ``pop_result`` drive the flow from the
+DialogBrain Settings form. Secrets (authorization code, PKCE verifier, returned API key)
+never appear in a URL ERPNext builds, an error message, a log or a stored result.
 """
 
 import base64
@@ -10,14 +12,23 @@ import re
 import secrets
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+import frappe
 import requests
+from frappe import _
 
-from dialogbrain.client import DialogBrainError
+from dialogbrain.client import DialogBrainError, mask
 
 TIMEOUT = 20
 KEY_PREFIX = "db_"
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 _ERROR_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+CALLBACK_PATH = "/api/method/dialogbrain.setup.oauth.callback"
+SETTINGS_PATH = "/app/dialogbrain-settings"
+STATE_TTL = 600
+RESULT_TTL = 600
+ISSUER_CONF = "dialogbrain_oauth_issuer"
+_STATE = re.compile(r"^[A-Za-z0-9_\-]{16,128}$")
 
 
 def _scrub(text, *secrets_):
@@ -137,3 +148,170 @@ def redirect_allowed(uri: str) -> bool:
 	if parts.scheme == "https":
 		return bool(host)
 	return parts.scheme == "http" and host in LOOPBACK_HOSTS
+
+
+# --- flow (DialogBrain Settings) ----------------------------------------------------
+
+
+def _state_key(state: str) -> str:
+	return f"dialogbrain:oauth:{state}"
+
+
+def _result_key(user: str) -> str:
+	return f"dialogbrain:oauth_result:{user}"
+
+
+@frappe.whitelist(methods=["POST"])
+def start() -> dict:
+	"""Begin "Connect with DialogBrain": returns the DialogBrain consent URL to open."""
+	from dialogbrain.setup import connect as conn
+
+	frappe.only_for(conn.ROLE)
+	doc = frappe.get_single(conn.SETTINGS)
+	if not doc.base_url:
+		frappe.throw(_("Set the DialogBrain base URL first"))
+	redirect_uri = frappe.utils.get_url(CALLBACK_PATH)
+	if not redirect_allowed(redirect_uri):
+		frappe.throw(
+			_('Sign-in with DialogBrain needs an https site address. Use "Connect with API key" instead.')
+		)
+	meta = discover(doc.base_url)
+	issuer = frappe.conf.get(ISSUER_CONF) or meta.get("issuer")
+	if not issuer:
+		raise DialogBrainError("DialogBrain OAuth metadata is missing issuer")
+
+	client_id = doc.oauth_client_id
+	if not client_id or doc.oauth_redirect_uri != redirect_uri:
+		host = urlparse(redirect_uri).hostname
+		client_id = register_client(meta["registration_endpoint"], redirect_uri, f"ERPNext — {host}")
+		doc.oauth_client_id = client_id
+		doc.oauth_redirect_uri = redirect_uri
+		conn._server_save(doc)
+
+	verifier, challenge = pkce_pair()
+	state = secrets.token_urlsafe(32)
+	entry = {
+		"user": frappe.session.user,
+		"verifier": verifier,
+		"redirect_uri": redirect_uri,
+		"client_id": client_id,
+		"token_endpoint": meta["token_endpoint"],
+		"issuer": issuer,
+	}
+	frappe.cache().set_value(_state_key(state), entry, expires_in_sec=STATE_TTL)
+	return {"authorize_url": authorize_url(meta["authorization_endpoint"], client_id, redirect_uri, state, challenge)}
+
+
+def _claim(state) -> "dict | None":
+	"""Read the pending entry for ``state`` and consume it; only one caller ever wins."""
+	if not isinstance(state, str) or not _STATE.match(state):
+		return None
+	cache = frappe.cache()
+	key = _state_key(state)
+	entry = cache.get_value(key, expires=True)
+	if not entry:
+		return None
+	# raw Redis DEL returns how many keys it removed: exactly one concurrent caller gets 1
+	if cache.delete(cache.make_key(key)) != 1:
+		return None
+	return entry
+
+
+def _store_result(user: str, ok: bool, message: str, **extra) -> None:
+	result = {"ok": ok, "message": message}
+	result.update(extra)
+	frappe.cache().set_value(_result_key(user), result, expires_in_sec=RESULT_TTL)
+
+
+def _refuse(user: str, message: str) -> None:
+	_store_result(user, False, message)
+
+
+def _safe_message(exc, *secret_values) -> str:
+	text = str(exc) or type(exc).__name__
+	for s in secret_values:
+		if s:
+			text = text.replace(s, mask(s) if s.startswith(KEY_PREFIX) else "…")
+	return text[:300]
+
+
+def _redirect(location: str) -> None:
+	frappe.local.response["type"] = "redirect"
+	frappe.local.response["location"] = location
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
+	"""DialogBrain redirects the admin's browser here. Every outcome is a redirect."""
+	from urllib.parse import quote
+
+	from dialogbrain.setup import connect as conn
+
+	user = frappe.session.user
+	if user == "Guest":
+		# session expired during consent: log in and come back; the state stays unclaimed
+		_redirect("/login?redirect-to=" + quote(frappe.request.full_path, safe=""))
+		return
+	_redirect(SETTINGS_PATH)
+
+	entry = _claim(state)
+	if not entry:
+		return _refuse(user, _("DialogBrain sign-in failed: the request expired or was already used. Try again."))
+	if entry.get("user") != user:
+		return _refuse(user, _("DialogBrain sign-in was started by another user. Try again."))
+	if conn.ROLE not in frappe.get_roles():
+		return _refuse(user, _("Only a System Manager can connect DialogBrain."))
+	if error:
+		return _refuse(user, _("DialogBrain sign-in was cancelled or refused: {0}").format(str(error)[:100]))
+	if not iss or iss != entry.get("issuer"):
+		return _refuse(user, _("DialogBrain sign-in failed: unexpected issuer. Try again."))
+	if not code:
+		return _refuse(user, _("DialogBrain sign-in failed: no authorization code. Try again."))
+
+	verifier = entry.get("verifier")
+	key = None
+	try:
+		key = exchange_code(entry["token_endpoint"], code, verifier, entry["client_id"], entry["redirect_uri"])
+		doc = frappe.get_single(conn.SETTINGS)
+		doc.api_key = key
+		filled = {}
+		if (doc.network_mode or "public") == "public" and not doc.public_site_url:
+			doc.public_site_url = frappe.utils.get_url()
+			filled["public_site_url_filled"] = doc.public_site_url
+		conn._server_save(doc)
+		# a GET request is rolled back unless asked to commit: keep the key (and, if it
+		# works, the connection) even when Connect itself fails below
+		frappe.local.flags.commit = True
+		frappe.db.savepoint("dialogbrain_oauth_connect")
+		try:
+			res = conn._connect(doc)
+		except Exception:
+			frappe.db.rollback(save_point="dialogbrain_oauth_connect")
+			raise
+		_store_result(
+			user,
+			True,
+			_("Connected to DialogBrain workspace {0}").format(res.get("workspace") or ""),
+			**res,
+			**filled,
+		)
+	except (DialogBrainError, frappe.ValidationError) as exc:
+		_refuse(user, _safe_message(exc, key, code, verifier))
+	except Exception:  # noqa: BLE001 — every outcome must end in a redirect, never an error page
+		frappe.log_error(
+			title="DialogBrain OAuth callback failed",
+			message=_scrub(frappe.get_traceback(), key, code, verifier),
+		)
+		_refuse(user, _("DialogBrain sign-in failed unexpectedly. See the Error Log."))
+	finally:
+		frappe.clear_messages()
+
+
+def pop_result(user: str) -> "dict | None":
+	"""The last OAuth outcome for ``user`` (read once): ``{ok, message, workspace?, …}``."""
+	cache = frappe.cache()
+	key = _result_key(user)
+	result = cache.get_value(key, expires=True)
+	if result is not None:
+		cache.delete_value(key)
+	return result
