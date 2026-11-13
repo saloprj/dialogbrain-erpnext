@@ -29,6 +29,9 @@ bench set-config -g scheduler_tick_interval 60
 # Browser-facing API host for the OAuth issuer check (containers reach DialogBrain via
 # host.docker.internal, but DialogBrain derives `issuer` from the request Host).
 bench --site frontend set-config dialogbrain_oauth_issuer http://localhost:8000
+# frappe_docker's nginx drops the :8080 port from the Host it forwards, so without this
+# get_url() (the OAuth redirect URI, the webhook address) points at http://localhost.
+bench --site frontend set-config host_name http://localhost:8080
 
 # 5. install app + migrate
 for site in test.localhost frontend; do
