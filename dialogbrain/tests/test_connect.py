@@ -393,12 +393,20 @@ class TestSchedulerTickWarning(DialogBrainTestCase):
 	def _get(self, field):
 		return frappe.db.get_single_value(SETTINGS, field)
 
-	def _tick(self, value):
+	def _tick(self, value, site_value=None):
+		"""``value`` in common_site_config.json (what ``bench schedule`` reads at start);
+		``site_value`` in the site config (which the scheduler never reads)."""
+		common = {} if value is None else {"scheduler_tick_interval": value}
 		conf = dict(frappe.local.conf)
 		conf.pop("scheduler_tick_interval", None)
-		if value is not None:
-			conf["scheduler_tick_interval"] = value
-		return patch.object(frappe.local, "conf", frappe._dict(conf))
+		if site_value is not None:
+			conf["scheduler_tick_interval"] = site_value
+		from contextlib import ExitStack
+
+		stack = ExitStack()
+		stack.enter_context(patch.object(frappe, "get_common_site_config", return_value=frappe._dict(common)))
+		stack.enter_context(patch.object(frappe.local, "conf", frappe._dict(conf)))
+		return stack
 
 	def test_effective_tick_default_follows_frappe(self):
 		from dialogbrain.setup.connect import scheduler_tick
@@ -417,17 +425,42 @@ class TestSchedulerTickWarning(DialogBrainTestCase):
 
 		with self._tick(240):
 			text = scheduler_warning("private")
-			self.assertIn(f"bench --site {frappe.local.site} set-config scheduler_tick_interval 60", text)
+			self.assertIn("bench set-config -g scheduler_tick_interval 60", text)
+			self.assertIn("restart", text)
+			self.assertNotIn("--site", text)
 			self.assertIsNone(scheduler_warning("public"))
 		with self._tick(60):
 			self.assertIsNone(scheduler_warning("private"))
+
+	def test_site_config_value_does_not_silence_the_warning(self):
+		"""R15a: ``bench schedule`` runs without a site and reads only common_site_config."""
+		from dialogbrain.setup.connect import scheduler_tick, scheduler_warning
+
+		with self._tick(None, site_value=60):
+			self.assertEqual(scheduler_tick(), self._frappe_default())
+			if self._frappe_default() > 60:
+				self.assertIn("scheduler_tick_interval 60", scheduler_warning("private"))
+		with self._tick(240, site_value=60):
+			self.assertEqual(scheduler_tick(), 240)
+			self.assertIn("scheduler_tick_interval 60", scheduler_warning("private"))
+		with self._tick(60, site_value=240):
+			self.assertEqual(scheduler_tick(), 60)
+			self.assertIsNone(scheduler_warning("private"))
+
+	@staticmethod
+	def _frappe_default():
+		try:
+			from frappe.utils.scheduler import DEFAULT_SCHEDULER_TICK
+		except ImportError:
+			return 60
+		return int(DEFAULT_SCHEDULER_TICK)
 
 	def test_connect_and_set_network_mode_return_the_warning(self):
 		frappe.db.set_single_value(SETTINGS, "network_mode", "private")
 		client = _fake_client()
 		with self._tick(240):
 			result, _ = self._call("connect", client)
-			self.assertIn("scheduler_tick_interval 60", result["warning"])
+			self.assertIn("bench set-config -g scheduler_tick_interval 60", result["warning"])
 			result, _ = self._call("set_network_mode", client, "public")
 			self.assertIsNone(result["warning"])
 			result, _ = self._call("set_network_mode", client, "private")

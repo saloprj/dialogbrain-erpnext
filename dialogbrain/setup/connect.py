@@ -60,11 +60,14 @@ PRIVATE_STATUS = "private mode: no webhook (reconcile polls every minute)"
 
 
 def scheduler_tick() -> int:
-	"""Seconds between scheduler ticks: ``scheduler_tick_interval`` from the site/common
-	config, else the Frappe default (240 s on v16, 60 s on v15)."""
+	"""Seconds between scheduler ticks as ``bench schedule`` sees them (R15a).
+
+	The scheduler runs without a site and reads ``scheduler_tick_interval`` only from
+	common_site_config.json, once at start; a per-site value has no effect. Absent there:
+	the Frappe default (240 s on v16, 60 s on v15)."""
 	from frappe.utils import cint
 
-	configured = cint(frappe.conf.get("scheduler_tick_interval"))
+	configured = cint((frappe.get_common_site_config() or {}).get("scheduler_tick_interval"))
 	if configured:
 		return configured
 	try:
@@ -76,14 +79,15 @@ def scheduler_tick() -> int:
 
 def scheduler_warning(mode: str) -> "str | None":
 	"""Private mode polls DialogBrain every minute, which needs a 60 s scheduler tick. The
-	app does not edit site config; it names the command for the admin."""
+	app does not edit config; it names the commands for the admin."""
 	tick = scheduler_tick()
 	if mode != "private" or tick <= 60:
 		return None
 	return _(
 		"The scheduler runs every {0} s, so private mode picks up new messages only every {0} s"
-		" instead of every minute. Run: {1}"
-	).format(tick, f"bench --site {frappe.local.site} set-config scheduler_tick_interval 60")
+		" instead of every minute. Run: {1}, then restart the scheduler ({2}, or restart the"
+		" scheduler process/container)."
+	).format(tick, "bench set-config -g scheduler_tick_interval 60", "bench restart")
 
 
 # --- helpers --------------------------------------------------------------------
