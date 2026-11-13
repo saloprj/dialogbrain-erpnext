@@ -670,6 +670,25 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(_logs(name), [])
 		self.assertFalse([c for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")])
 
+	def test_silent_inbound_does_not_count_unread(self):
+		"""F1: re-emitted history (``skip_push``) is not something the manager has to read."""
+		from dialogbrain.sync.processor import process_event
+
+		data = _data(INBOUND, db_id="1")
+		data["skip_push"] = True
+		process_event("message.received", data)
+		name = _conv_by_thread("1001")
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "unread_count"), 0)
+		_process(INBOUND)  # a live inbound still counts
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "unread_count"), 1)
+
+	def test_system_event_does_not_count_unread(self):
+		"""F1: a system event (joined / left / call placeholder) is not unread."""
+		_process(INBOUND, db_id="2", is_system_event=True)
+		name = _conv_by_thread("1001")
+		self.assertEqual(_msg("2").author_type, "system")
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "unread_count"), 0)
+
 	def test_silent_upsert_publishes_nothing(self):
 		from dialogbrain.sync.upsert import (
 			apply_message_counters,

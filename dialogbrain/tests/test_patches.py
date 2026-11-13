@@ -1,0 +1,90 @@
+from datetime import datetime, timedelta
+
+import frappe
+
+from dialogbrain.tests.utils import DialogBrainTestCase
+
+T0 = datetime(2026, 11, 1, 10, 0, 0)
+
+
+def _channel(account_id="patch-ch", channel_type="telegram"):
+	if not frappe.db.exists("DB Channel", account_id):
+		frappe.get_doc({"doctype": "DB Channel", "account_id": account_id, "channel_type": channel_type}).insert(
+			ignore_permissions=True
+		)
+	return account_id
+
+
+def _conv(thread_id, unread, channel="patch-ch", **kw):
+	return (
+		frappe.get_doc(
+			{
+				"doctype": "DB Conversation",
+				"thread_id": thread_id,
+				"channel": _channel(channel),
+				"unread_count": unread,
+				**kw,
+			}
+		)
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
+def _msg(conversation, db_id, minutes, direction="in", author_type=None, delivery_status=None):
+	doc = frappe.get_doc(
+		{
+			"doctype": "DB Message",
+			"conversation": conversation,
+			"db_id": db_id,
+			"direction": direction,
+			"author_type": author_type or ("customer" if direction == "in" else "manager"),
+			"sent_at": T0 + timedelta(minutes=minutes),
+			"text": db_id,
+		}
+	).insert(ignore_permissions=True)
+	if delivery_status is not None:  # bypass the doctype default, like rows stored before the fix
+		frappe.db.set_value("DB Message", doc.name, "delivery_status", delivery_status)
+	return doc.name
+
+
+class TestPatches(DialogBrainTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		for dt in ("DB Draft", "DB Message Attachment", "DB Message", "DB Conversation", "DB Channel User", "DB Channel"):
+			frappe.db.delete(dt)
+
+	def test_recompute_unread_counts(self):
+		"""F1: last message outgoing -> 0; else inbound non-system after the last outgoing,
+		never more than the stored count."""
+		from dialogbrain.patches.v0_1.recompute_unread_counts import execute
+
+		answered = _conv("p1", 17763)
+		_msg(answered, "a1", 1)
+		_msg(answered, "a2", 2)
+		_msg(answered, "a3", 3, direction="out")
+
+		waiting = _conv("p2", 500)
+		_msg(waiting, "b1", 1)
+		_msg(waiting, "b2", 2, direction="out")
+		_msg(waiting, "b3", 3)
+		_msg(waiting, "b4", 4, author_type="system")
+		_msg(waiting, "b5", 5)
+
+		never_answered = _conv("p3", 40)
+		_msg(never_answered, "c1", 1)
+		_msg(never_answered, "c2", 2)
+
+		seeded_lower = _conv("p4", 1)  # backfill seeded DialogBrain's count: keep it
+		_msg(seeded_lower, "d1", 1)
+		_msg(seeded_lower, "d2", 2)
+		_msg(seeded_lower, "d3", 3)
+
+		execute()
+		execute()  # idempotent
+
+		get = lambda n: frappe.db.get_value("DB Conversation", n, "unread_count")  # noqa: E731
+		self.assertEqual(get(answered), 0)
+		self.assertEqual(get(waiting), 2)
+		self.assertEqual(get(never_answered), 2)
+		self.assertEqual(get(seeded_lower), 1)

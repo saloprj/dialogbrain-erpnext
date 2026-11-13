@@ -500,7 +500,7 @@ def _update_message(name, parsed, *, silent, extra=None):
 
 def apply_message_counters(conversation: str, message_name: str, *, silent: bool = False) -> None:
 	msg = frappe.db.get_value(
-		"DB Message", message_name, ["direction", "text", "sent_at"], as_dict=True
+		"DB Message", message_name, ["direction", "author_type", "text", "sent_at"], as_dict=True
 	)
 	conv = frappe.db.get_value(
 		"DB Conversation",
@@ -531,7 +531,10 @@ def apply_message_counters(conversation: str, message_name: str, *, silent: bool
 
 	first_inbound = False
 	if inbound:
-		updates["unread_count"] = (conv.unread_count or 0) + 1
+		# Unread = what a manager still has to read: not re-emitted/imported history
+		# (``silent``) and not system events (joined, left, call placeholders).
+		if not silent and msg.author_type != "system":
+			updates["unread_count"] = (conv.unread_count or 0) + 1
 		if sent_at and (not conv.last_inbound_at or sent_at > get_datetime(conv.last_inbound_at)):
 			updates["last_inbound_at"] = sent_at
 		closed_before = conv.closed_at and sent_at and sent_at < get_datetime(conv.closed_at)
