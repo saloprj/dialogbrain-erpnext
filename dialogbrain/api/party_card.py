@@ -4,6 +4,10 @@ Order / invoice data is ERPNext data: it is shown only to users who hold read ac
 Sales Order / Sales Invoice (``frappe.get_list`` raises PermissionError otherwise, so the
 check happens first). ``has_access`` tells the UI what to hide.
 
+``stats`` is ``{orders_count, totals: [{currency, total, count}, ...]}``: submitted Sales
+Orders grouped by currency (a sum across currencies would be meaningless), largest total
+first.
+
 Client-side prefill (Task 6): Sales Order / Quotation open with
 ``frappe.new_doc(doctype, {customer | party_name, ...})``; Lead creation reuses
 ``dialogbrain.party.create_lead``.
@@ -44,21 +48,25 @@ def _orders(customer):
 		order_by="transaction_date desc, creation desc",
 		limit=RECENT_LIMIT,
 	)
-	totals = frappe.get_list(
+	grouped = frappe.get_list(
 		"Sales Order",
 		filters={"customer": customer, "docstatus": 1},
 		fields=[
+			"currency",
 			{"COUNT": "*", "as": "cnt"},
 			{"SUM": "grand_total", "as": "total"},
-			{"MAX": "currency", "as": "currency"},
 		],
+		group_by="currency",
 	)
-	t = totals[0] if totals else {}
-	stats = {
-		"orders_count": int(t.get("cnt") or 0),
-		"orders_total": float(t.get("total") or 0),
-		"currency": t.get("currency") or (rows[0].currency if rows else None),
-	}
+	totals = sorted(
+		(
+			{"currency": g.get("currency"), "total": float(g.get("total") or 0), "count": int(g.get("cnt") or 0)}
+			for g in grouped
+		),
+		key=lambda t: t["total"],
+		reverse=True,
+	)
+	stats = {"orders_count": sum(t["count"] for t in totals), "totals": totals}
 	return stats, rows
 
 

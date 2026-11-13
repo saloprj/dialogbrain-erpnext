@@ -81,12 +81,28 @@ class TestPartyCard(DialogBrainTestCase):
 		self.assertEqual(card["party_name"], "Card Customer")
 		self.assertEqual(card["link_source"], "manual")
 		self.assertEqual(card["contact"]["phone"], "+380501112233")
-		self.assertEqual(card["stats"], {"orders_count": 2, "orders_total": 350.5, "currency": "USD"})
+		self.assertEqual(card["stats"], {"orders_count": 2, "totals": [{"currency": "USD", "total": 350.5, "count": 2}]})
 		self.assertEqual(len(card["recent_orders"]), 2)
 		self.assertEqual(card["recent_orders"][0]["grand_total"], 250.5)
 		self.assertEqual([i["outstanding_amount"] for i in card["unpaid_invoices"]], [40])
 		self.assertEqual(card["has_access"], {"orders": True, "invoices": True})
 		self.assertEqual(card["suggestions"], [])
+
+	def test_stats_grouped_by_currency_and_isolated(self):
+		other = _customer("Card Other Customer")
+		_so(self.cust, 100)
+		eur = _so(self.cust, 500)
+		frappe.db.set_value("Sales Order", eur, "currency", "EUR")
+		_so(other, 7777)
+		conv = self._linked("Customer", self.cust)
+		card = api.get_card(conv)
+		self.assertEqual(card["stats"]["orders_count"], 2)
+		self.assertEqual(
+			card["stats"]["totals"],
+			[{"currency": "EUR", "total": 500.0, "count": 1}, {"currency": "USD", "total": 100.0, "count": 1}],
+		)
+		self.assertNotIn("orders_total", card["stats"])
+		self.assertNotIn("currency", card["stats"])
 
 	def test_recent_orders_capped_at_five(self):
 		for i in range(7):
