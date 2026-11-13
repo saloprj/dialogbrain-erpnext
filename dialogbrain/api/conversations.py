@@ -127,6 +127,13 @@ def sanitize_message_html(value):
 	return str(soup)
 
 
+def is_draft_truncated(text):
+	"""True when DialogBrain cut the draft text: webhook ``draft.created`` sends 500 chars,
+	``agents.list_drafts`` 300 chars + "..." (no full-text fetch exists)."""
+	text = text or ""
+	return len(text) == DRAFT_WEBHOOK_LIMIT or (len(text) >= DRAFT_LIST_LIMIT and text.endswith("..."))
+
+
 def _plain(value):
 	return html_lib.unescape(strip_html(value or "")).strip()
 
@@ -405,10 +412,7 @@ def get_drafts(conversation: str) -> list:
 		as_dict=True,
 	)
 	for r in rows:
-		text = r["text"] or ""
-		r["truncated"] = len(text) == DRAFT_WEBHOOK_LIMIT or (
-			len(text) >= DRAFT_LIST_LIMIT and text.endswith("...")
-		)
+		r["truncated"] = is_draft_truncated(r["text"])
 	return [dict(r) for r in rows]
 
 

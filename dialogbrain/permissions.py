@@ -155,3 +155,46 @@ def assert_can_access(conversation, user=None):
 	channel = frappe.db.get_value("DB Conversation", conversation, "channel")
 	if not frappe.db.exists("DB Conversation", conversation) or not _can_see_channel(channel, user):
 		frappe.throw(_("You do not have access to this conversation"), frappe.PermissionError)
+
+
+# --- DB Note / DB Quick Reply (Plan 2, Task 2) ----------------------------------
+
+
+def note_query(user=None):
+	return _via_conversation("DB Note", user)
+
+
+def note_has_permission(doc, ptype=None, user=None, **kwargs):
+	"""Notes follow their conversation's channel; only the author may delete one."""
+	user = user or frappe.session.user
+	if doc is None:
+		return True
+	if ptype == "delete" and not isinstance(doc, str) and _doc_get(doc, "owner") not in (None, user):
+		return False
+	return _child_has_permission(doc, user)
+
+
+def quick_reply_query(user=None):
+	"""Managers see every quick reply; an agent sees their own plus shared ones."""
+	user = user or frappe.session.user
+	if allowed_channels(user) is None:
+		return ""
+	return (
+		f"(`tabDB Quick Reply`.`owner` = {frappe.db.escape(user)} "
+		"OR `tabDB Quick Reply`.`shared` = 1)"
+	)
+
+
+def quick_reply_has_permission(doc, ptype=None, user=None, **kwargs):
+	"""Managers: all. Agents: read own + shared; create/write/delete only their own."""
+	user = user or frappe.session.user
+	if doc is None or allowed_channels(user) is None:
+		return True
+	if isinstance(doc, str):
+		doc = frappe.db.get_value("DB Quick Reply", doc, ["owner", "shared"], as_dict=True)
+		if not doc:
+			return False
+	owner, shared = _doc_get(doc, "owner"), _doc_get(doc, "shared")
+	if ptype in ("write", "delete", "submit", "cancel"):
+		return owner in (None, user)
+	return owner in (None, user) or bool(shared)
