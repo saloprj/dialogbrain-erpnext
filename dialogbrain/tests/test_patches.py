@@ -88,3 +88,23 @@ class TestPatches(DialogBrainTestCase):
 		self.assertEqual(get(waiting), 2)
 		self.assertEqual(get(never_answered), 2)
 		self.assertEqual(get(seeded_lower), 1)
+
+	def test_clear_inbound_delivery_status(self):
+		"""F4: inbound rows stored with the old Select default "pending" are cleared;
+		outgoing rows and deleted inbound rows keep their status."""
+		from dialogbrain.patches.v0_1.clear_inbound_delivery_status import execute
+
+		conv = _conv("p5", 0)
+		inbound = _msg(conv, "e1", 1, delivery_status="pending")
+		deleted = _msg(conv, "e2", 2, delivery_status="deleted")
+		pending_out = _msg(conv, "e3", 3, direction="out", delivery_status="pending")
+		sent_out = _msg(conv, "e4", 4, direction="out", delivery_status="sent")
+
+		execute()
+		execute()  # idempotent
+
+		get = lambda n: frappe.db.get_value("DB Message", n, "delivery_status")  # noqa: E731
+		self.assertIsNone(get(inbound))
+		self.assertEqual(get(deleted), "deleted")
+		self.assertEqual(get(pending_out), "pending")
+		self.assertEqual(get(sent_out), "sent")

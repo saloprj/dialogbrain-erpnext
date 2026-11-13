@@ -670,6 +670,16 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(_logs(name), [])
 		self.assertFalse([c for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")])
 
+	def test_inbound_has_no_delivery_status(self):
+		"""F4: delivery_status describes our replies; inbound rows leave it empty."""
+		_process(INBOUND)
+		self.assertIsNone(frappe.db.get_value("DB Message", {"db_id": "9000001"}, "delivery_status"))
+		_process(UPDATED, db_id="7")  # provisional, then completed as inbound
+		_process(INBOUND, db_id="7")
+		self.assertIsNone(frappe.db.get_value("DB Message", {"db_id": "7"}, "delivery_status"))
+		_process(OUTGOING)
+		self.assertEqual(frappe.db.get_value("DB Message", {"db_id": _data(OUTGOING)["message"]["db_id"]}, "delivery_status"), "sent")
+
 	def test_silent_inbound_does_not_count_unread(self):
 		"""F1: re-emitted history (``skip_push``) is not something the manager has to read."""
 		from dialogbrain.sync.processor import process_event

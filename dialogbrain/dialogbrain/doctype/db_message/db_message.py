@@ -8,6 +8,11 @@ class DBMessage(Document):
 		for fieldname in ("db_id", "client_ref"):
 			if not self.get(fieldname):
 				self.set(fieldname, None)
+		# delivery_status describes our replies only: inbound rows keep it empty (NULL).
+		if self.direction == "in" and self.delivery_status != "deleted":
+			self.delivery_status = None
+		elif not self.delivery_status:
+			self.delivery_status = None
 		# A provisional row (partial event, direction unknown) must not get the Select
 		# defaults ("in" / "customer" / "pending"): see dialogbrain.sync.upsert.
 		if self.flags.dialogbrain_provisional:

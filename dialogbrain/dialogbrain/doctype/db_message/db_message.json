@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 20:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -78,7 +78,7 @@
    "fieldname": "delivery_status",
    "fieldtype": "Select",
    "label": "Delivery Status",
-   "options": "pending\nsent\nfailed\nunknown\ndeleted"
+   "options": "\npending\nsent\nfailed\nunknown\ndeleted"
   },
   {
    "fieldname": "client_ref",
