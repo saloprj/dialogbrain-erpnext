@@ -98,19 +98,37 @@ function rowAfter(a, b) {
 	return ka !== kb ? ka < kb : a.name < b.name;
 }
 
-/** Realtime: re-read one row under the list's current filters and put it in place, or
- * drop it when it no longer matches (the open conversation keeps its row). */
-export async function refreshRow(name) {
-	if (!name) return;
+/** Above this many rows in one realtime batch, reload the list instead. */
+export const ROW_BATCH_MAX = 50;
+
+/** Realtime: re-read a batch of rows under the list's current filters in ONE call, and put
+ * each in place, or drop it when it no longer matches (the open conversation keeps its row).
+ * A very large batch reloads the list's first page instead. */
+export async function refreshRows(names) {
+	names = Array.from(new Set(names || [])).filter(Boolean);
+	if (!names.length) return;
+	if (names.length > ROW_BATCH_MAX) {
+		await loadList();
+		return;
+	}
 	const seq = listSeq;
-	let row;
+	let rows;
 	try {
-		const r = await api.listConversations({ ...listFilters(), name }, null, 1);
-		row = r && r.rows && r.rows[0];
+		const r = await api.listConversations({ ...listFilters(), name: names }, null, names.length);
+		rows = (r && r.rows) || [];
 	} catch (e) {
 		return;
 	}
 	if (seq !== listSeq) return; // the list was reloaded meanwhile
+	const found = new Map(rows.map((row) => [row.name, row]));
+	for (const name of names) placeRow(name, found.get(name) || null);
+}
+
+export function refreshRow(name) {
+	return refreshRows([name]);
+}
+
+function placeRow(name, row) {
 	const i = store.rows.findIndex((x) => x.name === name);
 	if (!row) {
 		if (i >= 0 && name !== store.selected) store.rows.splice(i, 1);
@@ -208,7 +226,7 @@ export async function loadMessages(conv, earlier = false) {
 	b.loading = true;
 	try {
 		const r = await api.getMessages(conv, earlier ? b.nextBefore : null);
-		const rows = (r.rows || []).slice().reverse();
+		const rows = (r.rows || []).slice().reverse().filter((m) => !wasRemoved(conv, m.name));
 		if (earlier) {
 			const known = new Set(b.rows.map((m) => m.name));
 			b.rows = rows.filter((m) => !known.has(m.name)).concat(b.rows);
@@ -231,11 +249,25 @@ function sortKey(m) {
 	return m._optimistic ? "￿" : String(m.sent_at || "");
 }
 
+// Names removed by a realtime event, per conversation, for a short while: a fetch that was
+// already in flight when the removal arrived must not put the row back.
+const REMOVED_TTL_MS = 2 * 60 * 1000;
+const removed = new Map(); // conversation -> Map(name -> expiry)
+
+function wasRemoved(conv, name) {
+	const m = removed.get(conv);
+	if (!m || !m.has(name)) return false;
+	if (m.get(name) > Date.now()) return true;
+	m.delete(name);
+	return false;
+}
+
 /** Merge server rows by name, replacing an optimistic row with the same client_ref. */
 export function mergeMessages(conv, rows) {
 	const b = box(conv);
 	let list = b.rows.slice();
 	for (const row of rows || []) {
+		if (wasRemoved(conv, row.name)) continue;
 		let i = list.findIndex((m) => m.name === row.name);
 		if (i < 0 && row.client_ref) {
 			i = list.findIndex((m) => m._optimistic && m.client_ref === row.client_ref);
@@ -255,7 +287,11 @@ export function mergeMessages(conv, rows) {
 	b.rows = list;
 }
 
-export function removeMessage(conv, name) {
+export function removeMessage(conv, name, { remember = false } = {}) {
+	if (remember) {
+		if (!removed.has(conv)) removed.set(conv, new Map());
+		removed.get(conv).set(name, Date.now() + REMOVED_TTL_MS);
+	}
 	const b = store.messages[conv];
 	if (b) b.rows = b.rows.filter((m) => m.name !== name);
 }

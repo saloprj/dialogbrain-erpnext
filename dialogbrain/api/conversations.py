@@ -186,10 +186,15 @@ def _list_conditions(filters, user):
 		conditions.append("ch.`channel_type` = %(channel_type)s")
 		params["channel_type"] = filters["channel_type"]
 
-	if filters.get("name"):
-		# one row under the current filters (realtime refresh of a single list row)
-		conditions.append(f"{C}.`name` = %(conv_name)s")
-		params["conv_name"] = str(filters["name"])
+	names = filters.get("name")  # an empty list means no name restriction
+	if names:
+		# rows under the current filters, by name: realtime refresh of a batch of list rows
+		if isinstance(names, str):
+			names = [names]
+		if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+			frappe.throw(_("Invalid name filter"))
+		conditions.append(f"{C}.`name` IN %(conv_names)s")
+		params["conv_names"] = tuple(names)
 
 	party_type, party = filters.get("party_type"), filters.get("party")
 	if party_type or party:
@@ -414,20 +419,27 @@ def get_messages(conversation: str, before=None, limit=50) -> dict:
 
 @frappe.whitelist()
 def get_messages_by_name(conversation: str, names=None) -> list:
-	"""Rows for ``names`` (realtime refresh). Every name must belong to ``conversation``."""
+	"""Rows for ``names`` (realtime refresh): the ones that exist in ``conversation``.
+	Missing names are skipped; a name of another conversation's message is refused."""
 	assert_can_access(conversation)
 	names = _parse(names) or []
 	if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
 		frappe.throw(_("Invalid message names"))
 	if not names:
 		return []
-	wanted = set(names)
+	wanted = tuple(set(names))
+	# A name may be gone by now (e.g. an echo folded into its reply): it is skipped. A name
+	# that exists in another conversation is refused.
+	foreign = frappe.db.sql(
+		"SELECT 1 FROM `tabDB Message` WHERE `name` IN %(names)s AND `conversation` != %(conversation)s LIMIT 1",
+		{"conversation": conversation, "names": wanted},
+	)
+	if foreign:
+		frappe.throw(_("Message does not belong to this conversation"), frappe.PermissionError)
 	rows = _message_rows(
 		"m.`conversation` = %(conversation)s AND m.`name` IN %(names)s",
-		{"conversation": conversation, "names": tuple(wanted)},
+		{"conversation": conversation, "names": wanted},
 	)
-	if {r["name"] for r in rows} != wanted:
-		frappe.throw(_("Message does not belong to this conversation"), frappe.PermissionError)
 	return _format_messages(rows)
 
 

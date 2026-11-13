@@ -12,6 +12,9 @@ frappe.provide("frappe.dialogbrain");
 	const INBOX_URL = "/app/" + INBOX_ROUTE;
 	const POLL_MS = 60 * 1000;
 	const EVENT_DEBOUNCE_MS = 2000;
+	// maxWait: flush at least every 1.5 s during a burst. It is below the 2 s quiet time, so
+	// in practice the badge refreshes once, 1.5 s after the first event of a burst.
+	const EVENT_MAX_WAIT_MS = 1500;
 	const SOUND_URL = "/assets/dialogbrain/sounds/new_message.mp3";
 	const SOUND_KEY = "dialogbrain:sound"; // "off" mutes; anything else (or nothing) plays
 	const SOUND_AT_KEY = "dialogbrain:sound_at"; // last play, shared by the user's tabs
@@ -82,8 +85,17 @@ frappe.provide("frappe.dialogbrain");
 		</a>`);
 	}
 
-	// The sidebar and the dock are rebuilt on some navigations: re-attach when missing.
+	// Containers: Frappe v16 has a sidebar band and a dock; v15 has the top navbar, where
+	// the item goes next to the notifications bell. The sidebar and the dock are rebuilt on
+	// some navigations: re-attach when missing. Returns whether any badge is on the page.
 	function ensureBadges() {
+		// v15: <ul class="navbar-nav"> ... <li class="nav-item dropdown dropdown-notifications">
+		const $bell = $(".navbar .navbar-nav > .dropdown-notifications").first();
+		if ($bell.length && !$bell.parent().find(".dialogbrain-chats-link").length) {
+			const $li = $('<li class="nav-item dialogbrain-chats-nav"></li>');
+			$li.append(badgeHtml("dialogbrain-chats-navbar nav-link"));
+			$li.insertBefore($bell);
+		}
 		const $band = $(".body-sidebar .standard-items-band").first();
 		if ($band.length && !$band.find(".dialogbrain-chats-link").length) {
 			$band.append(badgeHtml("dialogbrain-chats-sidebar"));
@@ -93,6 +105,7 @@ frappe.provide("frappe.dialogbrain");
 			$dock.prepend(badgeHtml("dialogbrain-chats-dock"));
 		}
 		renderCount();
+		return $(".dialogbrain-chats-link").length > 0;
 	}
 
 	function renderCount() {
@@ -109,6 +122,7 @@ frappe.provide("frappe.dialogbrain");
 	let loading = false;
 	async function refreshBadge() {
 		if (loading || document.visibilityState !== "visible") return;
+		if (!ensureBadges()) return; // no container on this desk: nothing to show, no request
 		loading = true;
 		try {
 			const r = await frappe.call({
@@ -117,7 +131,7 @@ frappe.provide("frappe.dialogbrain");
 				silent: true,
 			});
 			unread = (r && r.message && r.message.unread_total) || 0;
-			ensureBadges();
+			renderCount();
 		} catch (e) {
 			// keep the last value; the next poll retries
 		} finally {
@@ -125,10 +139,18 @@ frappe.provide("frappe.dialogbrain");
 		}
 	}
 
+	// debounce with maxWait (see EVENT_MAX_WAIT_MS)
 	let eventTimer = null;
+	let burstStart = 0;
 	function refreshSoon() {
+		const now = Date.now();
+		if (!eventTimer) burstStart = now;
 		clearTimeout(eventTimer);
-		eventTimer = setTimeout(refreshBadge, EVENT_DEBOUNCE_MS);
+		const wait = Math.max(0, Math.min(EVENT_DEBOUNCE_MS, burstStart + EVENT_MAX_WAIT_MS - now));
+		eventTimer = setTimeout(() => {
+			eventTimer = null;
+			refreshBadge();
+		}, wait);
 	}
 
 	function init() {

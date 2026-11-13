@@ -1,20 +1,25 @@
-// Realtime updates for the inbox page. Server events (dialogbrain/sync/notify.py) go only to
-// users permitted on the conversation's channel; each payload carries `conversation`.
+// Realtime updates for the inbox page. Server events (dialogbrain/sync/notify.py) go to the
+// users permitted on the conversation's channel plus System Managers (Ruling R9); each
+// payload carries `conversation`.
 //
 //   dialogbrain:conversation      -> that list row + counters; the open one: header (+ card
 //                                    when its party/contact changed, notes on a notes change)
 //   dialogbrain:message / _updated -> open conversation: fetch by name and merge (an
 //                                    optimistic row is replaced by client_ref); else the row
-//   dialogbrain:message_removed   -> open conversation: drop the row; else the row
+//   dialogbrain:message_removed   -> drop the row (and remember the name for a while so an
+//                                    in-flight fetch cannot bring it back); the list row
 //   dialogbrain:draft             -> drafts of the open conversation
 //
-// Refreshes are debounced at 300 ms per conversation, so a burst of events costs one call.
+// Debouncing: 300 ms quiet time, but at most 1.5 s from the first event of a burst (maxWait),
+// so a steady stream of events still flushes. Open-conversation work is per conversation;
+// list rows of ALL conversations are collected into one batch and fetched with ONE
+// list_conversations call (store.refreshRows; a very large batch reloads the list instead).
 // Nothing here touches store.composer: unsent text survives every refresh.
 
 import { api } from "./api.js";
 import {
 	store,
-	refreshRow,
+	refreshRows,
 	refreshMessages,
 	removeMessage,
 	loadDrafts,
@@ -23,44 +28,57 @@ import {
 } from "./store.js";
 
 const DEBOUNCE_MS = 300;
-const timers = new Map();
+const MAX_WAIT_MS = 1500;
+const timers = new Map(); // key -> { timer, first }
 
 function debounced(key, fn) {
-	clearTimeout(timers.get(key));
-	timers.set(
-		key,
-		setTimeout(() => {
-			timers.delete(key);
-			fn();
-		}, DEBOUNCE_MS)
-	);
+	const now = Date.now();
+	const t = timers.get(key) || { timer: null, first: now };
+	clearTimeout(t.timer);
+	const wait = Math.max(0, Math.min(DEBOUNCE_MS, t.first + MAX_WAIT_MS - now));
+	t.timer = setTimeout(() => {
+		timers.delete(key);
+		fn();
+	}, wait);
+	timers.set(key, t);
 }
 
-// pending work per conversation, flushed by one debounced call
-const pending = new Map(); // conversation -> { row, open, notes, messages: Set, markRead }
+const isOpen = (conv) => !!conv && conv === store.selected;
+const pageVisible = () => document.visibilityState === "visible";
 
-function queue(conv, what) {
-	const p = pending.get(conv) || { row: false, open: false, notes: false, messages: new Set(), markRead: false };
-	if (what.row) p.row = true;
+// --- list rows: one batch across conversations --------------------------------------
+
+const rowBatch = new Set();
+
+function queueRow(conv) {
+	rowBatch.add(conv);
+	debounced("rows", () => {
+		const names = Array.from(rowBatch);
+		rowBatch.clear();
+		refreshRows(names);
+		loadCounters();
+	});
+}
+
+// --- open conversation: per conversation --------------------------------------------
+
+const pending = new Map(); // conversation -> { open, notes, messages: Set, markRead }
+
+function queueOpen(conv, what) {
+	const p = pending.get(conv) || { open: false, notes: false, messages: new Set(), markRead: false };
 	if (what.open) p.open = true;
 	if (what.notes) p.notes = true;
 	if (what.markRead) p.markRead = true;
 	if (what.message) p.messages.add(what.message);
 	pending.set(conv, p);
 	debounced("conv:" + conv, () => flush(conv));
-	if (what.row) debounced("counters", loadCounters);
 }
-
-const isOpen = (conv) => !!conv && conv === store.selected;
-const pageVisible = () => document.visibilityState === "visible";
 
 async function flush(conv) {
 	const p = pending.get(conv);
 	pending.delete(conv);
-	if (!p) return;
-	if (p.messages.size && isOpen(conv)) {
-		await refreshMessages(conv, Array.from(p.messages));
-	}
+	if (!p || !isOpen(conv)) return;
+	if (p.messages.size) await refreshMessages(conv, Array.from(p.messages));
 	if (p.open && isOpen(conv)) await refreshOpen(conv, p.notes);
 	if (p.markRead && isOpen(conv) && pageVisible()) {
 		try {
@@ -70,7 +88,6 @@ async function flush(conv) {
 		}
 		loadCounters();
 	}
-	if (p.row) await refreshRow(conv);
 }
 
 const CARD_KEYS = ["party_type", "party", "contact", "contact_name", "phone", "email", "handle"];
@@ -97,30 +114,32 @@ async function refreshOpen(conv, notes) {
 
 function onConversation(d) {
 	if (!d || !d.conversation) return;
-	queue(d.conversation, { row: true, open: isOpen(d.conversation), notes: !!d.notes });
+	queueRow(d.conversation);
+	if (isOpen(d.conversation)) queueOpen(d.conversation, { open: true, notes: !!d.notes });
 }
 
 function onMessage(d) {
 	if (!d || !d.conversation || !d.message) return;
-	const open = isOpen(d.conversation);
-	queue(d.conversation, {
-		row: true,
-		message: open ? d.message : null,
+	queueRow(d.conversation);
+	if (isOpen(d.conversation)) {
 		// an inbound message in the conversation on screen is read
-		markRead: open && d.direction === "in",
-	});
+		queueOpen(d.conversation, { message: d.message, markRead: d.direction === "in" });
+	}
 }
 
 function onMessageUpdated(d) {
 	if (!d || !d.conversation || !d.message) return;
-	if (isOpen(d.conversation)) queue(d.conversation, { message: d.message });
-	else queue(d.conversation, { row: true });
+	if (isOpen(d.conversation)) queueOpen(d.conversation, { message: d.message });
+	else queueRow(d.conversation);
 }
 
 function onMessageRemoved(d) {
 	if (!d || !d.conversation || !d.message) return;
-	removeMessage(d.conversation, d.message);
-	queue(d.conversation, { row: true });
+	// not fetched by a pending batch (it no longer exists) and never merged back in
+	const p = pending.get(d.conversation);
+	if (p) p.messages.delete(d.message);
+	removeMessage(d.conversation, d.message, { remember: true });
+	queueRow(d.conversation);
 }
 
 function onDraft(d) {
@@ -140,8 +159,9 @@ export function subscribe() {
 	for (const [event, fn] of Object.entries(HANDLERS)) frappe.realtime.on(event, fn);
 	return function unsubscribe() {
 		for (const [event, fn] of Object.entries(HANDLERS)) frappe.realtime.off(event, fn);
-		for (const t of timers.values()) clearTimeout(t);
+		for (const t of timers.values()) clearTimeout(t.timer);
 		timers.clear();
 		pending.clear();
+		rowBatch.clear();
 	};
 }

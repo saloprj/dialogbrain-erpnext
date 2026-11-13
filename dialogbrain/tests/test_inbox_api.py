@@ -471,9 +471,21 @@ class TestInboxApi(DialogBrainTestCase):
 		other_a = _msg(self.a_open_unassigned, text="b")
 		other_b = _msg(self.b_open, text="c")
 		frappe.set_user(self.agent_a)
-		for foreign in (other_a, other_b, "does-not-exist"):
+		for foreign in (other_a, other_b):
 			with self.assertRaises(frappe.PermissionError):
 				api.get_messages_by_name(self.a_open_mine, [mine, foreign])
+
+	def test_get_messages_by_name_skips_missing_names(self):
+		# realtime batches can name a row deleted meanwhile (echo fold): skipped, not refused
+		mine = _msg(self.a_open_mine, text="a")
+		frappe.set_user(self.agent_a)
+		rows = api.get_messages_by_name(self.a_open_mine, [mine, "does-not-exist"])
+		self.assertEqual([r["name"] for r in rows], [mine])
+		self.assertEqual(api.get_messages_by_name(self.a_open_mine, ["does-not-exist"]), [])
+		# access to the conversation is still checked first
+		frappe.set_user(self.agent_a)
+		with self.assertRaises(frappe.PermissionError):
+			api.get_messages_by_name(self.b_open, ["does-not-exist"])
 
 	# --- drafts / counters ------------------------------------------------
 
@@ -550,3 +562,11 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertEqual(_names(lc({"name": self.a_closed})), set())  # status Open by default
 		# another channel's conversation is not returned
 		self.assertEqual(_names(lc({"name": self.b_open, "status": "All"})), set())
+		# a list of names: one call for a batch of realtime row refreshes
+		self.assertEqual(
+			_names(lc({"name": [self.a_open_mine, self.a_open_unassigned, self.a_closed, self.b_open]})),
+			{self.a_open_mine, self.a_open_unassigned},
+		)
+		self.assertEqual(_names(lc({"name": []})), {self.a_open_mine, self.a_open_unassigned})
+		with self.assertRaises(frappe.ValidationError):
+			lc({"name": [{"x": 1}]})
