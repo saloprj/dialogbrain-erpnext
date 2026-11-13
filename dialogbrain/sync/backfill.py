@@ -241,6 +241,7 @@ def run_backfill() -> None:
 				except Exception as exc:  # noqa: BLE001 - one bad thread must not stop the load
 					rollback_to(save_point)
 					if attempt == 1 and isinstance(exc, RETRYABLE_DB_ERRORS):
+						commit()  # a fresh snapshot for the retry
 						continue
 					failures += 1
 					last_error = error_text(exc)

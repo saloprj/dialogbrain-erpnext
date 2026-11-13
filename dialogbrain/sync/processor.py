@@ -13,6 +13,7 @@ import frappe
 from dialogbrain.party import link_party
 from dialogbrain.sync.notify import notify, publish
 from dialogbrain.sync.upsert import (
+	RETRYABLE_DB_ERRORS,
 	_insert,
 	_s,
 	apply_message_counters,
@@ -53,6 +54,8 @@ def process_delivery(log_name: str) -> None:
 	   sees ``processed`` and returns.
 	3. Success -> ``processed``; any error -> the delivery's partial writes are rolled back
 	   and the row is ``failed`` with the error (retried by the scheduler). Never raises.
+	   A deadlock or a lost conversation race (:class:`ConversationRaceLost`) is retried
+	   once at once, in a fresh transaction (new snapshot).
 	"""
 	log = frappe.db.get_value(
 		"DB Webhook Log", log_name, ["name", "status", "attempts"], as_dict=True, for_update=True
@@ -63,29 +66,34 @@ def process_delivery(log_name: str) -> None:
 	frappe.db.set_value("DB Webhook Log", log_name, "attempts", attempts, update_modified=False)
 	_commit()
 
-	log = frappe.db.get_value(
-		"DB Webhook Log", log_name, ["name", "event", "payload", "status"], as_dict=True, for_update=True
-	)
-	if not log or log.status not in PROCESSABLE:
-		return
 	save_point = "dialogbrain_delivery"
-	frappe.db.savepoint(save_point)
-	try:
-		body = log.payload
-		if isinstance(body, str):
-			body = json.loads(body)
-		body = body or {}
-		process_event(body.get("event") or log.event, body.get("data") or {})
-	except Exception:  # noqa: BLE001 - any failure marks the delivery failed for retry
-		error = frappe.get_traceback()[-MAX_ERROR_LENGTH:]
-		rollback_to(save_point)
-		frappe.db.set_value(
-			"DB Webhook Log",
-			log_name,
-			{"status": "failed", "error": error},
-			update_modified=False,
+	for attempt in (1, 2):
+		log = frappe.db.get_value(
+			"DB Webhook Log", log_name, ["name", "event", "payload", "status"], as_dict=True, for_update=True
 		)
-		return
+		if not log or log.status not in PROCESSABLE:
+			return
+		frappe.db.savepoint(save_point)
+		try:
+			body = log.payload
+			if isinstance(body, str):
+				body = json.loads(body)
+			body = body or {}
+			process_event(body.get("event") or log.event, body.get("data") or {})
+			break
+		except Exception as exc:  # noqa: BLE001 - any failure marks the delivery failed for retry
+			error = frappe.get_traceback()[-MAX_ERROR_LENGTH:]
+			rollback_to(save_point)
+			if attempt == 1 and isinstance(exc, RETRYABLE_DB_ERRORS):
+				_commit()  # end the old snapshot; the retry reads what committed meanwhile
+				continue
+			frappe.db.set_value(
+				"DB Webhook Log",
+				log_name,
+				{"status": "failed", "error": error},
+				update_modified=False,
+			)
+			return
 	frappe.db.set_value(
 		"DB Webhook Log", log_name, {"status": "processed", "error": None}, update_modified=False
 	)

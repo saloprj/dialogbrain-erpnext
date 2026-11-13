@@ -97,7 +97,15 @@ def rollback_to(save_point: str) -> None:
 		frappe.db.rollback()
 
 
-RETRYABLE_DB_ERRORS = (frappe.QueryDeadlockError, frappe.QueryTimeoutError)
+class ConversationRaceLost(Exception):
+	"""Another transaction created the conversation after this transaction's snapshot.
+
+	At REPEATABLE READ (MariaDB, and Frappe's Postgres connection) the winner's row stays
+	invisible to every later plain read of this transaction, Frappe's link validation
+	included. Retry in a fresh transaction (``commit`` first)."""
+
+
+RETRYABLE_DB_ERRORS = (frappe.QueryDeadlockError, frappe.QueryTimeoutError, ConversationRaceLost)
 
 
 def _insert(doc):
@@ -243,6 +251,8 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 		name = find_conversation(internal, ref, channel, for_update=True)
 		if not name:
 			raise frappe.DuplicateEntryError("DB Conversation", internal or ref)
+		if not frappe.db.sql("select name from `tabDB Conversation` where name = %s", (name,)):
+			raise ConversationRaceLost(f"DB Conversation {name} was created by a concurrent transaction")
 		# the winner may not know the internal id yet
 		if internal and not frappe.db.get_value("DB Conversation", name, "thread_id"):
 			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
