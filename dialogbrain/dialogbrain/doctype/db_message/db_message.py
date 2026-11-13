@@ -8,6 +8,11 @@ class DBMessage(Document):
 		for fieldname in ("db_id", "client_ref"):
 			if not self.get(fieldname):
 				self.set(fieldname, None)
+		# A provisional row (partial event, direction unknown) must not get the Select
+		# defaults ("in" / "customer" / "pending"): see dialogbrain.sync.upsert.
+		if self.flags.dialogbrain_provisional:
+			for fieldname in ("direction", "author_type", "delivery_status"):
+				self.set(fieldname, None)
 
 
 def on_doctype_update():

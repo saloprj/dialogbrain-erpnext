@@ -12,8 +12,16 @@ person share it), so it is only looked up together with the channel.
 
 Some events carry only the ref (``messages.send`` echoes without a parsable id,
 ``message.updated`` partials, ``conversation.updated``). A conversation first seen that
-way gets ``thread_id = <ref>`` as a placeholder and is upgraded to the internal id as
-soon as an event carries it.
+way has ``thread_id = NULL`` and is found by ``(channel, thread_ref)``, which has a
+composite UNIQUE index (a concurrent second insert collides and re-reads instead of
+splitting the thread). ``thread_id`` is filled as soon as an event carries it.
+
+Message completeness
+--------------------
+A partial ``message.updated`` for an unknown ``db_id`` (no ``is_outgoing``) is stored as
+a *provisional* row (``direction`` empty): no counters, realtime or notification. The
+first full event for that ``db_id`` completes it and is reported as ``created=True`` so
+the caller applies counters exactly once.
 """
 
 import html as html_lib
@@ -148,24 +156,21 @@ def thread_keys(thread: dict):
 
 
 def find_conversation(internal=None, ref=None, channel=None):
-	"""Find a conversation by internal id, or by channel ref (scoped to ``channel``)."""
+	"""Find a conversation by internal id, else by ``(channel, thread_ref)``.
+
+	Without ``channel`` a ref matches only when exactly one conversation has it.
+	"""
 	internal, ref = _s(internal), _s(ref)
 	if internal:
 		name = frappe.db.get_value("DB Conversation", {"thread_id": internal})
 		if name:
 			return name
 	if ref:
-		for field in ("thread_ref", "thread_id"):  # thread_id: ref placeholder
-			filters = {field: ref}
-			if channel:
-				filters["channel"] = channel
-			for row in frappe.get_all(
-				"DB Conversation", filters=filters, fields=["name", "thread_id"], order_by="creation asc"
-			):
-				# a row already bound to another internal id is a different DialogBrain thread
-				if internal and (row.thread_id or "").isdigit() and row.thread_id != internal:
-					continue
-				return row.name
+		if channel:
+			return frappe.db.get_value("DB Conversation", {"channel": channel, "thread_ref": ref})
+		names = frappe.get_all("DB Conversation", filters={"thread_ref": ref}, pluck="name", limit=2)
+		if len(names) == 1:
+			return names[0]
 	return None
 
 
@@ -177,8 +182,8 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	``link_party`` runs on create and whenever phone/email change.
 	"""
 	internal, ref = thread_keys(thread)
-	if not internal and not ref:
-		raise ValueError("DialogBrain thread without id")
+	if not internal and not (ref and channel):
+		raise ValueError("DialogBrain thread without an internal id or a channel ref + channel")
 	values = {"title": _s(thread.get("title"))}
 	for field in CONTACT_FIELDS:
 		values[field] = _s(thread.get(field))
@@ -189,7 +194,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 		doc = frappe.get_doc(
 			{
 				"doctype": "DB Conversation",
-				"thread_id": internal or ref,
+				"thread_id": internal,
 				"thread_ref": ref,
 				"channel": channel,
 				"status": "Open",
@@ -204,6 +209,9 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 		name = find_conversation(internal, ref, channel)
 		if not name:
 			raise frappe.DuplicateEntryError("DB Conversation", internal or ref)
+		# the winner may not know the internal id yet
+		if internal and not frappe.db.get_value("DB Conversation", name, "thread_id"):
+			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
 		return name, False
 
 	current = frappe.db.get_value(
@@ -211,7 +219,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	)
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
 	if internal and current.thread_id != internal:
-		updates["thread_id"] = internal  # upgrade a ref placeholder (see find_conversation)
+		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)
 	if ref and not current.thread_ref:
 		updates["thread_ref"] = ref
 	if channel and not current.channel:
@@ -324,20 +332,32 @@ def _find_echo_target(conversation, parsed):
 def upsert_message(conversation: str, message: dict, *, silent: bool = False) -> "tuple[str, bool]":
 	"""Insert or update a DB Message keyed by DialogBrain ``db_id``.
 
-	Returns ``(name, created)``. The caller applies counters for created rows
-	(:func:`apply_message_counters`). An outgoing echo matched to a pending ERPNext reply
-	is merged into that row (``created=False``) and its counters are applied here.
+	Returns ``(name, created)``; ``created`` is True when the row became a complete
+	message now (new row, or a provisional row completed) and the caller must apply
+	counters (:func:`apply_message_counters`). An outgoing echo matched to a pending
+	ERPNext reply is merged into that row (``created=False``) and its counters are
+	applied here. A message without ``is_outgoing`` is stored provisional (see module
+	docstring) and returns ``created=False``.
 	"""
 	parsed = _parse(message)
 	db_id = parsed["db_id"]
 
 	existing = _message_by_db_id(db_id)
-	if existing:
+	provisional = bool(existing) and not frappe.db.get_value("DB Message", existing, "direction")
+	if existing and not provisional:
 		_update_message(existing, parsed, silent=silent)
 		return existing, False
 
+	if parsed["is_outgoing"] is None:
+		if existing:
+			_update_message(existing, parsed, silent=True)
+			return existing, False
+		return _insert_message(conversation, parsed, message, provisional=True), False
+
 	echo = _find_echo_target(conversation, parsed) if db_id else None
 	if echo:
+		if existing:  # the provisional row is the same message: fold it into the reply
+			frappe.delete_doc("DB Message", existing, ignore_permissions=True, force=True)
 		doc = frappe.get_doc("DB Message", echo)
 		doc.db_id = db_id
 		doc.message_id = parsed["message_id"] or doc.message_id
@@ -351,33 +371,60 @@ def upsert_message(conversation: str, message: dict, *, silent: bool = False) ->
 		apply_message_counters(conversation, doc.name, silent=silent)
 		return doc.name, False
 
-	direction = "out" if parsed["is_outgoing"] else "in"
-	doc = frappe.get_doc(
-		{
-			"doctype": "DB Message",
-			"conversation": conversation,
-			"db_id": db_id,
-			"message_id": parsed["message_id"],
-			"direction": direction,
-			"author_type": _author_type(parsed),
-			"text": parsed["body"] if parsed["body"] is not None else parsed["partial_text"],
-			"sent_at": parsed["sent_at"],
-			"delivery_status": "sent" if direction == "out" else None,
-			"attachments": parsed["attachments"] or [],
-			"raw": _raw(message),
-		}
-	)
-	if _insert(doc):
-		return doc.name, True
+	if existing:  # complete the provisional row
+		_update_message(existing, parsed, silent=True, extra=_direction_fields(parsed, message))
+		return existing, True
+
+	name = _insert_message(conversation, parsed, message)
+	if name:
+		return name, True
 	existing = _message_by_db_id(db_id)
 	if not existing:
 		raise frappe.DuplicateEntryError("DB Message", db_id)
 	return existing, False
 
 
-def _update_message(name, parsed, *, silent):
+def _direction_fields(parsed, message):
+	direction = "out" if parsed["is_outgoing"] else "in"
+	return {
+		"direction": direction,
+		"author_type": _author_type(parsed),
+		"delivery_status": "sent" if direction == "out" else None,
+		"raw": _raw(message),
+	}
+
+
+def _insert_message(conversation, parsed, message, *, provisional=False):
+	"""Insert; returns the name, or None on a duplicate ``db_id`` (concurrent insert)."""
+	values = {
+		"doctype": "DB Message",
+		"conversation": conversation,
+		"db_id": parsed["db_id"],
+		"message_id": parsed["message_id"],
+		"text": parsed["body"] if parsed["body"] is not None else parsed["partial_text"],
+		"sent_at": parsed["sent_at"],
+		"attachments": parsed["attachments"] or [],
+		"raw": _raw(message),
+	}
+	if not provisional:
+		values.update(_direction_fields(parsed, message))
+	doc = frappe.get_doc(values)
+	doc.flags.dialogbrain_provisional = provisional
+	if _insert(doc):
+		return doc.name
+	if provisional:
+		return _message_by_db_id(parsed["db_id"])
+	return None
+
+
+def _update_message(name, parsed, *, silent, extra=None):
 	doc = frappe.get_doc("DB Message", name)
+	doc.flags.dialogbrain_provisional = not doc.direction and not (extra or {}).get("direction")
 	changed = False
+	for field, value in (extra or {}).items():
+		if doc.get(field) != value:
+			doc.set(field, value)
+			changed = True
 
 	def put(field, value):
 		nonlocal changed

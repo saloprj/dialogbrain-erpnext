@@ -134,22 +134,49 @@ class TestProcessor(DialogBrainTestCase):
 			convs[0].thread_ref, "livechat:a07f9d4a-7e2c-4626-b785-13ba088dd210:sim_c91803a9acfe"
 		)
 
-	def test_placeholder_conversation_upgraded_to_internal_id(self):
+	def test_ref_only_then_id_event_fills_thread_id(self):
 		_process(UPDATED)  # carries only the channel ref
-		self.assertTrue(_conv_by_thread("telegram:100000001"))
+		conv = frappe.get_doc("DB Conversation", frappe.db.get_value("DB Conversation", {"thread_ref": "telegram:100000001"}))
+		self.assertIsNone(conv.thread_id)
 		_process(INBOUND, db_id="9000003", message_id="telegram:5000003")
 		self.assertEqual(frappe.db.count("DB Conversation"), 1)
-		conv = frappe.get_doc("DB Conversation", _conv_by_thread("1001"))
-		self.assertEqual(conv.thread_ref, "telegram:100000001")
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv.name, "thread_id"), "1001")
 
-	def test_same_ref_other_internal_id_is_other_conversation(self):
-		_process(INBOUND)
-		data = _data(INBOUND, db_id="9000004", message_id="telegram:5000004")
-		data["thread"]["db_id"] = "1005"
+	def test_same_ref_on_two_accounts_is_two_conversations(self):
 		from dialogbrain.sync.processor import process_event
 
-		process_event("message.received", data)
-		self.assertEqual(frappe.db.count("DB Conversation"), 2)
+		for account in ("155", "156"):  # ref-only events, no internal id
+			data = copy.deepcopy(load_fixture(UPDATED)["data"])
+			data["account_id"] = account
+			data["message"]["db_id"] = "db-" + account
+			process_event("message.updated", data)
+			process_event("message.updated", data)  # retry: no DuplicateEntryError
+		rows = frappe.get_all("DB Conversation", fields=["channel", "thread_ref", "thread_id"], order_by="channel")
+		self.assertEqual([(r.channel, r.thread_ref, r.thread_id) for r in rows], [
+			("155", "telegram:100000001", None),
+			("156", "telegram:100000001", None),
+		])
+
+	def test_concurrent_conversation_insert_relooks_up(self):
+		"""Another worker created the (channel, thread_ref) row between lookup and insert."""
+		from dialogbrain.sync import upsert
+
+		_process(UPDATED)
+		existing = frappe.db.get_value("DB Conversation", {"thread_ref": "telegram:100000001"})
+		real = upsert.find_conversation
+		calls = []
+
+		def misses_once(*args, **kwargs):
+			calls.append(args)
+			return None if len(calls) == 1 else real(*args, **kwargs)
+
+		with patch.object(upsert, "find_conversation", side_effect=misses_once):
+			name, created = upsert.upsert_conversation(
+				{"db_id": "1001", "channel_ref": "telegram:100000001"}, "155"
+			)
+		self.assertEqual((name, created), (existing, False))
+		self.assertEqual(frappe.db.count("DB Conversation"), 1)
+		self.assertEqual(frappe.db.get_value("DB Conversation", existing, "thread_id"), "1001")
 
 	def test_duplicate_delivery_with_attachments_does_not_republish(self):
 		att = [{"file_id": 5, "filename": "a.png", "mime_type": "image/png", "media_type": "photo"}]
@@ -286,9 +313,80 @@ class TestProcessor(DialogBrainTestCase):
 		msg = _msg("9000001")
 		self.assertIsNotNone(msg)
 		self.assertEqual(msg.message_id, "telegram:5000001")
+		# provisional: direction unknown -> no direction/author, counters or alerts
+		self.assertFalse(msg.direction)
+		self.assertFalse(msg.author_type)
 		conv = frappe.get_doc("DB Conversation", msg.conversation)
 		self.assertEqual(conv.thread_ref, "telegram:100000001")
 		self.assertEqual(conv.channel, "155")
+		self.assertFalse(conv.unread_count)
+		self.assertFalse(conv.last_message_at)
+		self.assertEqual(_logs(conv.name), [])
+
+	def test_partial_then_full_inbound_counts_once(self):
+		_process(UPDATED)
+		with patch("frappe.publish_realtime") as pub:
+			_process(INBOUND)
+		msg = _msg("9000001")
+		self.assertEqual((msg.direction, msg.author_type), ("in", "customer"))
+		self.assertEqual(msg.text, "Hi, please send me the offer for the project, thanks.")
+		conv = frappe.get_doc("DB Conversation", msg.conversation)
+		self.assertEqual(conv.unread_count, 1)
+		self.assertEqual(conv.last_message_preview, msg.text)
+		self.assertEqual(get_datetime(conv.last_inbound_at), to_system_datetime("2026-11-13T12:06:24+00:00"))
+		self.assertEqual(sorted(_logs(conv.name)), sorted([self.manager, self.agent, self.other]))
+		self.assertTrue([c for c in pub.call_args_list if c.args and c.args[0] == "dialogbrain:message"])
+		_process(INBOUND)  # redelivery: no second count
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv.name, "unread_count"), 1)
+		self.assertEqual(len(_logs(conv.name)), 3)
+
+	def test_partial_then_full_outgoing(self):
+		_process(UPDATED)
+		data = _data(
+			INBOUND,
+			is_outgoing=True,
+			from_id="system",
+			from_name="Sales Bot",
+			sender={"id": "system", "name": "Sales Bot"},
+			html="Our offer is attached",
+		)
+		from dialogbrain.sync.processor import process_event
+
+		process_event("message.received", data)
+		msg = _msg("9000001")
+		self.assertEqual((msg.direction, msg.author_type, msg.delivery_status), ("out", "agent", "sent"))
+		conv = frappe.get_doc("DB Conversation", msg.conversation)
+		self.assertFalse(conv.unread_count)
+		self.assertEqual(conv.last_message_direction, "out")
+		self.assertEqual(conv.last_message_preview, "Our offer is attached")
+		self.assertEqual(_logs(conv.name), [])
+		self.assertEqual(frappe.db.count("DB Message"), 1)
+
+	def test_partial_then_echo_folds_into_pending_reply(self):
+		from dialogbrain.sync.processor import process_event
+		from dialogbrain.sync.upsert import upsert_channel, upsert_conversation
+
+		data = _data(OUTGOING)
+		conv, _ = upsert_conversation({"id": "8451249", "channel_ref": data["thread_id"]}, upsert_channel("201", "livechat"))
+		pending = frappe.get_doc(
+			{
+				"doctype": "DB Message",
+				"conversation": conv,
+				"direction": "out",
+				"author_type": "manager",
+				"sent_by": self.agent,
+				"text": data["message"]["html"],
+				"delivery_status": "pending",
+				"sent_at": frappe.utils.now_datetime(),
+			}
+		).insert(ignore_permissions=True)
+		partial = {k: data[k] for k in ("channel", "account_id", "thread_id")}
+		partial["message"] = {"db_id": "27771418", "message_id": data["message"]["message_id"], "meta": {}}
+		process_event("message.updated", partial)
+		_process(OUTGOING, sent_at=_iso(datetime.now(timezone.utc)))
+		rows = frappe.get_all("DB Message", fields=["name", "db_id", "sent_by"])
+		self.assertEqual(len(rows), 1)
+		self.assertEqual((rows[0].name, rows[0].db_id, rows[0].sent_by), (pending.name, "27771418", self.agent))
 
 	def test_updated_event_without_html_keeps_text(self):
 		_process(INBOUND)
@@ -397,11 +495,33 @@ class TestProcessor(DialogBrainTestCase):
 		process_event("handoff.requested", {"thread_id": 1001, "reason": "again", "origin": "agent"})
 		self.assertEqual(len(_logs(name)), 2 * len(permitted_users("155")))
 
-	def test_handoff_for_unknown_thread_is_ignored(self):
-		from dialogbrain.sync.processor import process_event
+	def test_handoff_before_conversation_fails_then_retries(self):
+		from dialogbrain.sync.processor import process_delivery
 
-		process_event("handoff.requested", {"thread_id": 424242, "reason": "x", "origin": "agent"})
-		self.assertEqual(frappe.db.count("DB Conversation"), 0)
+		log = frappe.get_doc(
+			{
+				"doctype": "DB Webhook Log",
+				"delivery_id": "h-1",
+				"event": "handoff.requested",
+				"payload": json.dumps(
+					{"event": "handoff.requested", "data": {"thread_id": 1001, "reason": "x", "origin": "agent"}, "delivery_id": "h-1"}
+				),
+				"status": "queued",
+				"attempts": 0,
+			}
+		).insert(ignore_permissions=True).name
+		process_delivery(log_name=log)
+		row = frappe.db.get_value("DB Webhook Log", log, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("unknown thread", row.error)
+
+		_process(INBOUND)
+		name = _conv_by_thread("1001")
+		frappe.db.delete("Notification Log", {"document_type": "DB Conversation"})
+		process_delivery(log_name=log)
+		self.assertEqual(frappe.db.get_value("DB Webhook Log", log, "status"), "processed")
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "needs_human"), 1)
+		self.assertEqual(sorted(_logs(name)), sorted(permitted_users("155")))
 
 	def test_message_deleted_marks_deleted(self):
 		_process(GROUP)

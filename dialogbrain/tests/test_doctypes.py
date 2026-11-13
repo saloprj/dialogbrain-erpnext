@@ -25,6 +25,21 @@ class TestDoctypes(DialogBrainTestCase):
 		with self.assertRaises(UniqueValidationError):
 			_conv("t-1").insert()
 
+	def test_thread_id_optional_blank_is_null(self):
+		a = _conv("", thread_ref="telegram:1").insert()
+		b = _conv(None, thread_ref="telegram:2").insert()
+		self.assertIsNone(frappe.db.get_value("DB Conversation", a.name, "thread_id"))
+		self.assertIsNone(frappe.db.get_value("DB Conversation", b.name, "thread_id"))
+
+	def test_channel_thread_ref_unique(self):
+		for account in ("dt-1", "dt-2"):
+			if not frappe.db.exists("DB Channel", account):
+				frappe.get_doc({"doctype": "DB Channel", "account_id": account}).insert()
+		_conv(None, channel="dt-1", thread_ref="telegram:9").insert()
+		_conv(None, channel="dt-2", thread_ref="telegram:9").insert()  # other account: fine
+		with self.assertRaises(UniqueValidationError):
+			_conv(None, channel="dt-1", thread_ref="telegram:9").insert()
+
 	def test_db_id_unique(self):
 		_msg(self.conv, db_id="m1").insert()
 		with self.assertRaises(UniqueValidationError):

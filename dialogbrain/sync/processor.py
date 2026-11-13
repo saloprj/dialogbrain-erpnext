@@ -223,7 +223,7 @@ def _on_draft_created(data):
 	else:
 		conversation = find_conversation(*thread_keys(thread))
 	if not conversation:
-		return
+		raise LookupError(f"draft.created for unknown thread {thread.get('thread_id')}")
 	text = data.get("response_text") or data.get("text")
 
 	existing = frappe.db.get_value("DB Draft", {"draft_id": draft_id})
@@ -255,7 +255,9 @@ def _on_handoff_requested(data):
 	internal = _s(data.get("thread_id"))
 	conversation = find_conversation(internal, _s(data.get("thread_ref")), _s(data.get("account_id")))
 	if not conversation:
-		return
+		# not mirrored yet (webhook before the first message / backfill): fail the
+		# delivery so it is retried instead of losing the handoff
+		raise LookupError(f"handoff.requested for unknown thread {internal}")
 	frappe.db.set_value("DB Conversation", conversation, "needs_human", 1)
 	publish(conversation, "conversation", {"needs_human": 1})
 	notify(conversation, "handoff")
