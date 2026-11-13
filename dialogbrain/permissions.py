@@ -6,6 +6,17 @@
 * Anyone else sees nothing.
 
 Enforced via ``permission_query_conditions`` (lists) and ``has_permission`` (docs).
+
+Field level (fix wave F5): every DB Conversation field except ``status`` is permlevel 1 —
+thread identity (``thread_id``, ``thread_ref``, ``channel``), contact details, party link,
+``assigned_to``, AI override/handoff flags and counters. Chat Manager and System Manager
+read and write level 1; Chat Agent only reads it, so a desk save / ``frappe.client.
+set_value`` by an agent can change ``status`` only (Frappe resets the other fields). Agent
+actions that touch level-1 fields (assign to self / take an unassigned conversation, mark
+read, take over from the AI, link a party) go through whitelisted methods that check
+:func:`assert_can_access` and the action's own rule, then write server-side (``set_party`` /
+``create_lead`` today, the inbox actions in Plan 2). DB Message rows are mirror rows written
+by the server only: no role but System Manager has create/write on them.
 """
 
 import frappe

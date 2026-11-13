@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 18:00:00.000000",
+ "modified": "2026-11-13 20:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -39,79 +39,93 @@
    "fieldtype": "Data",
    "label": "Thread Id",
    "unique": 1,
-   "description": "DialogBrain internal thread id; empty while only the channel ref is known"
+   "description": "DialogBrain internal thread id; empty while only the channel ref is known",
+   "permlevel": 1
   },
   {
    "fieldname": "thread_ref",
    "fieldtype": "Data",
-   "label": "Thread Ref"
+   "label": "Thread Ref",
+   "permlevel": 1
   },
   {
    "fieldname": "channel",
    "fieldtype": "Link",
    "label": "Channel",
    "options": "DB Channel",
-   "in_list_view": 1
+   "in_list_view": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "title",
    "fieldtype": "Data",
    "label": "Title",
-   "in_list_view": 1
+   "in_list_view": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "contact_name",
    "fieldtype": "Data",
-   "label": "Contact Name"
+   "label": "Contact Name",
+   "permlevel": 1
   },
   {
    "fieldname": "phone",
    "fieldtype": "Data",
-   "label": "Phone"
+   "label": "Phone",
+   "permlevel": 1
   },
   {
    "fieldname": "email",
    "fieldtype": "Data",
-   "label": "Email"
+   "label": "Email",
+   "permlevel": 1
   },
   {
    "fieldname": "handle",
    "fieldtype": "Data",
-   "label": "Handle"
+   "label": "Handle",
+   "permlevel": 1
   },
   {
    "fieldname": "avatar_url",
    "fieldtype": "Data",
-   "label": "Avatar Url"
+   "label": "Avatar Url",
+   "permlevel": 1
   },
   {
    "fieldname": "db_contact_id",
    "fieldtype": "Data",
-   "label": "Db Contact Id"
+   "label": "Db Contact Id",
+   "permlevel": 1
   },
   {
    "fieldname": "party_type",
    "fieldtype": "Link",
    "label": "Party Type",
-   "options": "DocType"
+   "options": "DocType",
+   "permlevel": 1
   },
   {
    "fieldname": "party",
    "fieldtype": "Dynamic Link",
    "label": "Party",
-   "options": "party_type"
+   "options": "party_type",
+   "permlevel": 1
   },
   {
    "fieldname": "contact",
    "fieldtype": "Link",
    "label": "Contact",
-   "options": "Contact"
+   "options": "Contact",
+   "permlevel": 1
   },
   {
    "fieldname": "link_source",
    "fieldtype": "Select",
    "label": "Link Source",
-   "options": "\nauto_verified\nauto_unverified\nmanual"
+   "options": "\nauto_verified\nauto_unverified\nmanual",
+   "permlevel": 1
   },
   {
    "fieldname": "status",
@@ -125,60 +139,71 @@
    "fieldname": "assigned_to",
    "fieldtype": "Link",
    "label": "Assigned To",
-   "options": "User"
+   "options": "User",
+   "permlevel": 1
   },
   {
    "fieldname": "agent_override",
    "fieldtype": "Select",
    "label": "Agent Override",
    "options": "default\nhuman\nagent",
-   "default": "default"
+   "default": "default",
+   "permlevel": 1
   },
   {
    "fieldname": "needs_human",
    "fieldtype": "Check",
-   "label": "Needs Human"
+   "label": "Needs Human",
+   "permlevel": 1
   },
   {
    "fieldname": "last_message_at",
    "fieldtype": "Datetime",
-   "label": "Last Message At"
+   "label": "Last Message At",
+   "permlevel": 1
   },
   {
    "fieldname": "last_message_preview",
    "fieldtype": "Small Text",
-   "label": "Last Message Preview"
+   "label": "Last Message Preview",
+   "permlevel": 1
   },
   {
    "fieldname": "last_inbound_at",
    "fieldtype": "Datetime",
-   "label": "Last Inbound At"
+   "label": "Last Inbound At",
+   "permlevel": 1
   },
   {
    "fieldname": "last_message_direction",
    "fieldtype": "Select",
    "label": "Last Message Direction",
-   "options": "in\nout"
+   "options": "in\nout",
+   "permlevel": 1
   },
   {
    "fieldname": "first_response_seconds",
    "fieldtype": "Int",
-   "label": "First Response Seconds"
+   "label": "First Response Seconds",
+   "permlevel": 1
   },
   {
    "fieldname": "unread_count",
    "fieldtype": "Int",
-   "label": "Unread Count"
+   "label": "Unread Count",
+   "permlevel": 1
   },
   {
    "fieldname": "opened_at",
    "fieldtype": "Datetime",
-   "label": "Opened At"
+   "label": "Opened At",
+   "permlevel": 1
   },
   {
    "fieldname": "closed_at",
    "fieldtype": "Datetime",
-   "label": "Closed At"
+   "label": "Closed At",
+   "permlevel": 1
   }
  ],
  "links": [],
@@ -213,6 +238,24 @@
    "write": 1,
    "create": 0,
    "delete": 0
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 1,
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Chat Manager",
+   "permlevel": 1,
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Chat Agent",
+   "permlevel": 1,
+   "read": 1,
+   "write": 0
   }
  ],
  "sort_field": "modified",

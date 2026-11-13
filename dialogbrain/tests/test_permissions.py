@@ -136,3 +136,56 @@ class TestPermissions(DialogBrainTestCase):
 		frappe.set_user(self.agent)
 		with self.assertRaises(frappe.PermissionError):
 			set_party(self.c_restricted, "Lead", "nonexistent")
+
+	# --- F5: field-level write permissions ------------------------------------
+
+	def _agent_set(self, field, value, user=None):
+		from frappe.client import set_value
+
+		frappe.set_user(user or self.agent)
+		try:
+			set_value("DB Conversation", self.c_open, field, value)
+		except frappe.PermissionError:
+			pass  # refused outright is fine too
+		finally:
+			frappe.set_user("Administrator")
+		return frappe.db.get_value("DB Conversation", self.c_open, field)
+
+	def test_agent_cannot_retarget_or_reassign_conversation(self):
+		"""F5: a Chat Agent may not move a conversation to another thread/channel (send
+		would target it; sync would pull its history into a visible conversation), assign
+		it to someone else or relink the party. Status stays theirs to change."""
+		frappe.db.set_value("DB Conversation", self.c_open, "thread_ref", "whatsapp:1@s.whatsapp.net")
+		for field, value in (
+			("thread_id", "perm-t2-hijack"),
+			("thread_ref", "telegram:999"),
+			("channel", RESTRICTED),
+			("assigned_to", self.other),
+			("party_type", "Lead"),
+			("link_source", "manual"),
+			("unread_count", 0),
+		):
+			before = frappe.db.get_value("DB Conversation", self.c_open, field)
+			self.assertEqual(self._agent_set(field, value), before, field)
+		self.assertEqual(self._agent_set("status", "Closed"), "Closed")
+
+	def test_manager_can_assign_anyone(self):
+		self.assertEqual(self._agent_set("assigned_to", self.other, user=self.manager), self.other)
+
+	def test_agent_reads_protected_fields(self):
+		frappe.db.set_value("DB Conversation", self.c_open, "assigned_to", self.other)
+		frappe.set_user(self.agent)
+		doc = frappe.get_doc("DB Conversation", self.c_open)
+		doc.apply_fieldlevel_read_permissions()
+		self.assertEqual(doc.thread_id, "perm-t1")
+		self.assertEqual(doc.assigned_to, self.other)
+
+	def test_chat_manager_cannot_write_mirror_messages(self):
+		"""F5: DB Message rows are written by the server only."""
+		from frappe.client import insert
+
+		frappe.set_user(self.manager)
+		self.assertFalse(frappe.has_permission("DB Message", "create"))
+		self.assertFalse(frappe.has_permission("DB Message", "write", doc=self.msg))
+		with self.assertRaises(frappe.PermissionError):
+			insert({"doctype": "DB Message", "conversation": self.c_open, "direction": "out", "text": "forged"})
