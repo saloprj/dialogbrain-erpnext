@@ -121,9 +121,12 @@ class TestConnect(DialogBrainTestCase):
 	def test_connect_happy_path_public(self):
 		client, result, enqueue = self._connect()
 
+		agent_tools = result.pop("agent_tools")
 		self.assertEqual(
 			result, {"workspace": "Test User", "channels": 8, "network_mode": "public", "warning": None}
 		)
+		# this key has no integration tools: reported, not fatal (test_agent_integration)
+		self.assertIn("not registered", agent_tools)
 		client.create_webhook.assert_called_once_with(HOOK_URL, EVENTS)
 		self.assertEqual(self._get("webhook_id"), "41")
 		secret = frappe.get_single(SETTINGS).get_password("webhook_secret")

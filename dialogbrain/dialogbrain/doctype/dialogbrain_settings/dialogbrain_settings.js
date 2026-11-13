@@ -9,6 +9,10 @@ frappe.ui.form.on("DialogBrain Settings", {
 	network_mode(frm) {
 		dialogbrain_settings.render_intro(frm);
 	},
+
+	allow_agent_writes(frm) {
+		dialogbrain_settings.set_agent_writes(frm);
+	},
 });
 
 const dialogbrain_settings = {
@@ -73,7 +77,77 @@ const dialogbrain_settings = {
 
 		this.render_intro(frm);
 		this.render_health(frm);
+		this.render_agent_tools(frm);
 		this.show_oauth_result(frm);
+		frm._db_snapshot = this.snapshot(frm);
+	},
+
+	// Everything but the writes toggle, to tell whether the form has other unsaved edits.
+	snapshot(frm) {
+		const doc = frm.doc;
+		return JSON.stringify(
+			Object.keys(doc)
+				.filter((k) => !k.startsWith("__") && k !== "allow_agent_writes" && k !== "modified")
+				.sort()
+				.map((k) => [k, doc[k]])
+		);
+	},
+
+	set_agent_writes(frm) {
+		if (frm._db_writes_reverting || !frm.doc.connected) return; // unconnected: saved with the form
+		const allow = frm.doc.allow_agent_writes ? 1 : 0;
+		frappe.call({
+			method: "dialogbrain.setup.agent_integration.set_agent_writes",
+			args: { allow },
+			freeze: true,
+			freeze_message: __("Updating DialogBrain agents…"),
+			callback: () => {
+				frappe.show_alert({
+					message: allow
+						? __("AI agents may now create Leads and draft Sales Orders")
+						: __("AI agent write tools switched off"),
+					indicator: allow ? "orange" : "green",
+				});
+				if (this.snapshot(frm) === frm._db_snapshot) frm.reload_doc();
+			},
+			error: () => {
+				frm._db_writes_reverting = true;
+				Promise.resolve(frm.set_value("allow_agent_writes", allow ? 0 : 1)).then(() => {
+					frm._db_writes_reverting = false;
+				});
+			},
+		});
+	},
+
+	render_agent_tools(frm) {
+		const esc = frappe.utils.escape_html;
+		let caps = {};
+		try {
+			caps = JSON.parse(frm.doc.agent_capabilities || "{}") || {};
+		} catch (e) {
+			caps = {};
+		}
+		const labels = [
+			["customer_tools", __("Customer data tools")],
+			["request_id", __("Safe send retries (request_id)")],
+			["agent_pause", __("Take over / give back")],
+			["full_drafts", __("Full draft text")],
+		];
+		const lines = [];
+		if (frm.doc.agent_capabilities) {
+			const items = labels.map(([key, label]) => {
+				const on = !!caps[key];
+				const color = on ? "var(--green-600)" : "var(--gray-600)";
+				return `<span style="color:${color}">${on ? "✓" : "✗"} ${esc(label)}</span>`;
+			});
+			lines.push(items.join(" &nbsp; "));
+		}
+		if (frm.doc.agent_tools_status) {
+			const bad = /not registered|need|could not|missing|failed/i.test(frm.doc.agent_tools_status);
+			const color = bad ? "var(--orange-600)" : "var(--green-600)";
+			lines.push(`<span style="color:${color}">${esc(frm.doc.agent_tools_status)}</span>`);
+		}
+		frm.set_df_property("agent_capabilities", "description", lines.join("<br>"));
 	},
 
 	oauth_start(frm) {

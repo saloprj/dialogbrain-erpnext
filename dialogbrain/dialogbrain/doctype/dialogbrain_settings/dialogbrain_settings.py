@@ -19,7 +19,7 @@ class DialogBrainSettings(Document):
 
 		# R14: a form save never overwrites what the sync/connect code manages.
 		stored = frappe.db.get_value(
-			self.doctype, self.name, [*SERVER_FIELDS, "network_mode", "public_site_url"], as_dict=True
+			self.doctype, self.name, [*SERVER_FIELDS, "network_mode", "public_site_url", "allow_agent_writes"], as_dict=True
 		) or frappe._dict()
 		for field in SERVER_FIELDS:
 			self.set(field, stored.get(field))
@@ -30,3 +30,19 @@ class DialogBrainSettings(Document):
 			(stored.network_mode or "public") != mode or (mode == "public" and url_changed)
 		):
 			configure_webhook(self, mode)
+
+		# A plain form save of the writes toggle re-applies DialogBrain's denied_tools too
+		# (the form's own toggle uses agent_integration.set_agent_writes).
+		if self.connected and frappe.utils.cint(stored.allow_agent_writes) != frappe.utils.cint(self.allow_agent_writes):
+			from dialogbrain.client import DialogBrainError
+			from dialogbrain.setup.agent_integration import apply_denied_tools
+
+			try:
+				apply_denied_tools(self)
+			except (DialogBrainError, frappe.ValidationError) as exc:
+				frappe.msgprint(
+					frappe._("DialogBrain agents were not updated ({0}). Press Reconnect to retry.").format(
+						str(exc)[:300]
+					),
+					indicator="orange",
+				)

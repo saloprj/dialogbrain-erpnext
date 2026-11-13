@@ -11,6 +11,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.setup import agent_integration
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
 from dialogbrain.sync.upsert import upsert_channel
 
@@ -57,6 +58,8 @@ SERVER_FIELDS = (
 	"integration_id",
 	"thread_context_secret",
 	"agent_capabilities",
+	"agent_tools_status",
+	"agent_tool_names",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
@@ -182,8 +185,10 @@ def _connect(doc) -> dict:
 		frappe.throw(_("Invalid API key or DialogBrain unreachable"))
 
 	missing = []
+	tools = set()
 	try:
-		missing += sorted(REQUIRED_TOOLS - set(client.list_tools() or ()))
+		tools = set(client.list_tools() or ())
+		missing += sorted(REQUIRED_TOOLS - tools)
 	except DialogBrainError:
 		missing.append(_("tool catalog (GET /api/tools/catalog)"))
 	try:
@@ -199,6 +204,8 @@ def _connect(doc) -> dict:
 		upsert_channel(account.get("account_id"), account.get("channel"), account.get("display_name"))
 
 	configure_webhook(doc, mode, client, hooks)
+	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
+	agent_tools = agent_integration.on_connect(doc, client, tools)
 	doc.workspace_id = str(workspace.get("id") or "") or None
 	doc.workspace_name = workspace.get("name")
 	doc.connected = 1
@@ -210,6 +217,7 @@ def _connect(doc) -> dict:
 		"channels": len(channels),
 		"network_mode": mode,
 		"warning": scheduler_warning(mode),
+		"agent_tools": agent_tools,
 	}
 
 
@@ -218,9 +226,20 @@ def disconnect() -> None:
 	"""Stop syncing. The subscription is deleted; mirrored data stays."""
 	frappe.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
+	try:
+		client = _client(doc)
+	except frappe.ValidationError:
+		client = None
+	# Agent tools: the agent user's key is revoked (local) and the integration is
+	# switched off for every DialogBrain agent (best effort); its endpoints stay.
+	warning = agent_integration.on_disconnect(doc, client)
+	if warning:
+		frappe.msgprint(warning, indicator="orange")
 	if doc.webhook_id:
 		try:
-			_delete_webhook(_client(doc), doc.webhook_id)
+			if client is None:
+				raise frappe.ValidationError(_("DialogBrain Settings: base URL and API key are required"))
+			_delete_webhook(client, doc.webhook_id)
 		except (DialogBrainError, frappe.ValidationError) as exc:
 			# Disconnect anyway: the receiver ignores deliveries while disconnected, and
 			# the next Connect removes a leftover subscription for the same URL.

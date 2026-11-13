@@ -41,6 +41,22 @@ class TestClient(DialogBrainTestCase):
 			client().execute("messages.send", {"text": "x"}, thread_id="42")
 		self.assertEqual(req.call_args[1]["json"]["thread_id"], "42")
 
+	def test_execute_sends_request_id_and_records_the_echo(self):
+		body = {"success": True, "data": {"id": 1}, "request_id": "erp-abc"}
+		with patch("requests.Session.request", return_value=make_response(200, body)) as req:
+			c = client()
+			data = c.execute("workspace.current", {}, request_id="erp-abc")
+		self.assertEqual(data, {"id": 1})
+		self.assertEqual(req.call_args[1]["json"]["request_id"], "erp-abc")
+		self.assertEqual(c.last_request_id, "erp-abc")
+
+	def test_execute_without_request_id_sends_none_and_old_servers_echo_nothing(self):
+		with patch("requests.Session.request", return_value=make_response(200, {"success": True, "data": 1})) as req:
+			c = client()
+			c.execute("workspace.current", {})
+		self.assertNotIn("request_id", req.call_args[1]["json"])
+		self.assertIsNone(c.last_request_id)
+
 	def test_execute_returns_data(self):
 		body = load_fixture("search_threads")
 		with patch("requests.Session.request", return_value=make_response(200, body)):

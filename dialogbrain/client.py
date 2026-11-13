@@ -35,6 +35,8 @@ class DialogBrainClient:
 		self._api_key = api_key
 		self.timeout = timeout
 		self._session = requests.Session()
+		# ``request_id`` echoed by the last ``execute`` (DialogBrain with Part A1), else None
+		self.last_request_id = None
 
 	@classmethod
 	def from_settings(cls):
@@ -100,13 +102,24 @@ class DialogBrainClient:
 
 	# -- tools ---------------------------------------------------------
 
-	def execute(self, tool_id: str, params: dict, thread_id: str | None = None):
+	def execute(self, tool_id: str, params: dict, thread_id: str | None = None, request_id: str | None = None):
+		"""Run a tool; returns its ``data``.
+
+		``request_id`` (optional) is DialogBrain's idempotency key: a repeat of the same call
+		with the same id returns the first result instead of running again. DialogBrain
+		with that support echoes it at the top level of the response; the echo (or None)
+		is kept in ``self.last_request_id``. An older DialogBrain ignores the field."""
 		body = {"tool_id": tool_id, "params": params, "mode": "auto", "skip_approval": True}
 		if thread_id is not None:
 			body["thread_id"] = thread_id
+		if request_id is not None:
+			body["request_id"] = request_id
+		self.last_request_id = None
 		payload = self._json(self._request("POST", f"/api/tools/{tool_id}/execute", json=body))
 		if not isinstance(payload, dict):
 			raise DialogBrainError("Unexpected DialogBrain response shape")
+		echoed = payload.get("request_id")
+		self.last_request_id = echoed if isinstance(echoed, str) else None
 		if payload.get("requires_approval"):
 			raise DialogBrainError(
 				self._scrub(payload.get("message") or "approval required"), code="requires_approval"
