@@ -132,7 +132,7 @@ const dialogbrain_settings = {
 				frappe.msgprint({
 					message: __(
 						"Webhook address set to {0} — change it if DialogBrain can't reach this address",
-						[frappe.utils.escape_html(String(res.public_site_url_filled === true ? frm.doc.public_site_url || "" : res.public_site_url_filled))]
+						[frappe.utils.escape_html(String(res.public_site_url_filled))]
 					),
 					indicator: "blue",
 					title: __("DialogBrain"),
