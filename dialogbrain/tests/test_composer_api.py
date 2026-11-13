@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 
 from dialogbrain.api import composer as api
-from dialogbrain.client import DialogBrainError
+from dialogbrain.client import DialogBrainError, DialogBrainTimeout
 from dialogbrain.tests.test_inbox_api import _channel, _conv, _user
 from dialogbrain.tests.utils import DialogBrainTestCase
 
@@ -239,12 +239,53 @@ class TestComposerApi(DialogBrainTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._approve(d)
 
-	def test_approve_expired_marks_superseded(self):
+	def test_approve_expired_returns_superseded(self):
 		d = _draft(self.conv_a)
 		frappe.set_user(self.agent_a)
-		with self.assertRaises(frappe.ValidationError):
-			self._approve(d, result={"status": "expired"})
+		_, pub, out = self._approve(d, result={"status": "expired"})
+		self.assertEqual(out["status"], "superseded")
+		self.assertFalse(out["sent"])
+		self.assertIn("already handled or expired", out["message"])
+		self.assertEqual(pub.call_args[0][:2], (self.conv_a, "draft"))
 		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "superseded")
+
+	def test_approve_not_found_returns_superseded(self):
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		err = DialogBrainError("Draft 101 not found or already processed", code="not_found")
+		_, _, out = self._approve(d, error=err)
+		self.assertEqual(out["status"], "superseded")
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "superseded")
+
+	def test_approve_timeout_unknown_stays_pending(self):
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		_, pub, out = self._approve(d, error=DialogBrainTimeout("slow"))
+		self.assertEqual(out["status"], "unknown")
+		self.assertIn("Outcome unknown", out["message"])
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "pending")
+		pub.assert_not_called()
+
+	def test_approve_empty_edit_refused(self):
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		with patch(CLIENT) as cls:
+			for t in ("", "   \n"):
+				with self.assertRaises(frappe.ValidationError):
+					api.approve_draft(d, t)
+			cls.from_settings.assert_not_called()
+
+	def test_approved_not_sent_reports_safe_message(self):
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		_, _, out = self._approve(
+			d, result={"status": "approved_not_sent", "send_error": "rate limited db_live_abcd1234 x"}
+		)
+		self.assertEqual(out["status"], "approved")
+		self.assertFalse(out["sent"])
+		self.assertIn("rate limited", out["message"])
+		self.assertNotIn("db_live_abcd1234", out["message"])
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "approved")
 
 	def test_truncated_edit_refused_as_is_allowed(self):
 		d = _draft(self.conv_a, text="x" * 500)
@@ -279,6 +320,23 @@ class TestComposerApi(DialogBrainTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				api.reject_draft(d)
 		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "pending")
+
+	def test_reject_gone_and_timeout(self):
+		frappe.set_user(self.agent_a)
+		for i, (err, status) in enumerate(((DialogBrainError("x", code="not_found"), "superseded"),
+										   (DialogBrainTimeout("slow"), "unknown"))):
+			frappe.set_user("Administrator")
+			d = _draft(self.conv_a, draft_id=str(300 + i))
+			frappe.set_user(self.agent_a)
+			client = MagicMock()
+			client.execute.side_effect = err
+			with patch(CLIENT) as cls, patch(PUBLISH):
+				cls.from_settings.return_value = client
+				out = api.reject_draft(d)
+			self.assertEqual(out["status"], status)
+			self.assertEqual(
+				frappe.db.get_value("DB Draft", d, "status"), "superseded" if i == 0 else "pending"
+			)
 
 	def test_foreign_draft_refused(self):
 		d = _draft(self.conv_b, draft_id="202")

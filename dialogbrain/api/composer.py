@@ -19,11 +19,13 @@ looks cut (:func:`dialogbrain.api.conversations.is_draft_truncated`) can therefo
 approved as is; an edited approve is refused, as it would send the truncated text.
 """
 
+import re
+
 import frappe
 from frappe import _
 
 from dialogbrain.api.conversations import is_draft_truncated
-from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
 from dialogbrain.permissions import assert_can_access, is_manager
 from dialogbrain.sync.notify import publish
 
@@ -142,12 +144,40 @@ def _draft_param(row):
 		frappe.throw(_("This draft has an invalid DialogBrain id"))
 
 
+GONE_MESSAGE = "This draft was already handled or expired in DialogBrain."
+UNKNOWN_MESSAGE = "Outcome unknown — check the conversation before trying again."
+_SECRET = re.compile(r"db_(?:live|test)_\w+")
+
+
+class _Gone(Exception):
+	"""DialogBrain no longer holds the draft as pending (expired / not found / processed)."""
+
+
+class _Unknown(Exception):
+	"""DialogBrain timed out: the call may or may not have taken effect."""
+
+
+def _is_gone(e):
+	code = str(e.code or "").lower()
+	return code in ("not_found", "not-found") or e.status == 404 or "not found" in str(e).lower() \
+		or "already processed" in str(e).lower()
+
+
+def _safe(text):
+	return _SECRET.sub("[hidden]", str(text or ""))[:TOOL_ERROR_MAX]
+
+
 def _call(tool_id, params):
-	"""Run a DialogBrain tool; any DialogBrain failure becomes a safe message (no key, no
-	upstream detail)."""
+	"""Run a DialogBrain tool. Terminal outcomes raise :class:`_Gone` / :class:`_Unknown`
+	(handled by the caller as results, so the status change commits); any other DialogBrain
+	failure becomes a safe message (no key, no upstream detail) and the draft stays pending."""
 	try:
 		return DialogBrainClient.from_settings().execute(tool_id, params) or {}
-	except DialogBrainError:
+	except DialogBrainTimeout:
+		raise _Unknown() from None
+	except DialogBrainError as e:
+		if _is_gone(e):
+			raise _Gone() from None
 		frappe.log_error(title=f"DialogBrain {tool_id} failed", message=frappe.get_traceback())
 		frappe.throw(_("DialogBrain could not process this draft. Try again later."))
 
@@ -157,28 +187,52 @@ def _set_status(row, status):
 	publish(row.conversation, "draft", {"draft": row.name, "status": status})
 
 
+def _result(row, status, sent=False, message=""):
+	return {"name": row.name, "status": status, "sent": sent, "message": message}
+
+
+def _gone(row):
+	_set_status(row, "superseded")
+	return _result(row, "superseded", message=_(GONE_MESSAGE))
+
+
 @frappe.whitelist(methods=["POST"])
 def approve_draft(draft: str, text: "str | None" = None) -> dict:
+	"""Returns ``{"status": approved|superseded|unknown, "sent", "message"}``. Terminal
+	DialogBrain outcomes are results, not exceptions, so the local status change commits."""
 	row = _pending_draft(draft)
 	params = {"draft_id": _draft_param(row)}
-	edited = text is not None and text != (row.text or "")
-	if edited:
+	if text is not None and not text.strip():
+		frappe.throw(_("Draft text is empty."))
+	if text is not None and text != (row.text or ""):
 		if is_draft_truncated(row.text):
 			frappe.throw(
 				_("This draft was shortened by DialogBrain. Approve it as is or reject it.")
 			)
 		params["edited_text"] = text
-	data = _call("agents.approve_draft", params)
-	if data.get("status") == "expired":
-		_set_status(row, "superseded")
-		frappe.throw(_("This draft expired because the conversation was already answered."))
+	try:
+		data = _call("agents.approve_draft", params)
+	except _Unknown:
+		return _result(row, "unknown", message=_(UNKNOWN_MESSAGE))
+	except _Gone:
+		return _gone(row)
+	status = data.get("status")
+	if status == "expired":
+		return _gone(row)
 	_set_status(row, "approved")
-	return {"name": row.name, "status": "approved", "sent": data.get("status") == "sent"}
+	if status == "approved_not_sent":
+		return _result(row, "approved", message=_safe(data.get("send_error")) or _("Approved but not sent."))
+	return _result(row, "approved", sent=status == "sent")
 
 
 @frappe.whitelist(methods=["POST"])
 def reject_draft(draft: str) -> dict:
 	row = _pending_draft(draft)
-	_call("agents.reject_draft", {"draft_id": _draft_param(row)})
+	try:
+		_call("agents.reject_draft", {"draft_id": _draft_param(row)})
+	except _Unknown:
+		return _result(row, "unknown", message=_(UNKNOWN_MESSAGE))
+	except _Gone:
+		return _gone(row)
 	_set_status(row, "rejected")
-	return {"name": row.name, "status": "rejected"}
+	return _result(row, "rejected")
