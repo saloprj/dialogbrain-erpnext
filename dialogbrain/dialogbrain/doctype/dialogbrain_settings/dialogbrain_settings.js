@@ -143,8 +143,10 @@ const dialogbrain_settings = {
 			lines.push(items.join(" &nbsp; "));
 		}
 		if (frm.doc.agent_tools_status) {
-			const bad = /not registered|need|could not|missing|failed/i.test(frm.doc.agent_tools_status);
-			const color = bad ? "var(--orange-600)" : "var(--green-600)";
+			// colour from the server's flag (ok | problems | skipped), not from the wording
+			const flag = caps.status || "problems";
+			const color =
+				flag === "ok" ? "var(--green-600)" : flag === "skipped" ? "var(--gray-600)" : "var(--orange-600)";
 			lines.push(`<span style="color:${color}">${esc(frm.doc.agent_tools_status)}</span>`);
 		}
 		frm.set_df_property("agent_capabilities", "description", lines.join("<br>"));
@@ -185,13 +187,16 @@ const dialogbrain_settings = {
 	},
 
 	show_connected(res) {
-		frappe.show_alert({
-			message: __("Connected to {0}: {1} channels, history import queued", [
-				frappe.utils.escape_html(String(res.workspace)),
-				frappe.utils.escape_html(String(res.channels)),
-			]),
-			indicator: "green",
-		});
+		const esc = frappe.utils.escape_html;
+		const tools_bad = res.agent_tools_ok === false;
+		let message = __("Connected to {0}: {1} channels, history import queued", [
+			esc(String(res.workspace)),
+			esc(String(res.channels)),
+		]);
+		if (tools_bad && res.agent_tools) {
+			message += "<br>" + __("AI agent tools: {0}", [esc(String(res.agent_tools))]);
+		}
+		frappe.show_alert({ message, indicator: tools_bad ? "orange" : "green" }, tools_bad ? 15 : 7);
 		this.show_warning(res.warning);
 	},
 

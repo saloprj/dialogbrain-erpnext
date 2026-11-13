@@ -169,7 +169,7 @@ class FakeDialogBrain:
 		return self.integrations[iid]["ops"][PREFIX + method]
 
 
-class TestAgentIntegration(DialogBrainTestCase):
+class _AgentIntegrationCase(DialogBrainTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		doc = frappe.get_single(SETTINGS)
@@ -215,6 +215,8 @@ class TestAgentIntegration(DialogBrainTestCase):
 			"User", user, "api_secret", raise_exception=False
 		)
 
+
+class TestAgentIntegration(_AgentIntegrationCase):
 	# --- full DialogBrain -------------------------------------------------------------
 
 	def test_full_capabilities_register_six_tools_context_and_every_agent(self):
@@ -511,3 +513,175 @@ class TestAgentIntegration(DialogBrainTestCase):
 		with patch.object(mod, "DialogBrainClient", return_value=fake):
 			mod.disconnect()
 		self.assertEqual(self._get("connected"), 0)
+
+
+class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
+	"""Review fix round 1: key rotation rollback, fail-closed denied_tools, R10 schemas."""
+
+	# --- 1. a failed auth push keeps the previous key ---------------------------------
+
+	def test_set_auth_failure_on_reconnect_keeps_the_previous_key(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		key, secret = self._agent_secret()
+
+		fake.fail["integrations.set_auth"] = DialogBrainError("DialogBrain HTTP 503: unavailable", status=503)
+		result = self._connect(fake)
+
+		self.assertEqual(self._get("connected"), 1)
+		self.assertEqual(self._agent_secret(), (key, secret))
+		self.assertEqual(fake.integrations[iid]["auth"]["headers"]["Authorization"], f"token {key}:{secret}")
+		self.assertIn("previous key", self._get("agent_tools_status"))
+		self.assertEqual(self._caps()["status"], "problems")
+		self.assertFalse(result["agent_tools_ok"])
+		# the rest still ran on the old key
+		self.assertEqual(fake.methods(iid), GENERIC | CUSTOMER)
+		self.assertEqual(set(fake.attached), {(5, iid), (6, iid)})
+
+	def test_add_endpoints_auth_failure_keeps_the_previous_key(self):
+		fake = FakeDialogBrain(tools=REQUIRED | (REGISTRATION - {"integrations.set_auth"}) | PART_A)
+		self._connect(fake)
+		key, secret = self._agent_secret()
+		fake.fail["integrations.add_endpoints"] = DialogBrainError("DialogBrain HTTP 502", status=502)
+		self._connect(fake)
+		self.assertEqual(self._get("connected"), 1)
+		self.assertEqual(self._agent_secret(), (key, secret))
+		self.assertEqual(self._caps()["status"], "problems")
+
+	def test_ok_status_flag(self):
+		result = self._connect(FakeDialogBrain())
+		self.assertEqual(self._caps()["status"], "ok")
+		self.assertTrue(result["agent_tools_ok"])
+
+	def test_private_mode_status_flag_is_skipped(self):
+		frappe.db.set_single_value(SETTINGS, "network_mode", "private")
+		self._connect(FakeDialogBrain())
+		self.assertEqual(self._caps()["status"], "skipped")
+
+	# --- 2. denied_tools fails closed -------------------------------------------------
+
+	def test_unidentified_write_tools_attach_agents_disabled(self):
+		fake = FakeDialogBrain()
+		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		fake._opid = lambda path: "zz" + str(sum(map(ord, path)))  # fallback cannot match these
+		self._connect(fake)
+
+		iid = int(self._get("integration_id"))
+		self.assertEqual(set(fake.attached), {(5, iid), (6, iid)})
+		for row in fake.attached.values():
+			self.assertFalse(row["enabled"])
+		self.assertIn("write tools could not be identified; agents not attached", self._get("agent_tools_status"))
+		self.assertEqual(self._caps()["status"], "problems")
+
+	def test_unidentified_write_tools_when_writes_allowed_still_attach(self):
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+		fake = FakeDialogBrain()
+		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		fake._opid = lambda path: "zz" + str(sum(map(ord, path)))
+		self._connect(fake)
+		for row in fake.attached.values():
+			self.assertTrue(row["enabled"])
+			self.assertEqual(row["denied_tools"], [])
+
+	def test_toggle_refused_with_empty_tool_map(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		frappe.db.set_single_value(SETTINGS, "agent_tool_names", "")
+		before = len(fake.called("agents.set_integration"))
+		for allow in (1, 0):
+			frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1 - allow)
+			with patch.object(mod, "_client", return_value=fake):
+				with self.assertRaises(frappe.ValidationError) as cm:
+					mod.set_agent_writes(allow)
+			self.assertIn("Not changed", str(cm.exception))
+			self.assertEqual(self._get("allow_agent_writes"), 1 - allow)
+		self.assertEqual(len(fake.called("agents.set_integration")), before)
+
+	def test_toggle_dialogbrain_failure_is_not_changed(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		fake.fail["agents.set_integration"] = DialogBrainError("down")
+		with patch.object(mod, "_client", return_value=fake):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				mod.set_agent_writes(1)
+		self.assertIn("Not changed: DialogBrain could not be updated", str(cm.exception))
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+
+	def test_stale_customer_endpoints_unlisted_is_a_problem(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		fake.thread_context_error = DialogBrainError("refused", error_type="permission_denied")
+		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		self._connect(fake)
+		self.assertIn("customer tools may still be registered", self._get("agent_tools_status"))
+
+	def test_remove_endpoints_failure_is_recorded_not_fatal(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		fake.thread_context_error = DialogBrainError("refused", error_type="permission_denied")
+		fake.fail["integrations.remove_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		self._connect(fake)
+		self.assertIn("could not be removed", self._get("agent_tools_status"))
+		self.assertEqual(self._caps()["status"], "problems")
+		names = json.loads(self._get("agent_tool_names"))
+		self.assertEqual(set(names), GENERIC)
+		for row in fake.attached.values():
+			self.assertTrue(row["enabled"])
+		self.assertEqual(set(fake.attached), {(5, iid), (6, iid)})
+
+	# --- 3. disconnect best effort ----------------------------------------------------
+
+	def test_disconnect_survives_agent_user_save_failure(self):
+		from dialogbrain.setup import connect as mod
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		with patch.object(mod, "DialogBrainClient", return_value=fake), patch(
+			"frappe.core.doctype.user.user.User.save", side_effect=frappe.ValidationError("nope")
+		):
+			mod.disconnect()
+		self.assertEqual(self._get("connected"), 0)
+
+	# --- 4. R10: request_schema + description, error_type -----------------------------
+
+	def test_endpoints_carry_request_schema_and_short_descriptions(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		eps = {
+			ep["path"][len(PREFIX) :]: ep
+			for params in fake.called("integrations.add_endpoints")
+			for ep in params["endpoints"]
+		}
+		for ep in eps.values():
+			self.assertLessEqual(len(ep["description"]), 1024)
+		for method in ("get_item", "create_lead", "order_status", "create_draft_order"):
+			schema = eps[method]["request_schema"]
+			self.assertEqual(schema["type"], "object")
+			self.assertEqual(set(schema["properties"]), set(eps[method]["request_body"]))
+		self.assertEqual(eps["get_item"]["request_schema"]["properties"]["limit"]["type"], "integer")
+		self.assertEqual(eps["create_lead"]["request_schema"]["required"], ["name"])
+		items = eps["create_draft_order"]["request_schema"]["properties"]["items"]
+		self.assertEqual(items["type"], "array")
+		self.assertEqual(items["items"]["properties"]["item_code"]["type"], "string")
+		self.assertEqual(items["items"]["properties"]["qty"]["type"], "number")
+		self.assertEqual(sorted(items["items"]["required"]), ["item_code", "qty"])
+		self.assertIn("items", eps["create_draft_order"]["request_schema"]["required"])
+
+	def test_permission_denied_error_type_is_the_admin_refusal(self):
+		fake = FakeDialogBrain(thread_context_error=DialogBrainError("refused", error_type="permission_denied"))
+		self._connect(fake)
+		self.assertIn("Customer data tools need an admin/owner DialogBrain API key", self._get("agent_tools_status"))
+
+	def test_other_error_type_is_not_the_admin_refusal_even_if_worded_so(self):
+		err = DialogBrainError("permission wording but bad secret", error_type="invalid_arguments")
+		fake = FakeDialogBrain(thread_context_error=err)
+		self._connect(fake)
+		status = self._get("agent_tools_status")
+		self.assertNotIn("admin/owner", status)
+		self.assertIn("thread context:", status)

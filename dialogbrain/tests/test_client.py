@@ -71,6 +71,21 @@ class TestClient(DialogBrainTestCase):
 		self.assertEqual(cm.exception.code, "Thread not found")
 		self.assertIsNone(cm.exception.status)
 
+	def test_execute_error_exposes_error_type(self):
+		body = {"success": False, "error": "needs the admin role", "error_type": "permission_denied"}
+		with patch("requests.Session.request", return_value=make_response(200, body)):
+			with self.assertRaises(DialogBrainError) as cm:
+				client().execute("integrations.set_thread_context", {})
+		self.assertEqual(cm.exception.error_type, "permission_denied")
+
+	def test_execute_error_without_error_type_is_none(self):
+		body = {"success": False, "error": "Thread not found"}
+		with patch("requests.Session.request", return_value=make_response(200, body)):
+			with self.assertRaises(DialogBrainError) as cm:
+				client().execute("messages.send", {})
+		self.assertIsNone(cm.exception.error_type)
+		self.assertIsNone(DialogBrainError("x").error_type)
+
 	def test_execute_raises_on_http_401(self):
 		with patch("requests.Session.request", return_value=make_response(401, {"detail": {"code": "INVALID_API_KEY", "message": "Invalid API key"}})):
 			with self.assertRaises(DialogBrainError) as cm:

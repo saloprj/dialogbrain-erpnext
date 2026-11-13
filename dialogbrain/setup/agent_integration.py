@@ -76,6 +76,7 @@ SETTINGS = "DialogBrain Settings"
 ROLE = "System Manager"
 PATH = "/api/method/dialogbrain.agent_api.{}"
 STATUS_LENGTH = 1000
+KEY_SAVEPOINT = "dialogbrain_agent_key"
 ADMIN_KEY_MESSAGE = "Customer data tools need an admin/owner DialogBrain API key"
 
 # Tools ERPNext needs to register itself; without them registration is skipped.
@@ -102,6 +103,20 @@ ENDPOINTS = {
 		"scope": "generic",
 		"write": False,
 		"request_body": {"query": "laptop", "limit": 5},
+		"request_schema": {
+			"type": "object",
+			"properties": {
+				"query": {"type": "string", "description": "Words to look for: item code, name or description."},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 20,
+					"description": "How many items to return (default 5).",
+				},
+			},
+			"required": ["query"],
+			"additionalProperties": False,
+		},
 		"description": (
 			"Search the product catalogue by item code, name or description. Returns up to"
 			" `limit` (default 5, max 20) items: item_code, item_name, price and currency from"
@@ -117,6 +132,17 @@ ENDPOINTS = {
 			"phone": "+15550100",
 			"email": "jane@example.com",
 			"note": "Asked for a quote on 10 laptops",
+		},
+		"request_schema": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string", "description": "The person's full name."},
+				"phone": {"type": "string", "description": "Phone number, if they gave one."},
+				"email": {"type": "string", "description": "Email address, if they gave one."},
+				"note": {"type": "string", "description": "What they want, in one or two sentences."},
+			},
+			"required": ["name"],
+			"additionalProperties": False,
 		},
 		"description": (
 			"Record a sales lead in ERPNext for someone who is not a customer yet: `name` is"
@@ -137,6 +163,16 @@ ENDPOINTS = {
 		"scope": "customer",
 		"write": False,
 		"request_body": {"order_no": "SAL-ORD-2026-00001"},
+		"request_schema": {
+			"type": "object",
+			"properties": {
+				"order_no": {
+					"type": "string",
+					"description": "Optional sales order number the customer mentioned, e.g. SAL-ORD-2026-00001.",
+				},
+			},
+			"additionalProperties": False,
+		},
 		"description": (
 			"Status of this customer's sales orders: the last 5, or the one named by the"
 			" optional `order_no` if it belongs to them. Each has name, date, status,"
@@ -156,6 +192,27 @@ ENDPOINTS = {
 		"scope": "customer",
 		"write": True,
 		"request_body": {"items": [{"item_code": "LAPTOP-14", "qty": 1}]},
+		"request_schema": {
+			"type": "object",
+			"properties": {
+				"items": {
+					"type": "array",
+					"minItems": 1,
+					"description": "The products and quantities the customer asked for.",
+					"items": {
+						"type": "object",
+						"properties": {
+							"item_code": {"type": "string", "description": "item_code from get_item."},
+							"qty": {"type": "number", "exclusiveMinimum": 0, "description": "Quantity."},
+						},
+						"required": ["item_code", "qty"],
+						"additionalProperties": False,
+					},
+				},
+			},
+			"required": ["items"],
+			"additionalProperties": False,
+		},
 		"description": (
 			"Prepare a DRAFT sales order for this customer from `items` (a list of"
 			" {item_code, qty}). The draft is never submitted: a manager reviews and confirms"
@@ -195,7 +252,9 @@ def _endpoint(method: str) -> dict:
 	spec = ENDPOINTS[method]
 	ep = {"method": "POST", "path": PATH.format(method), "description": spec["description"]}
 	if spec["request_body"] is not None:
-		ep["request_body"] = spec["request_body"]
+		ep["request_body"] = spec["request_body"]  # older DialogBrain infers the schema from it
+	if spec.get("request_schema"):
+		ep["request_schema"] = spec["request_schema"]  # DialogBrain with A6 (Ruling R10)
 	return ep
 
 
@@ -228,10 +287,33 @@ def denied_tools(doc, names: "dict | None" = None) -> list:
 
 
 def _is_admin_refusal(exc: DialogBrainError) -> bool:
+	"""``set_thread_context`` refused for want of the admin/owner role. DialogBrain with
+	A6 says so in ``error_type``; an older one only in the wording."""
+	error_type = getattr(exc, "error_type", None)
+	if error_type:
+		return error_type == "permission_denied"
 	text = str(exc).lower()
 	return exc.status == 403 or exc.code == "permission_denied" or any(
 		word in text for word in ("admin", "owner", "permission", "person")
 	)
+
+
+class WriteToolsUnknown(frappe.ValidationError):
+	"""The DialogBrain names of the write tools are not known, so they can't be denied."""
+
+
+def _unidentified_writes(names: dict, registered) -> list:
+	"""Write methods registered in DialogBrain whose tool name we don't know."""
+	return [m for m in WRITES if m in registered and not names.get(m)]
+
+
+def _expected_methods(doc) -> set:
+	"""Methods the last Connect registered (customer tools only when they were on)."""
+	try:
+		caps = json.loads(doc.agent_capabilities or "{}") or {}
+	except ValueError:
+		caps = {}
+	return set(GENERIC) | (set(CUSTOMER) if caps.get("customer_tools") else set())
 
 
 # --- capabilities -------------------------------------------------------------------
@@ -272,7 +354,7 @@ def _rotate_agent_key(user: str) -> tuple:
 	return api_key, keys["api_secret"]
 
 
-def _attach_agents(client, iid: int, denied: list) -> tuple:
+def _attach_agents(client, iid: int, denied: list, enabled: bool = True) -> tuple:
 	"""``agents.set_integration`` on every real agent. Returns (attached, failed)."""
 	agents = (client.execute("agents.list", {}) or {}).get("agents") or []
 	attached = failed = 0
@@ -285,7 +367,7 @@ def _attach_agents(client, iid: int, denied: list) -> tuple:
 				{
 					"agent_id": int(agent["id"]),
 					"workspace_integration_id": int(iid),
-					"enabled": True,
+					"enabled": enabled,
 					"denied_tools": list(denied),
 				},
 			)
@@ -309,19 +391,37 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	doc.erpnext_agent_user = user
 	# ensure_agent_user wrote the Single directly, bumping ``modified``: keep ``doc`` saveable
 	doc.modified = frappe.db.get_single_value(SETTINGS, "modified") or doc.modified
+	previous = _names(doc)
+	problems = []
+	iid = cint(doc.integration_id) or None
+
+	# Rotate inside a savepoint: if the new key does not reach DialogBrain, roll back to
+	# the previous key, which DialogBrain still holds, so working tools keep working.
+	frappe.db.savepoint(KEY_SAVEPOINT)
 	api_key, api_secret = _rotate_agent_key(user)
 	auth = {"type": "custom_headers", "headers": {"Authorization": f"token {api_key}:{api_secret}"}}
 	hidden = (api_secret,)  # scrubbed from any message; the secret is never stored here
-	problems = []
 
-	iid = cint(doc.integration_id) or None
+	def keep_previous_key(exc) -> str:
+		frappe.db.rollback(save_point=KEY_SAVEPOINT)
+		frappe.clear_document_cache("User", user)
+		problem = _("the new agent key did not reach DialogBrain ({0}); the previous key is kept").format(
+			_scrub(exc, *hidden)
+		)
+		problems.append(problem)
+		return problem
+
+	key_in_dialogbrain = False
 	if iid and "integrations.set_auth" in tools:
 		try:
 			client.execute("integrations.set_auth", {"integration_id": iid, "auth": auth})
+			key_in_dialogbrain = True
 		except DialogBrainError as exc:
-			if "not_found" not in str(exc) and exc.status != 404:
-				raise
-			iid = None  # deleted in DialogBrain: create a new one
+			if "not_found" in str(exc) or exc.status == 404:
+				iid = None  # deleted in DialogBrain: create a new one
+			else:
+				keep_previous_key(exc)
+				key_in_dialogbrain = None  # rolled back: DialogBrain keeps the old key
 	params = {
 		"base_url": site,
 		"name": f"ERPNext ({urlsplit(site).hostname or site})",
@@ -329,18 +429,21 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	}
 	if iid:
 		params["integration_id"] = iid
-		if "integrations.set_auth" not in tools:
-			params["auth"] = auth
-	else:
+	if not iid or key_in_dialogbrain is False:
 		params["auth"] = auth
 	try:
-		added = client.execute("integrations.add_endpoints", params) or {}
+		try:
+			added = client.execute("integrations.add_endpoints", params) or {}
+		except DialogBrainError as exc:
+			if not iid or "not_found" not in str(exc):
+				raise
+			params.pop("integration_id")
+			params["auth"] = auth
+			added = client.execute("integrations.add_endpoints", params) or {}
 	except DialogBrainError as exc:
-		if not iid or "not_found" not in str(exc):
-			raise
-		params.pop("integration_id")
-		params["auth"] = auth
-		added = client.execute("integrations.add_endpoints", params) or {}
+		if "auth" in params:
+			raise DialogBrainError(keep_previous_key(exc), status=exc.status) from None
+		raise
 	iid = int(added["integration_id"])
 	added_names = list(added.get("added_or_updated_tools") or [])
 	doc.integration_id = str(iid)
@@ -367,27 +470,39 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 		added_names += list(added.get("added_or_updated_tools") or [])
 
 	wanted = set(GENERIC) | (set(CUSTOMER) if customer_ok else set())
-	names = _tool_names(client, iid, tools, wanted, added_names, problems)
+	stale = not customer_ok and any(m in previous for m in CUSTOMER)
+	names = _tool_names(client, iid, tools, wanted, added_names, problems, stale)
 	doc.agent_tool_names = json.dumps(names, sort_keys=True)
 
-	attached, failed = _attach_agents(client, iid, denied_tools(doc, names))
+	if not cint(doc.allow_agent_writes) and _unidentified_writes(names, wanted):
+		# Fail closed: without the write tools' names they can't be denied, so the
+		# integration is switched off for every agent rather than handed over whole.
+		problems.append(_("write tools could not be identified; agents not attached"))
+		_attach_agents(client, iid, [], enabled=False)
+		attached, failed = 0, 0
+	else:
+		attached, failed = _attach_agents(client, iid, denied_tools(doc, names))
 	if failed:
 		problems.append(_("{0} agent(s) could not be given the tools").format(failed))
 	return {"tools": len(names), "customer_tools": customer_ok, "agents": attached, "problems": problems}
 
 
-def _tool_names(client, iid, tools, wanted, added_names, problems) -> dict:
+def _tool_names(client, iid, tools, wanted, added_names, problems, stale=False) -> dict:
 	"""method -> DialogBrain tool name for the wanted methods; removes our unwanted ones.
 
 	Primary source: ``integrations.get_endpoints`` (operationId by path). Fallback: the
-	names ``add_endpoints`` returned, matched by method name."""
+	names ``add_endpoints`` returned, matched by method name. ``stale``: customer tools
+	were registered before and are no longer wanted."""
 	names = {}
+	stale_problem = _("old customer tools may still be registered in DialogBrain")
 	if "integrations.get_endpoints" in tools:
 		try:
 			listed = client.execute("integrations.get_endpoints", {"integration_id": iid}) or {}
 		except DialogBrainError as exc:
 			listed = None
 			problems.append(_("could not list the integration's endpoints: {0}").format(exc))
+			if stale:
+				problems.append(stale_problem)
 		if listed is not None:
 			unwanted = []
 			for ep in listed.get("endpoints") or []:
@@ -400,12 +515,17 @@ def _tool_names(client, iid, tools, wanted, added_names, problems) -> dict:
 					unwanted.append(ep["operationId"])
 			if unwanted:
 				if "integrations.remove_endpoints" in tools:
-					client.execute(
-						"integrations.remove_endpoints", {"integration_id": iid, "operation_ids": unwanted}
-					)
+					try:
+						client.execute(
+							"integrations.remove_endpoints", {"integration_id": iid, "operation_ids": unwanted}
+						)
+					except DialogBrainError as exc:
+						problems.append(_("old customer tools could not be removed: {0}").format(exc))
 				else:
 					problems.append(_("old customer tools could not be removed (no integrations.remove_endpoints)"))
 			return names
+	elif stale:
+		problems.append(stale_problem)
 	for method in wanted:
 		key = method.replace("_", "").lower()
 		for name in added_names:
@@ -436,9 +556,11 @@ def on_connect(doc, client, tools: set) -> str:
 	caps = dict.fromkeys(("request_id", *CAPABILITY_TOOLS), False)
 	caps["customer_tools"] = False
 	hidden = ()
+	flag = "problems"
 	try:
 		caps.update(capabilities(client, tools))
 		if (doc.network_mode or "public") == "private":
+			flag = "skipped"
 			status = _("Agent tools not registered: private network mode (DialogBrain can't reach ERPNext)")
 		elif missing := [t for t in REGISTRATION_TOOLS if t not in tools]:
 			status = _("Agent tools not registered: this DialogBrain API key has no access to {0}").format(
@@ -447,15 +569,25 @@ def on_connect(doc, client, tools: set) -> str:
 		else:
 			result = register(doc, client, caps, tools)
 			caps["customer_tools"] = result["customer_tools"]
+			flag = "problems" if result["problems"] else "ok"
 			status = _status(result, caps)
 	except Exception as exc:  # noqa: BLE001 -- registration never fails Connect: sync is the core
 		hidden = _secrets_of(doc)
 		status = _("Agent tools registration failed: {0}").format(_scrub(exc, *hidden))
 		frappe.log_error(title="DialogBrain agent tools registration", message=_scrub(frappe.get_traceback(), *hidden))
+	caps["status"] = flag  # ok | problems | skipped: the Settings colour comes from this
 	caps["checked_at"] = str(now_datetime())
 	doc.agent_capabilities = json.dumps(caps, sort_keys=True)
 	doc.agent_tools_status = _scrub(status, *(hidden or _secrets_of(doc)))[:STATUS_LENGTH]
 	return doc.agent_tools_status
+
+
+def status_flag(doc) -> str:
+	"""``ok`` / ``problems`` / ``skipped`` from the last Connect (``agent_capabilities``)."""
+	try:
+		return (json.loads(doc.agent_capabilities or "{}") or {}).get("status") or "problems"
+	except ValueError:
+		return "problems"
 
 
 def _secrets_of(doc) -> tuple:
@@ -476,11 +608,16 @@ def _secrets_of(doc) -> tuple:
 
 def apply_denied_tools(doc, client=None) -> int:
 	"""Re-send ``denied_tools`` to every agent after ``allow_agent_writes`` changed.
-	Returns how many agents were updated; raises DialogBrainError."""
+
+	Returns how many agents were updated. Raises WriteToolsUnknown (fail closed: the
+	write tools' DialogBrain names are unknown) or DialogBrainError."""
 	if not (doc.connected and doc.integration_id) or (doc.network_mode or "public") == "private":
 		return 0
+	names = _names(doc)
+	if _unidentified_writes(names, _expected_methods(doc)):
+		raise WriteToolsUnknown(_("the DialogBrain names of the write tools are unknown; press Reconnect"))
 	client = client or _client(doc)
-	attached, failed = _attach_agents(client, int(doc.integration_id), denied_tools(doc))
+	attached, failed = _attach_agents(client, int(doc.integration_id), denied_tools(doc, names))
 	if failed:
 		raise DialogBrainError(f"{failed} agent(s) could not be updated")
 	return attached
@@ -488,17 +625,24 @@ def apply_denied_tools(doc, client=None) -> int:
 
 @frappe.whitelist(methods=["POST"])
 def set_agent_writes(allow) -> dict:
-	"""The Settings toggle: store ``allow_agent_writes`` and re-apply ``denied_tools``."""
+	"""The Settings toggle: re-apply ``denied_tools``, then store ``allow_agent_writes``.
+	Nothing is stored when DialogBrain could not be updated."""
 	frappe.only_for(ROLE)
 	allow = 1 if cint(allow) else 0
-	frappe.db.set_single_value(SETTINGS, "allow_agent_writes", allow)
 	doc = frappe.get_single(SETTINGS)
+	previous = cint(doc.allow_agent_writes)
+	doc.allow_agent_writes = allow
 	try:
-		agents = apply_denied_tools(doc, _client(doc) if doc.connected and doc.integration_id else None)
-	except DialogBrainError as exc:
-		frappe.throw(
-			_("Saved, but DialogBrain was not updated ({0}). Press Reconnect to retry.").format(str(exc)[:300])
-		)
+		agents = apply_denied_tools(doc)
+	except (DialogBrainError, frappe.ValidationError) as exc:
+		if previous != allow and not isinstance(exc, WriteToolsUnknown):
+			doc.allow_agent_writes = previous  # best effort: put back agents already updated
+			try:
+				apply_denied_tools(doc)
+			except (DialogBrainError, frappe.ValidationError):
+				pass
+		frappe.throw(_("Not changed: DialogBrain could not be updated ({0})").format(str(exc)[:300]))
+	frappe.db.set_single_value(SETTINGS, "allow_agent_writes", allow)
 	return {"allow_agent_writes": allow, "agents": agents}
 
 
@@ -506,13 +650,23 @@ def on_disconnect(doc, client) -> "str | None":
 	"""Revoke the agent user's key (local) and switch the integration off for every agent
 	(best effort). Endpoints are left in DialogBrain; a later Connect reuses them.
 	Returns a warning, or None."""
+	warnings = []
 	user = doc.erpnext_agent_user
 	if user and frappe.db.exists("User", user):
-		u = frappe.get_doc("User", user)
-		u.api_secret = frappe.generate_hash(length=32)  # never shared: revokes the old one
-		u.save(ignore_permissions=True)
+		frappe.db.savepoint("dialogbrain_revoke_agent_key")
+		try:
+			u = frappe.get_doc("User", user)
+			u.api_secret = frappe.generate_hash(length=32)  # never shared: revokes the old one
+			u.save(ignore_permissions=True)
+		except Exception as exc:  # noqa: BLE001 -- Disconnect must go through
+			frappe.db.rollback(save_point="dialogbrain_revoke_agent_key")
+			warnings.append(
+				_("Could not revoke the agent user's API key ({0}); remove it on the user {1}.").format(
+					str(exc)[:200], user
+				)
+			)
 	if not doc.integration_id or client is None:
-		return None
+		return "; ".join(warnings) or None
 	try:
 		agents = (client.execute("agents.list", {}) or {}).get("agents") or []
 		for agent in agents:
@@ -531,7 +685,7 @@ def on_disconnect(doc, client) -> "str | None":
 			except DialogBrainError:
 				pass  # e.g. never attached
 	except DialogBrainError as exc:
-		return _("Could not switch the ERPNext tools off for DialogBrain agents ({0}); the key is revoked.").format(
-			str(exc)[:200]
+		warnings.append(
+			_("Could not switch the ERPNext tools off for DialogBrain agents ({0}).").format(str(exc)[:200])
 		)
-	return None
+	return "; ".join(warnings) or None

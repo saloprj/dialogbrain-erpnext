@@ -15,10 +15,15 @@ def mask(secret: str) -> str:
 
 
 class DialogBrainError(Exception):
-	def __init__(self, message, status=None, code=None):
+	"""``status``: HTTP status, if any. ``code``: DialogBrain's error code or text.
+	``error_type``: the tool's ``error_type`` (e.g. ``permission_denied``) when the
+	``/execute`` response carries one (DialogBrain with Part A6), else None."""
+
+	def __init__(self, message, status=None, code=None, error_type=None):
 		super().__init__(message)
 		self.status = status
 		self.code = code
+		self.error_type = error_type
 
 
 class DialogBrainTimeout(DialogBrainError):
@@ -128,7 +133,12 @@ class DialogBrainClient:
 			err = payload.get("error")
 			code = err.get("code") if isinstance(err, dict) else err
 			msg = err.get("message") if isinstance(err, dict) else err
-			raise DialogBrainError(self._scrub(msg or f"{tool_id} failed"), code=code)
+			error_type = payload.get("error_type")
+			raise DialogBrainError(
+				self._scrub(msg or f"{tool_id} failed"),
+				code=code,
+				error_type=error_type if isinstance(error_type, str) else None,
+			)
 		return payload.get("data")
 
 	def upload_file(self, filename: str, content: bytes, mime_type: "str | None" = None) -> int:

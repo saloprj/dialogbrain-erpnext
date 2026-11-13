@@ -218,6 +218,7 @@ def _connect(doc) -> dict:
 		"network_mode": mode,
 		"warning": scheduler_warning(mode),
 		"agent_tools": agent_tools,
+		"agent_tools_ok": agent_integration.status_flag(doc) != "problems",
 	}
 
 

@@ -122,6 +122,7 @@ class TestConnect(DialogBrainTestCase):
 		client, result, enqueue = self._connect()
 
 		agent_tools = result.pop("agent_tools")
+		self.assertFalse(result.pop("agent_tools_ok"))
 		self.assertEqual(
 			result, {"workspace": "Test User", "channels": 8, "network_mode": "public", "warning": None}
 		)
