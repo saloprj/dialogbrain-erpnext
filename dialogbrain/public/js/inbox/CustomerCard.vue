@@ -15,24 +15,23 @@
 		<div v-if="!store.selected" class="db-muted db-pad">{{ __("Select a conversation") }}</div>
 		<div v-else-if="!card" class="db-muted db-pad">{{ __("Loading…") }}</div>
 		<div v-else class="db-card-body">
-			<!-- contact -->
+			<!-- from chat: what the channel sent (always shown) -->
 			<section class="db-section">
-				<div class="db-section-title">{{ __("Contact") }}</div>
-				<div class="db-contact-name">{{ contactName }}</div>
-				<div v-if="card.contact.phone" class="db-line">
-					<a :href="'tel:' + card.contact.phone">{{ card.contact.phone }}</a>
+				<div class="db-section-title">{{ __("From chat") }}</div>
+				<div class="db-contact-name">{{ chatName }}</div>
+				<div v-if="card.chat.handle" class="db-line db-muted">{{ card.chat.handle }}</div>
+				<div v-if="card.chat.phone" class="db-line">
+					<a :href="'tel:' + card.chat.phone">{{ card.chat.phone }}</a>
 				</div>
-				<div v-if="card.contact.email" class="db-line">
-					<a :href="'mailto:' + card.contact.email">{{ card.contact.email }}</a>
-				</div>
-				<div v-if="card.contact.name" class="db-line">
-					<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact") }}</a>
+				<div v-if="card.chat.email" class="db-line">
+					<a :href="'mailto:' + card.chat.email">{{ card.chat.email }}</a>
 				</div>
 			</section>
 
 			<!-- not linked -->
 			<section v-if="!card.party" class="db-section">
 				<div class="db-section-title">{{ __("Not linked to a customer") }}</div>
+				<template v-if="card.has_access.party">
 				<div v-if="card.suggestions.length" class="db-sub">{{ __("Suggestions") }}</div>
 				<div v-for="s in card.suggestions" :key="s.party_type + s.party" class="db-pick">
 					<div class="db-pick-main">
@@ -73,13 +72,28 @@
 						</button>
 					</div>
 				</div>
+				</template>
+				<div v-else class="db-muted db-small">{{ __("You have no access to customers or leads.") }}</div>
 			</section>
 
 			<!-- customer -->
 			<section v-else-if="card.party_type === 'Customer'" class="db-section">
 				<div class="db-section-title">{{ __("Customer") }}</div>
-				<a class="db-party-name" :href="formLink('Customer', card.party)">{{ card.party_name || card.party }}</a>
+				<a v-if="card.has_access.party" class="db-party-name" :href="formLink('Customer', card.party)">{{ card.party_name || card.party }}</a>
+				<div v-else class="db-muted db-small">{{ __("Linked to a customer you have no access to.") }}</div>
 				<div v-if="card.link_source" class="db-muted db-small">{{ __("Linked: {0}", [__(card.link_source)]) }}</div>
+				<template v-if="card.contact">
+					<div class="db-sub">{{ __("Contact") }}</div>
+					<div v-if="card.contact.phone" class="db-line">
+						<a :href="'tel:' + card.contact.phone">{{ card.contact.phone }}</a>
+					</div>
+					<div v-if="card.contact.email" class="db-line">
+						<a :href="'mailto:' + card.contact.email">{{ card.contact.email }}</a>
+					</div>
+					<div class="db-line">
+						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact") }}</a>
+					</div>
+				</template>
 				<template v-if="card.has_access.orders && card.stats">
 					<div class="db-stats">
 						<div class="db-stat">
@@ -110,11 +124,11 @@
 					</a>
 				</template>
 				<div class="db-actions">
-					<button v-if="canCreate('Sales Order')" type="button" class="btn btn-xs btn-primary" @click="newDoc('Sales Order', { customer: card.party })">
+					<button v-if="card.has_access.party && canCreate('Sales Order')" type="button" class="btn btn-xs btn-primary" @click="newDoc('Sales Order', { customer: card.party })">
 						{{ __("Create Sales Order") }}
 					</button>
 					<button
-						v-if="canCreate('Quotation')"
+						v-if="card.has_access.party && canCreate('Quotation')"
 						type="button"
 						class="btn btn-xs btn-default"
 						@click="newDoc('Quotation', { quotation_to: 'Customer', party_name: card.party })"
@@ -127,11 +141,24 @@
 			<!-- lead -->
 			<section v-else-if="card.party_type === 'Lead'" class="db-section">
 				<div class="db-section-title">{{ __("Lead") }}</div>
+				<template v-if="card.has_access.party">
 				<a class="db-party-name" :href="formLink('Lead', card.party)">{{ card.party_name || card.party }}</a>
 				<div v-if="card.lead" class="db-small">
 					<span v-if="card.lead.status" class="db-badge">{{ __(card.lead.status) }}</span>
 					<span v-if="card.lead.company_name"> {{ card.lead.company_name }}</span>
 				</div>
+				<template v-if="card.contact">
+					<div class="db-sub">{{ __("Contact") }}</div>
+					<div v-if="card.contact.phone" class="db-line">
+						<a :href="'tel:' + card.contact.phone">{{ card.contact.phone }}</a>
+					</div>
+					<div v-if="card.contact.email" class="db-line">
+						<a :href="'mailto:' + card.contact.email">{{ card.contact.email }}</a>
+					</div>
+					<div class="db-line">
+						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact") }}</a>
+					</div>
+				</template>
 				<div class="db-actions">
 					<button
 						v-if="canCreate('Quotation')"
@@ -145,6 +172,8 @@
 						{{ __("Open Lead") }}
 					</button>
 				</div>
+				</template>
+				<div v-else class="db-muted db-small">{{ __("Linked to a lead you have no access to.") }}</div>
 			</section>
 
 			<section class="db-section">
@@ -171,9 +200,10 @@ const searchInput = ref(null);
 const query = ref("");
 const results = ref([]);
 
-const contactName = computed(() => {
+// "From chat" shows only what the channel sent; the party's Contact is a separate block
+const chatName = computed(() => {
 	const c = store.conversation;
-	return (c && (c.contact_name || c.title)) || (card.value && card.value.contact.name) || "";
+	return (card.value && card.value.chat.contact_name) || (c && c.title) || "";
 });
 
 const date = (v) => (v ? frappe.datetime.str_to_user(v) : "");

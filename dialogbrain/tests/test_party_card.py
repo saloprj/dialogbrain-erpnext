@@ -82,12 +82,12 @@ class TestPartyCard(DialogBrainTestCase):
 		self.assertEqual(card["party_type"], "Customer")
 		self.assertEqual(card["party_name"], "Card Customer")
 		self.assertEqual(card["link_source"], "manual")
-		self.assertEqual(card["contact"]["phone"], "+380501112233")
+		self.assertEqual(card["chat"]["phone"], "+380501112233")
 		self.assertEqual(card["stats"], {"orders_count": 2, "totals": [{"currency": "USD", "total": 350.5, "count": 2}]})
 		self.assertEqual(len(card["recent_orders"]), 2)
 		self.assertEqual(card["recent_orders"][0]["grand_total"], 250.5)
 		self.assertEqual([i["outstanding_amount"] for i in card["unpaid_invoices"]], [40])
-		self.assertEqual(card["has_access"], {"orders": True, "invoices": True})
+		self.assertEqual(card["has_access"], {"orders": True, "invoices": True, "party": True, "contact": True})
 		self.assertEqual(card["suggestions"], [])
 
 	def test_stats_grouped_by_currency_and_isolated(self):
@@ -145,8 +145,10 @@ class TestPartyCard(DialogBrainTestCase):
 		self.assertIsNone(card["stats"])
 		self.assertEqual(card["recent_orders"], [])
 		self.assertEqual(card["unpaid_invoices"], [])
-		self.assertEqual(card["has_access"], {"orders": False, "invoices": False})
-		self.assertEqual(card["party_name"], "Card Customer")
+		access = card["has_access"]
+		self.assertEqual((access["orders"], access["invoices"], access["party"]), (False, False, False))
+		self.assertIsNone(card["contact"])
+		self.assertIsNone(card["party_name"])
 
 	def test_conversation_access_refused(self):
 		conv = self._linked("Customer", self.cust)
@@ -187,3 +189,62 @@ class TestPartyCard(DialogBrainTestCase):
 				self.assertIsInstance(f, str, fields)
 		self.assertIn("count(name) as cnt", calls[1])
 		self.assertIn("sum(grand_total) as total", calls[1])
+
+	def _contact_for(self, party_type, party):
+		return frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "Card Party Contact",
+				"email_ids": [{"email_id": "party-contact@example.com", "is_primary": 1}],
+				"phone_nos": [{"phone": "+380500000001", "is_primary_mobile_no": 1}],
+				"links": [{"link_doctype": party_type, "link_name": party}],
+			}
+		).insert(ignore_permissions=True).name
+
+	def _chat_fields(self):
+		return {"contact_name": "Chat Ivan", "phone": "+380507770000", "email": "chat@example.com", "handle": "@chativan"}
+
+	def test_without_party_read_only_from_chat_data(self):
+		contact = self._contact_for("Customer", self.cust)
+		conv = self._linked("Customer", self.cust, contact=contact, **self._chat_fields())
+		frappe.set_user(self.plain)  # Chat Agent only: no Customer / Lead / Contact read
+		card = api.get_card(conv)
+		self.assertEqual(card["chat"], self._chat_fields())
+		self.assertIsNone(card["party_name"])
+		self.assertIsNone(card["contact"])
+		self.assertFalse(card["has_access"]["party"])
+		self.assertFalse(card["has_access"]["contact"])
+		self.assertNotIn("party-contact@example.com", frappe.as_json(card))
+		self.assertNotIn("Card Party Contact", frappe.as_json(card))
+
+	def test_without_lead_read_no_lead_details(self):
+		lead = _lead("Card Hidden Lead")
+		conv = self._linked("Lead", lead)
+		frappe.set_user(self.plain)
+		card = api.get_card(conv)
+		self.assertIsNone(card["lead"])
+		self.assertIsNone(card["party_name"])
+		self.assertFalse(card["has_access"]["party"])
+
+	def test_without_party_read_no_suggestions(self):
+		_lead("Card Suggest Lead", phone="+380509998866")
+		conv = _conv(CH_A, phone="+380509998866", contact_name="Chat Someone")
+		frappe.set_user(self.plain)
+		card = api.get_card(conv)
+		self.assertEqual(card["suggestions"], [])
+		self.assertFalse(card["has_access"]["party"])
+		self.assertEqual(card["chat"]["contact_name"], "Chat Someone")
+		self.assertEqual(card["chat"]["phone"], "+380509998866")
+
+	def test_with_party_read_gets_party_and_contact(self):
+		contact = self._contact_for("Customer", self.cust)
+		conv = self._linked("Customer", self.cust, **self._chat_fields())  # contact via primary
+		frappe.set_user(self.sales)
+		card = api.get_card(conv)
+		self.assertEqual(card["party_name"], "Card Customer")
+		self.assertTrue(card["has_access"]["party"])
+		self.assertTrue(card["has_access"]["contact"])
+		self.assertEqual(card["contact"]["name"], contact)
+		self.assertEqual(card["contact"]["email"], "party-contact@example.com")
+		self.assertEqual(card["contact"]["phone"], "+380500000001")
+		self.assertEqual(card["chat"], self._chat_fields())  # never mixed with the party contact

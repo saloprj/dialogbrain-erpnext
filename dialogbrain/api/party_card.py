@@ -2,7 +2,9 @@
 
 Order / invoice data is ERPNext data: it is shown only to users who hold read access to
 Sales Order / Sales Invoice (``frappe.get_list`` raises PermissionError otherwise, so the
-check happens first). ``has_access`` tells the UI what to hide.
+check happens first). Likewise the party name, lead details, suggestions and the party's
+Contact need read access on Customer / Lead / Contact (Ruling R10); the conversation's own
+contact fields ("From chat") are always returned. ``has_access`` tells the UI what to hide.
 
 ``stats`` is ``{orders_count, totals: [{currency, total, count}, ...]}``: submitted Sales
 Orders grouped by currency (a sum across currencies would be meaningless), largest total
@@ -29,16 +31,29 @@ def _party_name(party_type, party):
 	return frappe.db.get_value(party_type, party, field) or party
 
 
+def _can_read(doctype, name=None):
+	if name:
+		return bool(frappe.has_permission(doctype, "read", doc=name))
+	return bool(frappe.has_permission(doctype, "read"))
+
+
+def _chat(conv):
+	"""What the channel sent: shown to everyone who can open the conversation."""
+	return {"contact_name": conv.contact_name, "phone": conv.phone, "email": conv.email, "handle": conv.handle}
+
+
 def _contact(conv):
+	"""The party's Contact (the linked one, else the party's primary): ERPNext data, so
+	returned only with read access on that Contact. Returns (contact | None, has_access)."""
 	name = conv.contact
-	if not name and conv.party_type and conv.party:
+	if not (name and frappe.db.exists("Contact", name)) and conv.party_type and conv.party:
 		name = party_mod._primary_contact(conv.party_type, conv.party)
-	phone, email = conv.phone, conv.email
-	if name and frappe.db.exists("Contact", name):
-		c = frappe.db.get_value("Contact", name, ["mobile_no", "phone", "email_id"], as_dict=True)
-		phone = phone or c.mobile_no or c.phone
-		email = email or c.email_id
-	return {"name": name, "phone": phone, "email": email}
+	if not (name and frappe.db.exists("Contact", name)):
+		return None, _can_read("Contact")
+	if not _can_read("Contact", name):
+		return None, False
+	c = frappe.db.get_value("Contact", name, ["mobile_no", "phone", "email_id"], as_dict=True)
+	return {"name": name, "phone": c.mobile_no or c.phone, "email": c.email_id}, True
 
 
 def _orders(customer):
@@ -83,23 +98,34 @@ def _unpaid(customer):
 
 @frappe.whitelist()
 def get_card(conversation):
+	"""Ruling R10: a "From chat" block (conversation fields, always) and a party block
+	(party name, lead details, suggestions, the party's Contact), the latter only with
+	read access on Customer / Lead / Contact; ``has_access`` tells the UI what to hide."""
 	assert_can_access(conversation)
 	conv = frappe.db.get_value(
 		"DB Conversation",
 		conversation,
-		["party_type", "party", "contact", "phone", "email", "link_source"],
+		["party_type", "party", "contact", "contact_name", "phone", "email", "handle", "link_source"],
 		as_dict=True,
 	)
 	has_party = bool(conv.party_type and conv.party and frappe.db.exists(conv.party_type, conv.party))
+	if has_party:
+		party_access = _can_read(conv.party_type, conv.party)
+	else:
+		party_access = any(_can_read(t) for t in party_mod.PARTY_TYPES)
+	contact, contact_access = _contact(conv) if has_party else (None, _can_read("Contact"))
 	card = {
 		"party_type": conv.party_type if has_party else None,
 		"party": conv.party if has_party else None,
-		"party_name": _party_name(conv.party_type, conv.party) if has_party else None,
+		"party_name": _party_name(conv.party_type, conv.party) if has_party and party_access else None,
 		"link_source": conv.link_source,
-		"contact": _contact(conv),
+		"chat": _chat(conv),
+		"contact": contact,
 		"has_access": {
-			"orders": bool(frappe.has_permission("Sales Order", "read")),
-			"invoices": bool(frappe.has_permission("Sales Invoice", "read")),
+			"orders": _can_read("Sales Order"),
+			"invoices": _can_read("Sales Invoice"),
+			"party": party_access,
+			"contact": contact_access,
 		},
 		"stats": None,
 		"recent_orders": [],
@@ -111,12 +137,14 @@ def get_card(conversation):
 		card["suggestions"] = [
 			{"party_type": t, "party": p, "matched_by": m, "party_name": _party_name(t, p)}
 			for t, p, m in party_mod.find_parties(conv.phone, conv.email)
+			if _can_read(t, p)
 		]
 		return card
 
 	if conv.party_type == "Lead":
-		lead = frappe.db.get_value("Lead", conv.party, ["status", "company_name"], as_dict=True)
-		card["lead"] = {"name": conv.party, "status": lead.status, "company_name": lead.company_name}
+		if party_access:
+			lead = frappe.db.get_value("Lead", conv.party, ["status", "company_name"], as_dict=True)
+			card["lead"] = {"name": conv.party, "status": lead.status, "company_name": lead.company_name}
 		return card
 
 	if card["has_access"]["orders"]:
