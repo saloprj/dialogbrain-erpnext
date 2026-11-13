@@ -120,10 +120,16 @@ frappe.provide("frappe.dialogbrain");
 	}
 
 	let loading = false;
+	let again = false; // an event arrived while a request was in flight: refresh once more
 	async function refreshBadge() {
-		if (loading || document.visibilityState !== "visible") return;
+		if (document.visibilityState !== "visible") return;
+		if (loading) {
+			again = true;
+			return;
+		}
 		if (!ensureBadges()) return; // no container on this desk: nothing to show, no request
 		loading = true;
+		again = false;
 		try {
 			const r = await frappe.call({
 				method: "dialogbrain.api.conversations.counters",
@@ -136,6 +142,7 @@ frappe.provide("frappe.dialogbrain");
 			// keep the last value; the next poll retries
 		} finally {
 			loading = false;
+			if (again) refreshBadge();
 		}
 	}
 
