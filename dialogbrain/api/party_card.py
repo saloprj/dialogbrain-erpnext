@@ -16,6 +16,7 @@ Client-side prefill (Task 6): Sales Order / Quotation open with
 import frappe
 from frappe import _
 
+from dialogbrain import compat
 from dialogbrain import party as party_mod
 from dialogbrain.permissions import assert_can_access
 
@@ -53,8 +54,8 @@ def _orders(customer):
 		filters={"customer": customer, "docstatus": 1},
 		fields=[
 			"currency",
-			{"COUNT": "*", "as": "cnt"},
-			{"SUM": "grand_total", "as": "total"},
+			compat.count_field("cnt"),
+			compat.sum_field("grand_total", "total"),
 		],
 		group_by="currency",
 	)

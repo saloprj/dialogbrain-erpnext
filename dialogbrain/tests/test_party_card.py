@@ -5,6 +5,8 @@ no Company/Item/Warehouse/GL setup): the test site has no ERPNext setup data and
 only reads a handful of columns. Customers and Leads are real documents.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.utils import add_days, today
 
@@ -165,3 +167,23 @@ class TestPartyCard(DialogBrainTestCase):
 		self.assertEqual(api.search_parties(conv, "x"), [])
 		frappe.set_user(self.plain)  # no Customer/Lead read: empty, no exception
 		self.assertEqual(api.search_parties(conv, "Card"), [])
+
+	def test_stats_query_uses_v15_string_aggregates_on_v15(self):
+		# v15 get_list cannot take dict aggregates (sanitize_fields calls field.lower())
+		calls = []
+
+		def fake_get_list(doctype, **kw):
+			calls.append(kw.get("fields"))
+			return []
+
+		with patch("dialogbrain.compat.frappe.__version__", "15.80.0"), patch.object(
+			api.frappe, "get_list", side_effect=fake_get_list
+		):
+			stats, rows = api._orders(self.cust)
+		self.assertEqual(stats, {"orders_count": 0, "totals": []})
+		self.assertTrue(calls)
+		for fields in calls:
+			for f in fields:
+				self.assertIsInstance(f, str, fields)
+		self.assertIn("count(name) as cnt", calls[1])
+		self.assertIn("sum(grand_total) as total", calls[1])
