@@ -279,6 +279,55 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		self.assertEqual(last.last_message_preview, "a4")
 		self.assertEqual(self._get("backfill_status"), "done")
 
+	def test_backfill_links_whatsapp_customer_by_phone(self):
+		"""F2: backfill/reconcile get no contact metadata; the phone of a WhatsApp DM is its
+		ref. The existing Customer is linked (verified: full number on a phone channel, R8/R9);
+		a group is not; an email DM is linked by address, unverified."""
+		from dialogbrain.sync.backfill import run_backfill
+		from dialogbrain.tests.test_party import _customer
+
+		digits = "99" + frappe.generate_hash(length=10).translate(str.maketrans("abcdef", "123456"))[:10]
+		email = f"f2-{frappe.generate_hash(length=6)}@example.com"
+		customer = _customer(f"F2 WA {digits}", phone=f"+{digits[:2]} {digits[2:6]} {digits[6:]}")
+		mail_customer = _customer(f"F2 Mail {email}", email=email.upper())
+		now = self.now - timedelta(hours=1)
+		entries = [
+			_entry("3001", account="701", channel="whatsapp", ref=f"whatsapp:{digits}@s.whatsapp.net"),
+			_entry("3002", account="701", channel="whatsapp", kind="group", ref=f"whatsapp:{digits}-1@g.us"),
+			_entry("3003", account="702", channel="email", ref=f"email:dm:{email}"),
+		]
+		messages = {e["id"]: [_hmsg(int(e["id"]) * 10, now, "hello")] for e in entries}
+		self._run(run_backfill, FakeDialogBrain(entries, messages))
+
+		dm = frappe.db.get_value(
+			"DB Conversation", self._conv("3001"), ["phone", "party_type", "party", "link_source"], as_dict=True
+		)
+		self.assertEqual(dm.phone, f"+{digits}")
+		self.assertEqual((dm.party_type, dm.party, dm.link_source), ("Customer", customer, "auto_verified"))
+		group = frappe.db.get_value("DB Conversation", self._conv("3002"), ["phone", "party"], as_dict=True)
+		self.assertEqual((group.phone, group.party), (None, None))
+		mail = frappe.db.get_value(
+			"DB Conversation", self._conv("3003"), ["email", "party", "link_source"], as_dict=True
+		)
+		self.assertEqual((mail.email, mail.party, mail.link_source), (email, mail_customer, "auto_unverified"))
+
+	def test_reconcile_fills_phone_of_known_conversation(self):
+		"""F2: conversations mirrored before the fix get their phone (and party) on the next
+		sync of the thread."""
+		from dialogbrain.sync.reconcile import reconcile
+		from dialogbrain.tests.test_party import _customer
+
+		digits = "98" + frappe.generate_hash(length=10).translate(str.maketrans("abcdef", "123456"))[:10]
+		customer = _customer(f"F2 R {digits}", phone=f"+{digits}")
+		entry = _entry("3101", account="701", channel="whatsapp", ref=f"whatsapp:{digits}@s.whatsapp.net")
+		old = [_hmsg(31010, self.now - timedelta(hours=2), "old")]
+		conv = self._store("3101", old, entry=entry)
+		frappe.db.set_value("DB Conversation", conv, {"phone": None, "party_type": None, "party": None, "link_source": None})
+		new = old + [_hmsg(31011, self.now - timedelta(minutes=1), "new")]
+		self._run(reconcile, FakeDialogBrain([entry], {"3101": new}))
+		row = frappe.db.get_value("DB Conversation", conv, ["phone", "party", "link_source"], as_dict=True)
+		self.assertEqual((row.phone, row.party, row.link_source), (f"+{digits}", customer, "auto_verified"))
+
 	def test_backfill_survives_deadlock_that_ended_the_transaction(self):
 		"""Seen live: a deadlock with the webhook processor rolled back the whole
 		transaction, so ``rollback to savepoint`` itself failed and aborted the backfill.

@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 import frappe
 from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
-from dialogbrain.party import link_party
+from dialogbrain.party import contact_keys_from_ref, link_party
 from dialogbrain.sync.notify import notify, publish
 
 ECHO_WINDOW_SECONDS = 120
@@ -220,7 +220,10 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 
 	Besides the id keys (see :func:`thread_keys`) it reads ``title`` and the optional
 	contact fields ``contact_name, phone, email, handle, avatar_url, db_contact_id``.
-	``link_party`` runs on create and whenever phone/email change.
+	A phone / email the channel ref carries (:func:`contact_keys_from_ref`: WhatsApp and
+	Viber DMs, email DMs) fills a missing one, so backfill and reconcile, which get no
+	contact metadata, link parties too. ``link_party`` runs on create and whenever
+	phone/email change.
 	"""
 	internal, ref = thread_keys(thread)
 	if not internal and not (ref and channel):
@@ -233,6 +236,9 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 
 	name = find_conversation(internal, ref, channel)
 	if not name:
+		for field, value in contact_keys_from_ref(ref).items():
+			values.setdefault(field, _fit(field, value))
+		values = {k: v for k, v in values.items() if v}
 		doc = frappe.get_doc(
 			{
 				"doctype": "DB Conversation",
@@ -258,9 +264,12 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
 		return name, False
 
-	current = frappe.db.get_value(
-		"DB Conversation", name, ["thread_id", "thread_ref", "channel", *values.keys()], as_dict=True
-	)
+	fields = {"thread_id", "thread_ref", "channel", "phone", "email", *values.keys()}
+	current = frappe.db.get_value("DB Conversation", name, sorted(fields), as_dict=True)
+	for field, value in contact_keys_from_ref(ref or current.thread_ref).items():
+		if field not in values and not current.get(field):
+			values[field] = _fit(field, value)
+	values = {k: v for k, v in values.items() if v}
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
 	if internal and current.thread_id != internal:
 		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)

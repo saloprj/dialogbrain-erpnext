@@ -1,6 +1,7 @@
 import frappe
 
 from dialogbrain.party import (
+	contact_keys_from_ref,
 	create_lead,
 	find_parties,
 	link_party,
@@ -183,3 +184,33 @@ class TestPartyLinking(DialogBrainTestCase):
 		conv = _conv("p-13", "livechat", phone="380671234508")
 		with self.assertRaises(frappe.ValidationError):
 			set_party(conv, "Supplier", "x")
+
+
+class TestContactKeysFromRef(DialogBrainTestCase):
+	"""F2: the channel ref is the person's key on WhatsApp / Viber DMs and email DMs."""
+
+	def test_whatsapp_phone_jid(self):
+		self.assertEqual(contact_keys_from_ref("whatsapp:996705147979@s.whatsapp.net"), {"phone": "+996705147979"})
+		self.assertEqual(contact_keys_from_ref("whatsapp:996705147979:5@s.whatsapp.net"), {"phone": "+996705147979"})
+		self.assertEqual(contact_keys_from_ref("whatsapp:996705147979@c.us"), {"phone": "+996705147979"})
+
+	def test_whatsapp_groups_and_lids_have_no_phone(self):
+		self.assertEqual(contact_keys_from_ref("whatsapp:120363412225337504@g.us"), {})
+		self.assertEqual(contact_keys_from_ref("whatsapp:236399865397379@lid"), {})
+		self.assertEqual(contact_keys_from_ref("whatsapp:status@broadcast"), {})
+		self.assertEqual(contact_keys_from_ref("whatsapp:12@s.whatsapp.net"), {})  # too short
+
+	def test_viber(self):
+		self.assertEqual(contact_keys_from_ref("viber:380501234567"), {"phone": "+380501234567"})
+		self.assertEqual(contact_keys_from_ref("viber:id:12345"), {})
+		self.assertEqual(contact_keys_from_ref("viber:group:abc"), {})
+		self.assertEqual(contact_keys_from_ref("viber:unknown:1"), {})
+
+	def test_email_dm_only(self):
+		self.assertEqual(contact_keys_from_ref("email:dm:Ann@Example.com"), {"email": "ann@example.com"})
+		self.assertEqual(contact_keys_from_ref("email:group:abc@example.com"), {})
+		self.assertEqual(contact_keys_from_ref("email:dm:not-an-address"), {})
+
+	def test_other_channels(self):
+		for ref in ("telegram:100000001", "livechat:abc:def", "", None, "linkedin:873:x"):
+			self.assertEqual(contact_keys_from_ref(ref), {})

@@ -115,6 +115,17 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(msg.text, "Hi, please send me the offer for the project, thanks.")
 		self.assertIsNone(msg.client_ref)
 
+	def test_whatsapp_inbound_without_metadata_phone_gets_phone_from_ref(self):
+		"""F2: the webhook path uses the same ref-derived phone as backfill."""
+		from dialogbrain.sync.processor import process_event
+
+		data = _data(INBOUND)
+		data.update({"channel": "whatsapp", "account_id": "160", "thread_id": "whatsapp:380501234567@s.whatsapp.net"})
+		data["thread"]["thread_id"] = data["thread_id"]
+		data["message"]["metadata"] = {}
+		process_event("message.received", data)
+		self.assertEqual(frappe.db.get_value("DB Conversation", _conv_by_thread("1001"), "phone"), "+380501234567")
+
 	def test_group_message_uses_thread_title(self):
 		_process(GROUP)
 		conv = frappe.get_doc("DB Conversation", _conv_by_thread("1002"))

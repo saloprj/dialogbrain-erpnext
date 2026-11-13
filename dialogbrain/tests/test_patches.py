@@ -108,3 +108,25 @@ class TestPatches(DialogBrainTestCase):
 		self.assertEqual(get(deleted), "deleted")
 		self.assertEqual(get(pending_out), "pending")
 		self.assertEqual(get(sent_out), "sent")
+
+	def test_fill_contact_keys_from_refs(self):
+		"""F2: existing conversations get phone/email from their ref and are linked."""
+		from dialogbrain.patches.v0_1.fill_contact_keys_from_refs import execute
+		from dialogbrain.tests.test_party import _customer
+
+		digits = "97" + frappe.generate_hash(length=10).translate(str.maketrans("abcdef", "123456"))[:10]
+		customer = _customer(f"F2 P {digits}", phone=f"+{digits}")
+		wa = _conv("p6", 0, channel="patch-wa", thread_ref=f"whatsapp:{digits}@s.whatsapp.net")
+		frappe.db.set_value("DB Channel", "patch-wa", "channel_type", "whatsapp")
+		group = _conv("p7", 0, channel="patch-wa", thread_ref="whatsapp:120363412225337504@g.us")
+		mail = _conv("p8", 0, channel="patch-mail", thread_ref="email:dm:someone@example.com")
+		kept = _conv("p9", 0, channel="patch-mail", thread_ref="email:dm:other@example.com", email="kept@example.com")
+
+		execute()
+		execute()  # idempotent
+
+		row = frappe.db.get_value("DB Conversation", wa, ["phone", "party", "link_source"], as_dict=True)
+		self.assertEqual((row.phone, row.party, row.link_source), (f"+{digits}", customer, "auto_verified"))
+		self.assertIsNone(frappe.db.get_value("DB Conversation", group, "phone"))
+		self.assertEqual(frappe.db.get_value("DB Conversation", mail, "email"), "someone@example.com")
+		self.assertEqual(frappe.db.get_value("DB Conversation", kept, "email"), "kept@example.com")

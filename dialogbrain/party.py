@@ -15,12 +15,57 @@ VERIFIED_PHONE_CHANNELS = {"whatsapp", "viber", "telegram"}
 
 PARTY_TYPES = ("Customer", "Lead")
 
+# WhatsApp JIDs whose user part is the phone number (``@lid`` / ``@g.us`` are not phones).
+WHATSAPP_PHONE_SUFFIXES = ("@s.whatsapp.net", "@c.us")
+PHONE_DIGITS = (7, 15)  # E.164 has at most 15 digits
+EMAIL_RE = re.compile(r"^[^@\s:]+@[^@\s:]+\.[^@\s:]+$")
+
 
 def normalize_phone(raw):
 	digits = re.sub(r"\D", "", raw or "")
 	if digits.startswith("00"):
 		digits = digits[2:]
 	return digits if len(digits) >= 7 else None
+
+
+def _phone_digits(value):
+	digits = (value or "").lstrip("+")
+	low, high = PHONE_DIGITS
+	return digits if digits.isdigit() and low <= len(digits) <= high else None
+
+
+def contact_keys_from_ref(ref) -> dict:
+	"""Phone / email that a DialogBrain channel ref itself carries (``{}`` if none).
+
+	The one place that knows these ref shapes; used for every conversation upsert
+	(webhook, backfill, reconcile), since only webhook messages carry contact metadata.
+
+	* ``whatsapp:<digits>[:<device>]@s.whatsapp.net`` (or ``@c.us``) -> phone ``+<digits>``;
+	  ``@lid`` (privacy id), ``@g.us`` (group), ``@broadcast`` -> nothing.
+	* ``viber:<digits>`` -> phone; ``viber:id:…`` / ``viber:group:…`` / ``viber:unknown:…``
+	  -> nothing.
+	* ``email:dm:<address>`` -> email (lower case); ``email:group:…`` -> nothing.
+
+	Whether a phone match is ``auto_verified`` is still decided by :func:`link_party`
+	(channel type in VERIFIED_PHONE_CHANNELS and full-number equality, R8/R9).
+	"""
+	ref = (ref or "").strip()
+	channel, _, rest = ref.partition(":")
+	channel = channel.lower()
+	if channel == "whatsapp":
+		if "@" in rest:
+			if not rest.lower().endswith(WHATSAPP_PHONE_SUFFIXES):
+				return {}
+			rest = rest.split("@", 1)[0].split(":", 1)[0]
+		digits = _phone_digits(rest)
+		return {"phone": f"+{digits}"} if digits else {}
+	if channel == "viber":
+		digits = _phone_digits(rest)
+		return {"phone": f"+{digits}"} if digits else {}
+	if channel == "email" and rest.startswith("dm:"):
+		address = rest[3:].strip().lower()
+		return {"email": address} if EMAIL_RE.match(address) else {}
+	return {}
 
 
 def phones_match(a, b):
