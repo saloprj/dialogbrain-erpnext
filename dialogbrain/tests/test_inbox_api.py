@@ -399,6 +399,20 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertEqual([r["name"] for r in page2["rows"]], [names[1], names[0]])
 		self.assertIsNone(page2["next_before"])
 
+	def test_message_links_open_in_new_tab(self):
+		html = api.sanitize_message_html(
+			'<p>see <a href="https://example.com/x">this</a> and <a href="/app/x" target="_self" rel="opener">that</a></p>'
+		)
+		from bs4 import BeautifulSoup
+
+		links = BeautifulSoup(html, "html.parser").find_all("a")
+		self.assertEqual(len(links), 2)
+		for a in links:
+			self.assertEqual(a.get("target"), "_blank")
+			self.assertEqual(sorted(a.get("rel")), ["noopener", "noreferrer"])
+		self.assertEqual(links[0]["href"], "https://example.com/x")
+		self.assertEqual(api.sanitize_message_html("<p>plain</p>"), "<p>plain</p>")
+
 	def test_message_html_sanitised(self):
 		evil = "<p>hi</p><script>x</script><img src=x onerror=y>"
 		name = _msg(self.a_open_mine, text=evil)

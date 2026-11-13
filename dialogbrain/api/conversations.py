@@ -121,14 +121,18 @@ def _can_see_channel(channel, user):
 
 
 def sanitize_message_html(value):
-	"""Message HTML safe to inject: Frappe's sanitiser minus forms/meta/embeds, and no
-	``style`` attributes at all (no full-screen ``position:fixed`` overlays)."""
+	"""Message HTML safe to inject: Frappe's sanitiser minus forms/meta/embeds, no ``style``
+	attributes at all (no full-screen ``position:fixed`` overlays), and every link opens in
+	a new tab without access to the desk window (``target="_blank" rel="noopener noreferrer"``)."""
 	clean = sanitize_html(value or "", always_sanitize=True, disallowed_tags=DISALLOWED_TAGS)
-	if "style" not in clean:
+	if "style" not in clean and "<a" not in clean:
 		return clean
 	soup = BeautifulSoup(clean, "html.parser")
 	for tag in soup.find_all(style=True):
 		del tag["style"]
+	for a in soup.find_all("a"):
+		a["target"] = "_blank"
+		a["rel"] = "noopener noreferrer"
 	return str(soup)
 
 
