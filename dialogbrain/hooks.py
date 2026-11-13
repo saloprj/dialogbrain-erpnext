@@ -29,3 +29,12 @@ scheduler_events = {
 	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
 	"daily": ["dialogbrain.sync.maintenance.cleanup_webhook_log"],
 }
+
+# Desk-wide: "Chats" unread badge, new-message sound, Customer / Lead "Chats" section.
+app_include_js = "dialogbrain_desk.bundle.js"
+app_include_css = "dialogbrain_desk.bundle.css"
+
+doctype_js = {
+	"Customer": "public/js/party_chats.js",
+	"Lead": "public/js/party_chats.js",
+}

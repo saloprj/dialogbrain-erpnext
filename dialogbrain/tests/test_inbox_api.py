@@ -515,3 +515,38 @@ class TestInboxApi(DialogBrainTestCase):
 		)
 		frappe.set_user(self.mgr)
 		self.assertEqual(api.counters()["unread_total"], 3)
+
+	def test_list_party_filter(self):
+		# party fields are set directly: the filter only reads them (no Customer/Lead docs needed)
+		frappe.db.set_value("DB Conversation", self.a_open_unassigned, {"party_type": "Customer", "party": "Cust-X"})
+		frappe.db.set_value("DB Conversation", self.a_closed, {"party_type": "Customer", "party": "Cust-X"})
+		frappe.db.set_value("DB Conversation", self.a_open_mine, {"party_type": "Lead", "party": "Cust-X"})
+		frappe.db.set_value("DB Conversation", self.b_open, {"party_type": "Customer", "party": "Cust-X"})
+		lc = api.list_conversations
+		frappe.set_user(self.mgr)
+		party = {"party_type": "Customer", "party": "Cust-X", "status": "All"}
+		self.assertEqual(_names(lc(party)), {self.a_open_unassigned, self.a_closed, self.b_open})
+		self.assertEqual(
+			_names(lc({"party_type": "Lead", "party": "Cust-X", "status": "All"})), {self.a_open_mine}
+		)
+		self.assertEqual(_names(lc({**party, "party": "Other"})), set())
+		# the channel restriction still applies: agent_a cannot see channel B's conversation
+		frappe.set_user(self.agent_a)
+		self.assertEqual(_names(lc(party)), {self.a_open_unassigned, self.a_closed})
+		# both keys are required together, and only Customer / Lead are accepted
+		with self.assertRaises(frappe.ValidationError):
+			lc({"party": "Cust-X"})
+		with self.assertRaises(frappe.ValidationError):
+			lc({"party_type": "Customer"})
+		with self.assertRaises(frappe.ValidationError):
+			lc({"party_type": "User", "party": "Administrator"})
+
+	def test_list_name_filter_refreshes_one_row(self):
+		# realtime row refresh: one conversation, under the list's current filters
+		lc = api.list_conversations
+		frappe.set_user(self.agent_a)
+		self.assertEqual(_names(lc({"name": self.a_open_mine})), {self.a_open_mine})
+		self.assertEqual(_names(lc({"name": self.a_open_mine, "scope": "unassigned"})), set())
+		self.assertEqual(_names(lc({"name": self.a_closed})), set())  # status Open by default
+		# another channel's conversation is not returned
+		self.assertEqual(_names(lc({"name": self.b_open, "status": "All"})), set())

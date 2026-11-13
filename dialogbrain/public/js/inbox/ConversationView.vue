@@ -54,7 +54,8 @@ const items = computed(() => {
 // --- scrolling ----------------------------------------------------------------------
 const NEAR = 120;
 let stick = true; // the user is at (or near) the bottom
-let preserveFrom = null; // scrollHeight before "Load earlier"
+let preserveFrom = null; // scroll position before "Load earlier", while it is in flight
+let earlierSeq = 0;
 
 function atBottom() {
 	const el = scroller.value;
@@ -71,16 +72,38 @@ function onMediaLoad() {
 	if (stick) toBottom();
 }
 
+// Keep the view where it was while older rows are prepended. preserveFrom is cleared in
+// every outcome (rows added, nothing new, error) and on a conversation switch, so the
+// bottom-follow watcher below is never blocked for good, and the offset is applied only to
+// the conversation (and element) it was measured on.
 async function loadEarlier() {
 	const el = scroller.value;
-	preserveFrom = el ? { height: el.scrollHeight, top: el.scrollTop } : null;
-	await loadMessages(store.selected, true);
+	const conv = store.selected;
+	const seq = ++earlierSeq;
+	const from = el ? { height: el.scrollHeight, top: el.scrollTop } : null;
+	preserveFrom = from;
+	try {
+		await loadMessages(conv, true);
+		await nextTick(); // the prepended rows are rendered
+		if (from && seq === earlierSeq && store.selected === conv && scroller.value === el) {
+			el.scrollTop = from.top + (el.scrollHeight - from.height);
+		}
+	} finally {
+		if (seq === earlierSeq) {
+			preserveFrom = null;
+			// an own send made while the load was in flight is still followed
+			const last = rows.value[rows.value.length - 1];
+			if (last && last._optimistic) nextTick(toBottom);
+		}
+	}
 }
 
 // a new conversation: jump to the bottom once its messages are in
 watch(
 	() => store.selected,
 	() => {
+		earlierSeq++;
+		preserveFrom = null;
 		stick = true;
 		nextTick(toBottom);
 	}
@@ -96,19 +119,6 @@ watch(
 			// own optimistic message: always follow it; otherwise only when near the bottom
 			if (stick || (last && last._optimistic)) toBottom();
 			stick = atBottom();
-		});
-	},
-	{ flush: "post" }
-);
-
-watch(
-	() => rows.value.length && rows.value[0],
-	() => {
-		if (!preserveFrom) return;
-		nextTick(() => {
-			const el = scroller.value;
-			if (el && preserveFrom) el.scrollTop = preserveFrom.top + (el.scrollHeight - preserveFrom.height);
-			preserveFrom = null;
 		});
 	},
 	{ flush: "post" }

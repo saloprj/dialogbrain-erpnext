@@ -22,7 +22,9 @@ export const store = reactive({
 	managers: [], // assignable_users() without a conversation; empty for agents
 	messages: {}, // conversation -> { rows (oldest first), nextBefore, loading, loaded }
 	drafts: {}, // conversation -> pending drafts
-	composer: {}, // conversation -> { text, files, clientRef, draft }
+	composer: {}, // conversation -> { text, files, clientRef, refSig, draft }
+	sending: {}, // conversation -> true while a send / approve is in flight there
+	notesVersion: 0, // bumped by a realtime "notes" change of the open conversation
 	cardOpen: false,
 	cardVersion: 0, // bumped to make the customer card reload
 });
@@ -86,6 +88,47 @@ export function patchRow(row) {
 		const { channel, channel_type, channel_title, ...rest } = row;
 		Object.assign(store.conversation, rest);
 	}
+}
+
+/** Row keyset order: COALESCE(last_message_at, creation) desc, name desc (rows carry no
+ * creation, so a row without last_message_at keeps its place or goes on top when new). */
+function rowAfter(a, b) {
+	const ka = String(a.last_message_at || "");
+	const kb = String(b.last_message_at || "");
+	return ka !== kb ? ka < kb : a.name < b.name;
+}
+
+/** Realtime: re-read one row under the list's current filters and put it in place, or
+ * drop it when it no longer matches (the open conversation keeps its row). */
+export async function refreshRow(name) {
+	if (!name) return;
+	const seq = listSeq;
+	let row;
+	try {
+		const r = await api.listConversations({ ...listFilters(), name }, null, 1);
+		row = r && r.rows && r.rows[0];
+	} catch (e) {
+		return;
+	}
+	if (seq !== listSeq) return; // the list was reloaded meanwhile
+	const i = store.rows.findIndex((x) => x.name === name);
+	if (!row) {
+		if (i >= 0 && name !== store.selected) store.rows.splice(i, 1);
+		return;
+	}
+	if (i >= 0) store.rows.splice(i, 1);
+	let j;
+	if (!row.last_message_at) {
+		j = i >= 0 ? i : 0;
+	} else {
+		j = store.rows.findIndex((x) => rowAfter(x, row));
+		if (j < 0) {
+			// sorts after every loaded row: paging brings it, unless it was loaded already
+			if (store.nextCursor && i < 0) return;
+			j = store.rows.length;
+		}
+	}
+	store.rows.splice(j, 0, row);
 }
 
 // --- selection + URL --------------------------------------------------------------
@@ -305,7 +348,7 @@ export async function rejectDraft(conv, draft) {
 
 export function composerFor(conv) {
 	if (!store.composer[conv]) {
-		store.composer[conv] = { text: "", files: [], clientRef: null, draft: null };
+		store.composer[conv] = { text: "", files: [], clientRef: null, refSig: null, draft: null };
 	}
 	return store.composer[conv];
 }
@@ -322,7 +365,37 @@ export function uuid() {
 	return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
+/**
+ * client_ref for this attempt. A failed (or timed-out) send keeps its ref so that sending
+ * the SAME text and files again is idempotent: create_reply returns the message the first
+ * attempt may already have created. Any change to the text or the files makes a new
+ * reply, so it gets a new ref; reusing the old one would return the earlier message and
+ * silently drop the edited text.
+ */
+export function refForAttempt(c, text, fileUrls) {
+	const sig = JSON.stringify([text, fileUrls]);
+	if (!c.clientRef || c.refSig !== sig) {
+		c.clientRef = uuid();
+		c.refSig = sig;
+	}
+	return c.clientRef;
+}
+
+export function isSending(conv) {
+	return !!store.sending[conv];
+}
+
 export async function sendMessage(conv) {
+	if (store.sending[conv]) return false;
+	store.sending[conv] = true;
+	try {
+		return await doSend(conv);
+	} finally {
+		delete store.sending[conv];
+	}
+}
+
+async function doSend(conv) {
 	const c = composerFor(conv);
 	const text = c.text.trim();
 	if (c.files.some((f) => f.uploading)) return false;
@@ -337,8 +410,7 @@ export async function sendMessage(conv) {
 	}
 
 	if (!text && !files.length) return false;
-	c.clientRef = c.clientRef || uuid();
-	const ref = c.clientRef;
+	const ref = refForAttempt(c, text, files.map((f) => f.file_url));
 	mergeMessages(conv, [
 		{
 			name: "tmp-" + ref,
@@ -359,7 +431,10 @@ export async function sendMessage(conv) {
 	c.files = [];
 	try {
 		const r = await api.send(conv, text, ref, files.length ? files.map((f) => f.file_url) : null);
-		if (c.clientRef === ref) c.clientRef = null;
+		if (c.clientRef === ref) {
+			c.clientRef = null;
+			c.refSig = null;
+		}
 		if (r && r.name) {
 			await refreshMessages(conv, [r.name]);
 			watchPending(conv, r.name);
@@ -382,22 +457,4 @@ export async function retryMessage(conv, name) {
 	}
 	await refreshMessages(conv, [name]);
 	watchPending(conv, name);
-}
-
-// --- realtime (message + draft events of the open conversation) ---------------------
-// Task 7 widens this (rows, counters, badge); here it keeps the open thread current so
-// optimistic rows are replaced by the server rows.
-
-export function onMessageEvent(data) {
-	if (!data || !data.conversation || !data.message) return;
-	if (data.conversation !== store.selected) return;
-	refreshMessages(data.conversation, [data.message]);
-}
-
-export function onMessageRemoved(data) {
-	if (data && data.conversation && data.message) removeMessage(data.conversation, data.message);
-}
-
-export function onDraftEvent(data) {
-	if (data && data.conversation && data.conversation === store.selected) loadDrafts(data.conversation);
 }

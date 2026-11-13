@@ -32,7 +32,8 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ConversationList from "./ConversationList.vue";
 import ConversationView from "./ConversationView.vue";
 import CustomerCard from "./CustomerCard.vue";
-import { store, select, onMessageEvent, onMessageRemoved, onDraftEvent } from "./store.js";
+import { store, select } from "./store.js";
+import { subscribe } from "./realtime.js";
 
 const props = defineProps({ opts: { type: Object, default: () => ({}) } });
 const root = ref(null);
@@ -48,23 +49,18 @@ function measure() {
 	if (root.value) top.value = Math.round(root.value.getBoundingClientRect().top + window.scrollY);
 }
 
-const events = {
-	"dialogbrain:message": onMessageEvent,
-	"dialogbrain:message_updated": onMessageEvent,
-	"dialogbrain:message_removed": onMessageRemoved,
-	"dialogbrain:draft": onDraftEvent,
-};
+let unsubscribe = null;
 
 onMounted(() => {
 	window.addEventListener("resize", measure);
 	nextTick(measure);
-	for (const [name, fn] of Object.entries(events)) frappe.realtime.on(name, fn);
+	unsubscribe = subscribe();
 	if (props.opts.conversation) select(props.opts.conversation, { updateUrl: false });
 });
 
 onBeforeUnmount(() => {
 	window.removeEventListener("resize", measure);
-	for (const [name, fn] of Object.entries(events)) frappe.realtime.off(name, fn);
+	if (unsubscribe) unsubscribe();
 });
 
 defineExpose({ measure });

@@ -36,6 +36,7 @@
 <script setup>
 import { ref, watch } from "vue";
 import { api } from "./api.js";
+import { store } from "./store.js";
 
 const props = defineProps({ conversation: { type: String, required: true } });
 
@@ -48,16 +49,22 @@ const drafts = {}; // unsent note text per conversation
 
 const when = (v) => frappe.datetime.comment_when(v);
 
-async function load() {
+async function load(quiet = false) {
 	const conv = props.conversation;
-	notes.value = null;
+	if (!quiet) notes.value = null;
 	try {
 		const rows = await api.listNotes(conv);
 		if (conv === props.conversation) notes.value = rows || [];
 	} catch (e) {
-		notes.value = [];
+		if (!quiet) notes.value = [];
 	}
 }
+
+// realtime: a colleague added or deleted a note here; reload in place, keep the typed text
+watch(
+	() => store.notesVersion,
+	() => load(true)
+);
 
 watch(
 	() => props.conversation,

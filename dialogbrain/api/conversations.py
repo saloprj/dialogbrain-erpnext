@@ -23,6 +23,7 @@ from dialogbrain.permissions import (
 	is_manager,
 	permitted_users,
 )
+from dialogbrain.party import PARTY_TYPES
 from dialogbrain.sync.notify import publish
 
 C = "`tabDB Conversation`"
@@ -184,6 +185,22 @@ def _list_conditions(filters, user):
 	if filters.get("channel_type"):
 		conditions.append("ch.`channel_type` = %(channel_type)s")
 		params["channel_type"] = filters["channel_type"]
+
+	if filters.get("name"):
+		# one row under the current filters (realtime refresh of a single list row)
+		conditions.append(f"{C}.`name` = %(conv_name)s")
+		params["conv_name"] = str(filters["name"])
+
+	party_type, party = filters.get("party_type"), filters.get("party")
+	if party_type or party:
+		# Customer / Lead form "Chats" section: both keys together, Customer or Lead only
+		if not (party_type and party):
+			frappe.throw(_("Filter by party needs both party_type and party"))
+		if party_type not in PARTY_TYPES:
+			frappe.throw(_("Party type must be Customer or Lead"))
+		conditions.append(f"{C}.`party_type` = %(party_type)s AND {C}.`party` = %(party)s")
+		params["party_type"] = party_type
+		params["party"] = str(party)
 
 	if filters.get("assigned_to") and is_manager(user):
 		conditions.append(f"{C}.`assigned_to` = %(assigned_to)s")

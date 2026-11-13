@@ -72,13 +72,14 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted } from "vue";
 import { api } from "./api.js";
-import { store, composerFor, sendMessage } from "./store.js";
+import { store, composerFor, sendMessage, isSending } from "./store.js";
 
 const props = defineProps({ conversation: { type: String, required: true } });
 
 const input = ref(null);
 const fileInput = ref(null);
-const sending = ref(false);
+// per conversation: a send in flight in A must not disable Send in B
+const sending = computed(() => isSending(props.conversation));
 const c = computed(() => store.composer[props.conversation] || composerFor(props.conversation));
 const canSend = computed(
 	() => !c.value.files.some((f) => f.uploading) && (c.value.text.trim() || (!c.value.draft && c.value.files.length))
@@ -115,13 +116,12 @@ defineExpose({ focus });
 // --- send ------------------------------------------------------------------------
 async function send() {
 	if (!canSend.value || sending.value) return;
-	sending.value = true;
+	const conv = props.conversation;
 	picker.open = false;
 	try {
-		await sendMessage(props.conversation);
+		await sendMessage(conv);
 	} finally {
-		sending.value = false;
-		focus();
+		if (props.conversation === conv) focus();
 	}
 }
 

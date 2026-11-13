@@ -7,6 +7,7 @@ frappe.pages["dialogbrain-inbox"].on_page_load = function (wrapper) {
 	page.main.addClass("dialogbrain-inbox-main");
 	const el = $('<div class="dialogbrain-inbox-root"></div>').appendTo(page.main)[0];
 	wrapper.dialogbrain_inbox = { page, el, mounted: false };
+	setupSoundMenu(page);
 
 	frappe.require("dialogbrain_inbox.bundle.js").then(() => {
 		wrapper.dialogbrain_inbox.app = frappe.dialogbrain.mountInbox(el, {
@@ -24,3 +25,19 @@ frappe.pages["dialogbrain-inbox"].on_page_show = function (wrapper) {
 	const conversation = frappe.utils.get_query_params().conversation || null;
 	frappe.dialogbrain.selectConversation(conversation, { updateUrl: false });
 };
+
+// Menu toggle for the new-message sound (stored per browser in localStorage, see the desk bundle).
+function setupSoundMenu(page) {
+	const db = frappe.dialogbrain || {};
+	if (!db.soundEnabled || !db.setSoundEnabled) return;
+	page.clear_menu();
+	const on = db.soundEnabled();
+	page.add_menu_item(on ? __("Mute new-message sound") : __("Unmute new-message sound"), () => {
+		db.setSoundEnabled(!on);
+		frappe.show_alert({
+			message: !on ? __("New-message sound on") : __("New-message sound off"),
+			indicator: "blue",
+		});
+		setupSoundMenu(page);
+	});
+}
