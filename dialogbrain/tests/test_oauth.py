@@ -205,6 +205,7 @@ def _fake_get_url(site=SITE):
 class TestOAuthFlow(DialogBrainTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
+		frappe.local.flags.commit = False
 		self.admin = _user("oauth-admin@example.com", "System Manager")
 		self.other = _user("oauth-other@example.com", "System Manager")
 		self.agent = _user("oauth-agent@example.com", "Chat Agent")
@@ -217,6 +218,7 @@ class TestOAuthFlow(DialogBrainTestCase):
 				"public_site_url": SITE + "/",
 				"oauth_client_id": None,
 				"oauth_redirect_uri": None,
+				"oauth_base_url": None,
 				"connected": 0,
 			}
 		)
@@ -230,6 +232,7 @@ class TestOAuthFlow(DialogBrainTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		frappe.local.response = frappe._dict()
+		frappe.local.flags.commit = False
 
 	# --- helpers ------------------------------------------------------------------
 
@@ -298,6 +301,43 @@ class TestOAuthFlow(DialogBrainTestCase):
 		self.assertEqual(parse_qs(urlparse(out["authorize_url"]).query)["client_id"], ["cid-2"])
 		self.assertEqual(self._get("oauth_client_id"), "cid-2")
 		self.assertEqual(self._get("oauth_redirect_uri"), new_cb)
+
+	def test_start_reregisters_when_base_url_changes(self):
+		self._start()
+		frappe.db.set_single_value(SETTINGS, "base_url", "https://other-dialogbrain.test")
+		out, disc, reg = self._start(client_id="cid-2")
+		disc.assert_called_once_with("https://other-dialogbrain.test")
+		reg.assert_called_once_with(META["registration_endpoint"], CB, "ERPNext — erp.example.com")
+		self.assertEqual(parse_qs(urlparse(out["authorize_url"]).query)["client_id"], ["cid-2"])
+		self.assertEqual(self._get("oauth_client_id"), "cid-2")
+		self.assertEqual(self._get("oauth_base_url"), "https://other-dialogbrain.test")
+		self.assertIn("oauth_base_url", connect_mod.SERVER_FIELDS)
+
+	def test_start_discovery_failure_is_a_clean_error(self):
+		err = DialogBrainError("Cannot reach DialogBrain at https://api.dialogbrain.test: ConnectionError")
+		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(
+			oauth, "discover", side_effect=err
+		), patch.object(oauth, "register_client") as reg, self.assertRaises(frappe.ValidationError) as cm:
+			oauth.start()
+		self.assertIn("Cannot reach DialogBrain", str(cm.exception))
+		reg.assert_not_called()
+
+	def test_start_registration_failure_is_a_clean_error(self):
+		err = DialogBrainError("DialogBrain client registration failed (HTTP 400)", status=400)
+		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(
+			oauth, "discover", return_value=dict(META)
+		), patch.object(oauth, "register_client", side_effect=err), self.assertRaises(
+			frappe.ValidationError
+		) as cm:
+			oauth.start()
+		self.assertIn("registration failed", str(cm.exception))
+		self.assertFalse(self._get("oauth_client_id"))
+
+	def test_start_without_issuer_is_a_clean_error(self):
+		meta = {k: v for k, v in META.items() if k != "issuer"}
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._start(meta=meta)
+		self.assertIn("issuer", str(cm.exception))
 
 	def test_start_refuses_plain_http_non_loopback(self):
 		with self.assertRaises(frappe.ValidationError) as cm:
@@ -475,6 +515,41 @@ class TestOAuthFlow(DialogBrainTestCase):
 		result = oauth.pop_result(self.admin)
 		self.assertFalse(result["ok"])
 		self.assertIn("messages.send", result["message"])
+
+	def test_callback_unexpected_error_redirects_and_logs_deferred(self):
+		state = self._state(self._start()[0])
+		with patch("frappe.log_error") as log:
+			response, _, conn = self._callback(exchange_error=RuntimeError(f"boom {CODE}"), **self._ok_params(state))
+		self.assertEqual(response["type"], "redirect")
+		self.assertEqual(response["location"], "/app/dialogbrain-settings")
+		conn.assert_not_called()
+		result = oauth.pop_result(self.admin)
+		self.assertFalse(result["ok"])
+		self.assertIn("Error Log", result["message"])
+		log.assert_called_once()
+		self.assertTrue(log.call_args.kwargs.get("defer_insert"))
+		self.assertNotIn(CODE, str(log.call_args))
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), OLD_KEY)
+
+	def test_callback_sets_commit_flag(self):
+		"""R3b: GET requests are rolled back unless flags.commit is set."""
+		state = self._state(self._start()[0])
+		frappe.local.flags.commit = False
+		self._callback(**self._ok_params(state))
+		self.assertTrue(frappe.local.flags.commit)
+		self.assertTrue(oauth.pop_result(self.admin)["ok"])
+
+		state = self._state(self._start()[0])
+		frappe.local.flags.commit = False
+		err = frappe.ValidationError("Invalid API key or DialogBrain unreachable")
+		self._callback(connect_error=err, **self._ok_params(state))
+		self.assertTrue(frappe.local.flags.commit)
+		self.assertFalse(oauth.pop_result(self.admin)["ok"])
+
+		state = self._state(self._start()[0])
+		frappe.local.flags.commit = False
+		self._callback(state=state, error="access_denied", iss=META["issuer"])
+		self.assertFalse(frappe.local.flags.commit)  # nothing saved, nothing to commit
 
 	def test_callback_sets_public_site_url_when_empty(self):
 		frappe.db.set_single_value(SETTINGS, "public_site_url", None)

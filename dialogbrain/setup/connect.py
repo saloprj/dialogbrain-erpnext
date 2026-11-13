@@ -51,6 +51,7 @@ SERVER_FIELDS = (
 	"connected",
 	"oauth_client_id",
 	"oauth_redirect_uri",
+	"oauth_base_url",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")

@@ -175,17 +175,25 @@ def start() -> dict:
 		frappe.throw(
 			_('Sign-in with DialogBrain needs an https site address. Use "Connect with API key" instead.')
 		)
-	meta = discover(doc.base_url)
+	try:
+		meta = discover(doc.base_url)
+	except DialogBrainError as exc:
+		frappe.throw(_("Cannot start sign-in with DialogBrain: {0}").format(_safe_message(exc)))
 	issuer = frappe.conf.get(ISSUER_CONF) or meta.get("issuer")
 	if not issuer:
-		raise DialogBrainError("DialogBrain OAuth metadata is missing issuer")
+		frappe.throw(_("Cannot start sign-in with DialogBrain: its OAuth metadata has no issuer"))
 
 	client_id = doc.oauth_client_id
-	if not client_id or doc.oauth_redirect_uri != redirect_uri:
+	# R1b: a client is only valid for the redirect URI and the DialogBrain it was registered with
+	if not client_id or doc.oauth_redirect_uri != redirect_uri or doc.oauth_base_url != doc.base_url:
 		host = urlparse(redirect_uri).hostname
-		client_id = register_client(meta["registration_endpoint"], redirect_uri, f"ERPNext — {host}")
+		try:
+			client_id = register_client(meta["registration_endpoint"], redirect_uri, f"ERPNext — {host}")
+		except DialogBrainError as exc:
+			frappe.throw(_("Cannot register this site with DialogBrain: {0}").format(_safe_message(exc)))
 		doc.oauth_client_id = client_id
 		doc.oauth_redirect_uri = redirect_uri
+		doc.oauth_base_url = doc.base_url
 		conn._server_save(doc)
 
 	verifier, challenge = pkce_pair()
@@ -298,9 +306,11 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 	except (DialogBrainError, frappe.ValidationError) as exc:
 		_refuse(user, _safe_message(exc, key, code, verifier))
 	except Exception:  # noqa: BLE001 — every outcome must end in a redirect, never an error page
+		# deferred: a GET request's transaction is rolled back, a plain insert would vanish
 		frappe.log_error(
 			title="DialogBrain OAuth callback failed",
 			message=_scrub(frappe.get_traceback(), key, code, verifier),
+			defer_insert=True,
 		)
 		_refuse(user, _("DialogBrain sign-in failed unexpectedly. See the Error Log."))
 	finally:

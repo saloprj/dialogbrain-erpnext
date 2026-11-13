@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 20:00:00.000000",
+ "modified": "2026-11-13 21:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -10,6 +10,7 @@
   "api_key",
   "oauth_client_id",
   "oauth_redirect_uri",
+  "oauth_base_url",
   "workspace_id",
   "workspace_name",
   "network_mode",
@@ -47,6 +48,13 @@
    "fieldname": "oauth_redirect_uri",
    "fieldtype": "Data",
    "label": "OAuth Redirect Uri",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "oauth_base_url",
+   "fieldtype": "Data",
+   "label": "OAuth Base Url",
    "read_only": 1,
    "hidden": 1
   },
