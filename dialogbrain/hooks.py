@@ -20,3 +20,8 @@ has_permission = {
 	"DB Message": "dialogbrain.permissions.message_has_permission",
 	"DB Draft": "dialogbrain.permissions.draft_has_permission",
 }
+
+scheduler_events = {
+	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
+	"daily": ["dialogbrain.sync.maintenance.cleanup_webhook_log"],
+}

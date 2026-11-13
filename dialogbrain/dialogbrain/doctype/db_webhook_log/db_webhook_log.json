@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 18:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -35,14 +35,16 @@
   {
    "fieldname": "received_at",
    "fieldtype": "Datetime",
-   "label": "Received At"
+   "label": "Received At",
+   "search_index": 1
   },
   {
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
    "options": "queued\nprocessed\nfailed",
-   "default": "queued"
+   "default": "queued",
+   "search_index": 1
   },
   {
    "fieldname": "attempts",
