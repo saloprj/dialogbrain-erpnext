@@ -197,6 +197,12 @@ def _result_key(user: str) -> str:
 	return f"dialogbrain:oauth_result:{user}"
 
 
+def _norm_base(url) -> str:
+	"""Base URL for comparison: no trailing slash, scheme and host lowercased."""
+	parts = urlparse((url or "").strip().rstrip("/"))
+	return urlunparse(parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()))
+
+
 @frappe.whitelist(methods=["POST"])
 def start() -> dict:
 	"""Begin "Connect with DialogBrain": returns the DialogBrain consent URL to open."""
@@ -221,7 +227,11 @@ def start() -> dict:
 
 	client_id = doc.oauth_client_id
 	# R1b: a client is only valid for the redirect URI and the DialogBrain it was registered with
-	if not client_id or doc.oauth_redirect_uri != redirect_uri or doc.oauth_base_url != doc.base_url:
+	if (
+		not client_id
+		or doc.oauth_redirect_uri != redirect_uri
+		or _norm_base(doc.oauth_base_url) != _norm_base(doc.base_url)
+	):
 		host = urlparse(redirect_uri).hostname
 		try:
 			client_id = register_client(meta["registration_endpoint"], redirect_uri, f"ERPNext — {host}")

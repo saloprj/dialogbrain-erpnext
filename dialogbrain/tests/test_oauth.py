@@ -369,6 +369,18 @@ class TestOAuthFlow(DialogBrainTestCase):
 		self.assertEqual(self._get("oauth_base_url"), "https://other-dialogbrain.test")
 		self.assertIn("oauth_base_url", connect_mod.SERVER_FIELDS)
 
+	def test_start_reuses_client_when_base_url_differs_only_in_form(self):
+		self._start()
+		for variant in ("https://api.dialogbrain.test/", "HTTPS://API.DialogBrain.test//"):
+			frappe.db.set_single_value(SETTINGS, "base_url", variant)
+			out, _, reg = self._start(client_id="cid-2")
+			reg.assert_not_called()
+			self.assertEqual(parse_qs(urlparse(out["authorize_url"]).query)["client_id"], ["cid-1"])
+		# a different path is still a different DialogBrain
+		frappe.db.set_single_value(SETTINGS, "base_url", "https://api.dialogbrain.test/other")
+		_, _, reg = self._start(client_id="cid-3")
+		reg.assert_called_once()
+
 	def test_start_discovery_failure_is_a_clean_error(self):
 		err = DialogBrainError("Cannot reach DialogBrain at https://api.dialogbrain.test: ConnectionError")
 		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(
