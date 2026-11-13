@@ -193,6 +193,10 @@ class _AgentIntegrationCase(DialogBrainTestCase):
 		doc.flags.dialogbrain_server_write = True
 		doc.save()
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		# set_agent_writes commits "writes off" (R11): never commit test data.
+		commit = patch.object(frappe.db, "commit")
+		self.db_commit = commit.start()
+		self.addCleanup(commit.stop)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -759,3 +763,44 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 		status = self._get("agent_tools_status")
 		self.assertNotIn("admin/owner", status)
 		self.assertIn("thread context:", status)
+
+
+class TestAgentIntegrationB4(_AgentIntegrationCase):
+	def test_writes_off_is_committed_before_dialogbrain_is_called(self):
+		"""R11: an unexpected exception after the local store must not roll "writes off" back."""
+		from dialogbrain.setup import agent_integration as mod
+
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+		order = []
+		self.db_commit.side_effect = lambda *a, **k: order.append(
+			("commit", frappe.db.get_single_value(SETTINGS, "allow_agent_writes"))
+		)
+
+		def boom(doc, client=None):
+			order.append(("dialogbrain", None))
+			raise RuntimeError("unexpected")
+
+		with patch.object(mod, "apply_denied_tools", side_effect=boom), self.assertRaises(RuntimeError):
+			mod.set_agent_writes(0)
+		self.assertEqual(order[:2], [("commit", 0), ("dialogbrain", None)])
+
+	def test_writes_on_is_not_committed_early(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		with patch.object(mod, "apply_denied_tools", return_value=0):
+			mod.set_agent_writes(1)
+		self.db_commit.assert_not_called()
+
+	def test_has_capability(self):
+		from dialogbrain.setup.agent_integration import has_capability
+
+		frappe.db.set_single_value(SETTINGS, "agent_capabilities", None)
+		self.assertFalse(has_capability("request_id"))
+		frappe.db.set_single_value(SETTINGS, "agent_capabilities", "not json")
+		self.assertFalse(has_capability("request_id"))
+		frappe.db.set_single_value(
+			SETTINGS, "agent_capabilities", json.dumps({"request_id": True, "agent_pause": False})
+		)
+		self.assertTrue(has_capability("request_id"))
+		self.assertFalse(has_capability("agent_pause"))
+		self.assertFalse(has_capability("full_drafts"))

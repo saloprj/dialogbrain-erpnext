@@ -52,6 +52,7 @@ class TestComposerApi(DialogBrainTestCase):
 		for dt in ("DB Note", "DB Quick Reply", "DB Draft", "DB Message", "DB Conversation",
 				   "DB Channel User", "DB Channel"):
 			frappe.db.delete(dt)
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", None)  # Plan 1 baseline
 		self.agent_a = _user("comp-agent-a@example.com", "Chat Agent")
 		self.agent_b = _user("comp-agent-b@example.com", "Chat Agent")
 		self.mgr = _user("comp-mgr@example.com", "Chat Manager")
@@ -348,3 +349,103 @@ class TestComposerApi(DialogBrainTestCase):
 				api.reject_draft(d)
 			cls.from_settings.assert_not_called()
 		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "pending")
+
+	# --- full draft text (Plan 3 B4) ----------------------------------------------------
+
+	def _caps(self, **caps):
+		import json
+
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", json.dumps(caps))
+
+	def _full(self, draft, result=None, error=None):
+		client = MagicMock()
+		if error is not None:
+			client.execute.side_effect = error
+		else:
+			client.execute.return_value = result
+		with patch(CLIENT) as cls, patch(PUBLISH) as pub:
+			cls.from_settings.return_value = client
+			out = api.get_full_draft(draft)
+		return client, pub, out
+
+	def _get_draft_result(self, text, status="pending", thread_id=None):
+		thread = thread_id or frappe.db.get_value("DB Conversation", self.conv_a, "thread_id")
+		return {"draft_id": 101, "thread_id": int(thread) if str(thread).isdigit() else thread,
+				"status": status, "response_text": text, "trigger_text": "hi", "created_at": None}
+
+	def test_full_draft_replaces_truncated_text_then_edit_allowed(self):
+		from dialogbrain.api.conversations import get_drafts
+
+		self._caps(full_drafts=True)
+		full = "x" * 500 + " and the rest of the answer"
+		d = _draft(self.conv_a, text="x" * 500)
+		frappe.set_user(self.agent_a)
+		client, pub, out = self._full(d, self._get_draft_result(full))
+		client.execute.assert_called_once_with("agents.get_draft", {"draft_id": 101})
+		self.assertEqual((out["text"], out["truncated"], out["status"]), (full, False, "pending"))
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "text"), full)
+		self.assertEqual(pub.call_args[0][:2], (self.conv_a, "draft"))
+		self.assertFalse(get_drafts(self.conv_a)[0]["truncated"])
+
+		client, _, out = self._approve(d, full + " (edited)")
+		client.execute.assert_called_once_with(
+			"agents.approve_draft", {"draft_id": 101, "edited_text": full + " (edited)"}
+		)
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "approved")
+
+	def test_full_draft_of_exactly_500_chars_is_no_longer_truncated(self):
+		"""A full text that happens to be 500 chars long would look cut: the fetch is recorded."""
+		from dialogbrain.api.conversations import get_drafts
+
+		self._caps(full_drafts=True)
+		text = "y" * 500
+		d = _draft(self.conv_a, text=text)
+		frappe.set_user(self.agent_a)
+		self.assertTrue(get_drafts(self.conv_a)[0]["truncated"])
+		self._full(d, self._get_draft_result(text))
+		self.assertFalse(get_drafts(self.conv_a)[0]["truncated"])
+		client, _, _ = self._approve(d, "short edit")
+		self.assertEqual(client.execute.call_args[0][1]["edited_text"], "short edit")
+
+	def test_full_draft_without_capability_is_a_clear_error(self):
+		self._caps(full_drafts=False)
+		d = _draft(self.conv_a, text="x" * 500)
+		frappe.set_user(self.agent_a)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			client, _, _ = self._full(d, self._get_draft_result("x" * 600))
+		self.assertIn("doesn't support this yet", str(cm.exception))
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "text"), "x" * 500)
+		with patch(CLIENT) as cls, self.assertRaises(frappe.ValidationError):
+			api.approve_draft(d, "my edit")  # still refused
+		cls.from_settings.assert_not_called()
+
+	def test_full_draft_foreign_refused(self):
+		self._caps(full_drafts=True)
+		d = _draft(self.conv_b, draft_id="202", text="x" * 500)
+		frappe.set_user(self.agent_a)
+		with self.assertRaises(frappe.PermissionError):
+			self._full(d, self._get_draft_result("x" * 600))
+
+	def test_full_draft_handled_in_dialogbrain_is_superseded(self):
+		self._caps(full_drafts=True)
+		d = _draft(self.conv_a, text="x" * 500)
+		frappe.set_user(self.agent_a)
+		_, _, out = self._full(d, self._get_draft_result("x" * 600, status="expired"))
+		self.assertEqual(out["status"], "superseded")
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "superseded")
+
+	def test_full_draft_of_another_thread_refused(self):
+		self._caps(full_drafts=True)
+		d = _draft(self.conv_a, text="x" * 500)
+		frappe.set_user(self.agent_a)
+		with patch("frappe.log_error"), self.assertRaises(frappe.ValidationError):
+			self._full(d, self._get_draft_result("other chat's text", thread_id=999999))
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "text"), "x" * 500)
+
+	def test_full_draft_dialogbrain_error_keeps_text(self):
+		self._caps(full_drafts=True)
+		d = _draft(self.conv_a, text="x" * 500)
+		frappe.set_user(self.agent_a)
+		with patch("frappe.log_error"), self.assertRaises(frappe.ValidationError):
+			self._full(d, error=DialogBrainTimeout("slow"))
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "text"), "x" * 500)

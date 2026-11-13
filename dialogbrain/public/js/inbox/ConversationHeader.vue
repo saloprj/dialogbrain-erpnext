@@ -11,6 +11,9 @@
 					{{ __(conv.party_type) }}: {{ conv.party }}
 				</a>
 				<span v-if="conv.needs_human" class="db-human">{{ __("Needs human") }}</span>
+				<span v-if="agent && agent.paused" class="db-agent-paused" :title="agentPausedTitle">
+					{{ agent.paused_by === "operator" ? __("Taken over") : __("Agent paused") }}
+				</span>
 			</div>
 		</div>
 		<div class="db-header-actions">
@@ -51,6 +54,22 @@
 					</template>
 				</div>
 			</div>
+			<template v-if="canPause">
+				<!-- R3: "taken over" only for an operator pause; any pause can be given back -->
+				<button
+					v-if="!agent || !agent.paused || agent.paused_by !== 'operator'"
+					type="button"
+					class="btn btn-xs btn-default"
+					:disabled="busy"
+					:title="__('Stop the AI agent answering this conversation until you give it back')"
+					@click="setAgent(true)"
+				>
+					{{ __("Take over") }}
+				</button>
+				<button v-if="agent && agent.paused" type="button" class="btn btn-xs btn-default" :disabled="busy" @click="setAgent(false)">
+					{{ __("Give back to agent") }}
+				</button>
+			</template>
 			<button type="button" class="btn btn-xs btn-default" :disabled="busy" @click="toggleStatus">
 				{{ conv.status === "Closed" ? __("Reopen") : __("Close") }}
 			</button>
@@ -59,7 +78,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { api } from "./api.js";
 import { patchRow, loadCounters } from "./store.js";
 import { channelLabel, formLink } from "./utils.js";
@@ -71,6 +90,14 @@ const busy = ref(false);
 const users = ref(null);
 const name = computed(() => props.conv.contact_name || props.conv.title || props.conv.name);
 const canAssignAny = computed(() => !!(props.conv.permissions && props.conv.permissions.can_assign_any));
+// Take over / give back: only when the connected DialogBrain supports it (Plan 3).
+const canPause = computed(() => !!(props.conv.permissions && props.conv.permissions.agent_pause));
+const agent = ref(null); // {paused, paused_by, paused_at}; null = not known
+const agentPausedTitle = computed(() =>
+	agent.value && agent.value.paused_by === "operator"
+		? __("A person took this conversation over: the AI agent does not answer it")
+		: __("The AI agent is paused in this conversation (after a manual reply or an escalation)")
+);
 const agentOptions = computed(() => {
 	const a = props.conv.assigned_to;
 	if (!a) return [{ label: __("Assign to me"), user: me }];
@@ -82,6 +109,56 @@ watch(
 	() => props.conv.name,
 	() => (users.value = null)
 );
+
+let agentSeq = 0;
+let agentTimer = null;
+async function loadAgent() {
+	const conv = props.conv.name;
+	const seq = ++agentSeq;
+	if (!canPause.value) {
+		agent.value = null;
+		return;
+	}
+	try {
+		const r = await api.agentStatus(conv);
+		if (seq === agentSeq && conv === props.conv.name) agent.value = r && r.supported && !r.error ? r : null;
+	} catch (e) {
+		if (seq === agentSeq) agent.value = null;
+	}
+}
+
+// A take-over elsewhere (agent_override) or a new message (a manual reply pauses the agent)
+// can change the agent's state: re-read it, debounced.
+watch(
+	() => [props.conv.name, canPause.value, props.conv.agent_override, props.conv.last_message_at],
+	(now, before) => {
+		if (!before || now[0] !== before[0]) agent.value = null;
+		clearTimeout(agentTimer);
+		agentTimer = setTimeout(loadAgent, before && now[0] === before[0] ? 800 : 0);
+	},
+	{ immediate: true }
+);
+onBeforeUnmount(() => clearTimeout(agentTimer));
+
+async function setAgent(paused) {
+	const conv = props.conv.name;
+	busy.value = true;
+	try {
+		const r = await (paused ? api.takeOver(conv) : api.giveBack(conv));
+		if (r) {
+			const { agent: state, ...row } = r;
+			patchRow(row);
+			if (conv === props.conv.name) {
+				agentSeq++; // a status read already in flight is older than this
+				agent.value = state;
+			}
+		}
+	} catch (e) {
+		// Frappe showed the error
+	} finally {
+		busy.value = false;
+	}
+}
 
 async function onAssignOpen() {
 	if (!canAssignAny.value || users.value !== null) return;
@@ -158,6 +235,13 @@ function toggleStatus() {
 	border-radius: 999px;
 	background: var(--bg-red);
 	color: var(--red-600);
+}
+.db-agent-paused {
+	margin-left: 4px;
+	padding: 0 8px;
+	border-radius: 999px;
+	background: var(--bg-yellow);
+	color: var(--yellow-700, var(--text-color));
 }
 .db-header-actions {
 	display: flex;

@@ -8,7 +8,7 @@
 			</div>
 			<div class="db-draft-text">{{ d.text }}</div>
 			<div v-if="d.truncated" class="db-draft-hint">
-				{{ __("Text shortened by DialogBrain — approve as is or reject") }}
+				{{ canFetchFull ? __("Text shortened by DialogBrain — Edit loads the full text") : __("Text shortened by DialogBrain — approve as is or reject") }}
 			</div>
 			<div class="db-draft-actions">
 				<button type="button" class="btn btn-xs btn-primary" :disabled="busy[d.name]" @click="approve(d)">
@@ -17,8 +17,8 @@
 				<button
 					type="button"
 					class="btn btn-xs btn-default"
-					:disabled="busy[d.name] || d.truncated"
-					:title="d.truncated ? __('Text shortened by DialogBrain — approve as is or reject') : ''"
+					:disabled="busy[d.name] || (d.truncated && !canFetchFull)"
+					:title="d.truncated && !canFetchFull ? __('Text shortened by DialogBrain — approve as is or reject') : ''"
 					@click="edit(d)"
 				>
 					{{ __("Edit") }}
@@ -33,7 +33,7 @@
 
 <script setup>
 import { reactive, computed } from "vue";
-import { store, composerFor, approveDraft, rejectDraft } from "./store.js";
+import { store, composerFor, approveDraft, rejectDraft, fetchFullDraft } from "./store.js";
 
 const props = defineProps({ conversation: { type: String, required: true } });
 const emit = defineEmits(["edit"]);
@@ -41,6 +41,11 @@ const emit = defineEmits(["edit"]);
 const drafts = computed(() => store.drafts[props.conversation] || []);
 const composer = computed(() => composerFor(props.conversation));
 const busy = reactive({});
+// The connected DialogBrain can return a draft's full text (agents.get_draft, Plan 3).
+const canFetchFull = computed(() => {
+	const c = store.conversation;
+	return !!(c && c.name === props.conversation && c.permissions && c.permissions.full_drafts);
+});
 
 async function run(d, fn) {
 	busy[d.name] = true;
@@ -55,8 +60,16 @@ const approve = (d) => run(d, () => approveDraft(props.conversation, d.name));
 const reject = (d) =>
 	frappe.confirm(__("Reject this AI draft?"), () => run(d, () => rejectDraft(props.conversation, d.name)));
 
-function edit(d) {
-	if (d.truncated) return;
+async function edit(d) {
+	if (d.truncated) {
+		if (!canFetchFull.value || busy[d.name]) return;
+		let full = null;
+		await run(d, async () => {
+			full = await fetchFullDraft(props.conversation, d.name);
+		});
+		if (!full || full.truncated) return;
+		d = full;
+	}
 	const c = composer.value;
 	if (c.text.trim() && c.draft !== d.name && c.text !== d.text) {
 		frappe.confirm(__("Replace the text in the composer with this draft?"), () => startEdit(c, d));

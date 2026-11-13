@@ -334,6 +334,16 @@ def detect_request_id(client) -> bool:
 	return getattr(client, "last_request_id", None) == rid
 
 
+def has_capability(name: str) -> bool:
+	"""Whether the last Connect found capability ``name`` (``request_id``,
+	``thread_context``, ``agent_pause``, ``full_drafts``) in DialogBrain."""
+	try:
+		caps = json.loads(frappe.db.get_single_value(SETTINGS, "agent_capabilities") or "{}")
+	except (TypeError, ValueError):
+		return False
+	return isinstance(caps, dict) and caps.get(name) is True
+
+
 def capabilities(client, tools=None) -> dict:
 	"""``{request_id, thread_context, agent_pause, full_drafts}`` booleans."""
 	if tools is None:
@@ -664,6 +674,9 @@ def set_agent_writes(allow) -> dict:
 
 	if not allow:
 		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 0)
+		# R11: durable before DialogBrain is called, so no later exception (ours or an
+		# unexpected one) can roll "writes off" back.
+		frappe.db.commit()  # nosemgrep: deliberate, the fail-safe value must stick
 		try:
 			agents = apply_denied_tools(doc)
 		except (DialogBrainError, frappe.ValidationError) as exc:

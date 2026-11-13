@@ -25,8 +25,8 @@
 					<span class="sr-only">{{ statusLabel }}</span>
 				</span>
 			</div>
-			<div v-if="m.delivery_status === 'failed'" class="db-failed">
-				<span class="db-error">{{ m.error || __("Not delivered") }}</span>
+			<div v-if="m.delivery_status === 'failed' || (status === 'unknown' && m.can_retry)" class="db-failed">
+				<span class="db-error">{{ m.delivery_status === "failed" ? m.error || __("Not delivered") : __("Delivery not confirmed") }}</span>
 				<button type="button" class="btn btn-xs btn-default" :disabled="retrying" @click="retry">
 					{{ retrying ? __("Retrying…") : __("Retry") }}
 				</button>
@@ -72,7 +72,16 @@ const statusLabel = computed(
 );
 
 const retrying = ref(false);
-async function retry() {
+function retry() {
+	if (props.m.delivery_status !== "unknown") return doRetry();
+	// Plan 3: sent again with the same request_id, so DialogBrain skips a send it already made
+	frappe.confirm(
+		__("DialogBrain did not confirm this message. Send it again? If it was already delivered, DialogBrain recognises the repeat."),
+		doRetry
+	);
+}
+
+async function doRetry() {
 	retrying.value = true;
 	try {
 		await retryMessage(props.conversation, props.m.name);

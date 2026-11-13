@@ -8,6 +8,7 @@ so actions write them server-side with ``frappe.db.set_value`` after their own c
 
 import html as html_lib
 import json
+import re
 from datetime import timedelta
 
 import frappe
@@ -23,6 +24,7 @@ from dialogbrain.permissions import (
 	is_manager,
 	permitted_users,
 )
+from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.party import PARTY_TYPES
 from dialogbrain.sync.notify import publish
 
@@ -136,11 +138,29 @@ def sanitize_message_html(value):
 	return str(soup)
 
 
-def is_draft_truncated(text):
+def is_draft_truncated(text, full_text=False):
 	"""True when DialogBrain cut the draft text: webhook ``draft.created`` sends 500 chars,
-	``agents.list_drafts`` 300 chars + "..." (no full-text fetch exists)."""
+	``agents.list_drafts`` 300 chars + "...". ``full_text``: the complete text was fetched
+	(``composer.get_full_draft``), so it is not cut whatever its length."""
+	if full_text:
+		return False
 	text = text or ""
 	return len(text) == DRAFT_WEBHOOK_LIMIT or (len(text) >= DRAFT_LIST_LIMIT and text.endswith("..."))
+
+
+UNSUPPORTED_MESSAGE = "Your DialogBrain doesn't support this yet"
+
+
+def has_capability(name):
+	from dialogbrain.setup.agent_integration import has_capability as _has
+
+	return _has(name)
+
+
+def require_capability(name):
+	"""Throw a clear error when the connected DialogBrain lacks ``name`` (Plan 3 Part A)."""
+	if not has_capability(name):
+		frappe.throw(_(UNSUPPORTED_MESSAGE))
 
 
 def _plain(value):
@@ -338,7 +358,12 @@ def get_conversation(name: str) -> dict:
 		"channel_type": data.pop("channel_type"),
 		"agent_mode": data.pop("agent_mode"),
 	}
-	data["permissions"] = {"can_assign_any": is_manager()}
+	data["permissions"] = {
+		"can_assign_any": is_manager(),
+		# what the connected DialogBrain supports (Plan 3): the UI shows the actions only then
+		"agent_pause": has_capability("agent_pause"),
+		"full_drafts": has_capability("full_drafts"),
+	}
 	return data
 
 
@@ -347,7 +372,8 @@ def _message_rows(where, params, order="DESC", limit=None):
 	sql = (
 		f"SELECT m.`name`, m.`client_ref`, m.`direction`, m.`author_type`, m.`sent_by`, "
 		f"u.`full_name` AS sent_by_name, m.`text`, m.`sent_at`, m.`delivery_status`, m.`error`, "
-		f"m.`creation`, m.`modified`, {key} AS _key "
+		f"m.`creation`, m.`modified`, m.`db_id`, "
+		f"CASE WHEN m.`delivery_status` = 'unknown' THEN m.`raw` END AS _raw, {key} AS _key "
 		f"FROM `tabDB Message` m LEFT JOIN `tabUser` u ON u.`name` = m.`sent_by` "
 		f"WHERE {where} ORDER BY {key} {order}, m.`creation` {order}, m.`name` {order}"
 	)
@@ -358,6 +384,8 @@ def _message_rows(where, params, order="DESC", limit=None):
 
 
 def _format_messages(rows):
+	from dialogbrain.sync.sender import unknown_retryable
+
 	names = tuple(r["name"] for r in rows)
 	attachments = {}
 	if names:
@@ -394,6 +422,11 @@ def _format_messages(rows):
 					and get_datetime(r["modified"]) >= in_flight_since
 				),
 				"attachments": attachments.get(r["name"], []),
+				# failed, or unknown and safe to send again with its request_id (Plan 3 B4)
+				"can_retry": r["direction"] == "out" and not r["db_id"] and (
+					r["delivery_status"] == "failed"
+					or unknown_retryable(r["delivery_status"], r["db_id"], r["_raw"])
+				),
 			}
 		)
 	return out
@@ -461,17 +494,18 @@ def get_messages_by_name(conversation: str, names=None) -> list:
 @frappe.whitelist()
 def get_drafts(conversation: str) -> list:
 	"""Pending AI drafts, newest first. ``truncated``: DialogBrain cut the text (webhook
-	``draft.created`` at 500 chars; ``agents.list_drafts`` at 300 + "...")."""
+	``draft.created`` at 500 chars; ``agents.list_drafts`` at 300 + "...") and the full text
+	has not been fetched yet."""
 	assert_can_access(conversation)
 	rows = frappe.db.sql(
-		"""SELECT `name`, `draft_id`, `text`, `created_at` FROM `tabDB Draft`
+		"""SELECT `name`, `draft_id`, `text`, `created_at`, `full_text` FROM `tabDB Draft`
 		WHERE `conversation` = %(conversation)s AND `status` = 'pending'
 		ORDER BY COALESCE(`created_at`, `creation`) DESC, `creation` DESC, `name` DESC""",
 		{"conversation": conversation},
 		as_dict=True,
 	)
 	for r in rows:
-		r["truncated"] = is_draft_truncated(r["text"])
+		r["truncated"] = is_draft_truncated(r["text"], r.pop("full_text"))
 	return [dict(r) for r in rows]
 
 
@@ -605,3 +639,83 @@ def assignable_users(conversation: "str | None" = None) -> list:
 		({"name": u, "full_name": full.get(u) or u} for u in users),
 		key=lambda r: (r["full_name"] or "").lower(),
 	)
+
+
+# --- take over / give back (Plan 3 B4) ---------------------------------------------
+#
+# DialogBrain tools (verified in the Part A worktree, ``threads/agent_pause.py``):
+# ``threads.set_agent_paused(thread_id, paused)`` -> ``{thread_id, paused, paused_at}``
+# (operator only: an API key qualifies; needs EDIT in the workspace) and
+# ``threads.get_agent_status(thread_id)`` -> ``{thread_id, paused, paused_by, paused_at}``,
+# ``paused_by`` "operator" for a person's pause / take-over, null for the automatic pause a
+# manual reply sets. ``thread_id`` takes the internal id or the channel ref.
+
+_SECRET = re.compile(r"db_(?:live|test)_\w+")
+AGENT_ERROR_MAX = 200
+
+
+def _thread_param(conversation):
+	conv = frappe.db.get_value("DB Conversation", conversation, ["thread_id", "thread_ref"], as_dict=True)
+	thread = conv and (conv.thread_id or conv.thread_ref)
+	if not thread:
+		frappe.throw(_("The conversation has no DialogBrain thread id"))
+	return thread
+
+
+def _agent_reason(exc):
+	return _SECRET.sub("[hidden]", str(exc) or type(exc).__name__)[:AGENT_ERROR_MAX]
+
+
+def _set_agent_paused(conversation, paused):
+	assert_can_access(conversation)
+	require_capability("agent_pause")
+	params = {"thread_id": _thread_param(conversation), "paused": paused}
+	try:
+		data = DialogBrainClient.from_settings().execute("threads.set_agent_paused", params) or {}
+	except DialogBrainError as exc:
+		frappe.log_error(title="DialogBrain threads.set_agent_paused failed", message=frappe.get_traceback())
+		frappe.throw(_("DialogBrain could not change the agent on this conversation: {0}").format(_agent_reason(exc)))
+	override = "human" if paused else "agent"
+	frappe.db.set_value("DB Conversation", conversation, "agent_override", override)
+	row = _changed(conversation, {"agent_override": override})
+	row["agent_override"] = override
+	row["agent"] = {
+		"paused": bool(data.get("paused", paused)),
+		"paused_by": "operator" if paused else None,
+		"paused_at": data.get("paused_at"),
+	}
+	return row
+
+
+@frappe.whitelist(methods=["POST"])
+def take_over(conversation: str) -> dict:
+	"""The person takes the conversation from the AI agent (DialogBrain pauses the agent in
+	this thread; no resume policy lifts it). Same access rule as :func:`set_status`."""
+	return _set_agent_paused(conversation, True)
+
+
+@frappe.whitelist(methods=["POST"])
+def give_back(conversation: str) -> dict:
+	"""Hand the conversation back to the AI agent (any pause, operator or automatic)."""
+	return _set_agent_paused(conversation, False)
+
+
+@frappe.whitelist()
+def agent_status(conversation: str) -> dict:
+	"""``{supported, paused, paused_by, paused_at}``; ``{supported: False}`` without the
+	capability; ``error`` (and nothing else) when DialogBrain could not answer."""
+	assert_can_access(conversation)
+	if not has_capability("agent_pause"):
+		return {"supported": False}
+	try:
+		data = DialogBrainClient.from_settings().execute(
+			"threads.get_agent_status", {"thread_id": _thread_param(conversation)}
+		) or {}
+	except DialogBrainError as exc:
+		return {"supported": True, "error": _agent_reason(exc)}
+	return {
+		"supported": True,
+		"paused": bool(data.get("paused")),
+		"paused_by": data.get("paused_by"),
+		"paused_at": data.get("paused_at"),
+	}
