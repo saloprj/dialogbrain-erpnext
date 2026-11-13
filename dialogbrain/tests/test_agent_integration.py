@@ -593,9 +593,8 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 		before = len(fake.called("agents.set_integration"))
 		for allow in (1, 0):
 			frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1 - allow)
-			with patch.object(mod, "_client", return_value=fake):
-				with self.assertRaises(frappe.ValidationError) as cm:
-					mod.set_agent_writes(allow)
+			with patch.object(mod, "_client", return_value=fake), self.assertRaises(frappe.ValidationError) as cm:
+				mod.set_agent_writes(allow)
 			self.assertIn("Not changed", str(cm.exception))
 			self.assertEqual(self._get("allow_agent_writes"), 1 - allow)
 		self.assertEqual(len(fake.called("agents.set_integration")), before)
@@ -606,9 +605,8 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 		fake = FakeDialogBrain()
 		self._connect(fake)
 		fake.fail["agents.set_integration"] = DialogBrainError("down")
-		with patch.object(mod, "_client", return_value=fake):
-			with self.assertRaises(frappe.ValidationError) as cm:
-				mod.set_agent_writes(1)
+		with patch.object(mod, "_client", return_value=fake), self.assertRaises(frappe.ValidationError) as cm:
+			mod.set_agent_writes(1)
 		self.assertIn("Not changed: DialogBrain could not be updated", str(cm.exception))
 		self.assertEqual(self._get("allow_agent_writes"), 0)
 
