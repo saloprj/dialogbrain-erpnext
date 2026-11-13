@@ -1,0 +1,18 @@
+# Override: mounts the dialogbrain app into the bench containers.
+# Run from /home/denys/projects/erpnext (paths relative to pwd.yml).
+services:
+  backend:
+    volumes:
+      - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  queue-short:
+    volumes:
+      - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  queue-long:
+    volumes:
+      - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  scheduler:
+    volumes:
+      - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  websocket:
+    volumes:
+      - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
