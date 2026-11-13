@@ -40,3 +40,8 @@ for site in test.localhost frontend; do
   fi
   bench --site "$site" migrate
 done
+
+# 6. assets (a recreated backend loses the dialogbrain entries of assets.json) and a
+# frontend restart (nginx caches the backend's old address after a recreate)
+bench build --app dialogbrain
+sudo docker restart erpnext-frontend-1
