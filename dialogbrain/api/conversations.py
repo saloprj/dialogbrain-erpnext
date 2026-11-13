@@ -168,6 +168,9 @@ def _list_conditions(filters, user):
 	elif scope != "all":
 		frappe.throw(_("Invalid scope filter"))
 
+	if _truthy(filters.get("needs_human")):
+		conditions.append(f"{C}.`needs_human` = 1")
+
 	if _truthy(filters.get("unanswered")):
 		conditions.append(f"{C}.`last_message_direction` = 'in' AND {C}.`status` = 'Open'")
 
@@ -277,6 +280,18 @@ def counters() -> dict:
 	)[0]
 	keys = ("unread_total", "unanswered", "mine", "unassigned", "needs_human")
 	return {k: cint(v) for k, v in zip(keys, row)}
+
+
+@frappe.whitelist()
+def channel_types() -> list:
+	"""Distinct channel types among the conversations the user can see (the list's chips)."""
+	_require_read()
+	perm = conversation_query(frappe.session.user)
+	where = f"WHERE {perm}" if perm else ""
+	return frappe.db.sql_list(
+		f"SELECT DISTINCT ch.`channel_type` FROM {C} JOIN `tabDB Channel` ch ON ch.`name` = {C}.`channel` "
+		f"{where} ORDER BY ch.`channel_type`"
+	)
 
 
 # --- one conversation -----------------------------------------------------------
@@ -506,3 +521,43 @@ def set_status(conversation: str, status: str) -> dict:
 	if status == "Closed":
 		payload["needs_human"] = 0
 	return _changed(conversation, payload)
+
+
+@frappe.whitelist()
+def assignable_users(conversation: "str | None" = None) -> list:
+	"""Users the current user may pick in the Assign menu (or, without ``conversation``, in
+	the list's manager filter): ``[{"name", "full_name"}]``.
+
+	Manager: everyone permitted on the conversation's channel (:func:`permitted_users`, the
+	same set :func:`assign` accepts); without a conversation, every enabled Chat Manager /
+	Chat Agent. Chat Agent: only themself, and only when permitted on the channel (they may
+	assign only to themself); without a conversation, nobody (the filter is manager-only).
+	"""
+	me = frappe.session.user
+	if conversation:
+		assert_can_access(conversation)
+		channel = frappe.db.get_value("DB Conversation", conversation, "channel")
+		users = permitted_users(channel)
+		if not is_manager(me):
+			users = [u for u in users if u == me]
+	else:
+		_require_read()
+		if not is_manager(me):
+			return []
+		users = frappe.db.sql_list(
+			"""SELECT DISTINCT u.`name` FROM `tabUser` u
+			JOIN `tabHas Role` hr ON hr.`parent` = u.`name` AND hr.`parenttype` = 'User'
+			WHERE u.`enabled` = 1 AND hr.`role` IN ('Chat Manager', 'Chat Agent')"""
+		)
+	if not users:
+		return []
+	names = frappe.db.sql(
+		"SELECT `name`, `full_name` FROM `tabUser` WHERE `name` IN %(users)s",
+		{"users": tuple(users)},
+		as_dict=True,
+	)
+	full = {r.name: r.full_name for r in names}
+	return sorted(
+		({"name": u, "full_name": full.get(u) or u} for u in users),
+		key=lambda r: (r["full_name"] or "").lower(),
+	)

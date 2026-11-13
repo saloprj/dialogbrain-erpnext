@@ -268,6 +268,35 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertFalse(is_manager())
 		self.assertFalse(api.get_conversation(self.a_open_mine)["permissions"]["can_assign_any"])
 
+	def test_needs_human_filter_and_channel_types(self):
+		frappe.set_user(self.mgr)
+		self.assertEqual(_names(api.list_conversations({"needs_human": 1})), {self.a_open_mine})
+		self.assertEqual(api.channel_types(), ["telegram", "whatsapp"])
+		frappe.set_user(self.agent_a)
+		self.assertEqual(api.channel_types(), ["telegram"])
+
+	def test_assignable_users(self):
+		frappe.set_user(self.mgr)
+		names = [u["name"] for u in api.assignable_users(self.a_open_mine)]
+		self.assertIn(self.agent_a, names)
+		self.assertIn(self.agent_b, names)
+		self.assertIn(self.mgr, names)
+		# channel B is restricted to agent_b: agent_a is not assignable there
+		names_b = [u["name"] for u in api.assignable_users(self.b_open)]
+		self.assertIn(self.agent_b, names_b)
+		self.assertNotIn(self.agent_a, names_b)
+		self.assertTrue(all(u["full_name"] for u in api.assignable_users(self.b_open)))
+		# manager filter list (no conversation): every chat user
+		all_names = [u["name"] for u in api.assignable_users()]
+		self.assertTrue({self.agent_a, self.agent_b, self.mgr} <= set(all_names))
+		# agent: only themself, and nothing for the manager filter
+		frappe.set_user(self.agent_a)
+		self.assertEqual([u["name"] for u in api.assignable_users(self.a_open_mine)], [self.agent_a])
+		self.assertEqual(api.assignable_users(), [])
+		# agent: a conversation on a channel they cannot access -> refused
+		with self.assertRaises(frappe.PermissionError):
+			api.assignable_users(self.b_open)
+
 	# --- actions ----------------------------------------------------------
 
 	def test_close_and_reopen_set_timestamps(self):
