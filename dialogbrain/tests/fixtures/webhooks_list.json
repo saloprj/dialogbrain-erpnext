@@ -1,0 +1,14 @@
+[
+  {
+    "id": 9,
+    "url": "https://erp.example.com/api/method/dialogbrain.api.webhook",
+    "event_types": [
+      "message.received",
+      "message.updated",
+      "message.deleted"
+    ],
+    "active": true,
+    "created_at": "2026-11-13T12:00:00+00:00",
+    "agent_id": null
+  }
+]

@@ -1,0 +1,147 @@
+{
+  "tools": [
+    {
+      "id": "contacts.find",
+      "name": "Search Contacts",
+      "description": "👤 Search for contacts in your address book by name or username.\n\nWhen to use:\n- User asks 'find contact X' or 'who is Y?'\n- User wants to know someone's username or ID\n- Before sending a message to verify contact exists\n- To get contact's channel reference for messaging\n\nExamples:\n❓ User: 'find contact named [name]'\n→ contacts_search(query='[name]', limit=5)\n\n❓ User: 'who is [full name]?'\n→ contacts_search(query='[full name]', limit=1)\n\n❓ User: 'search for @username'\n→ contacts_search(query='username', limit=10)\n\nA single first name ('Dima') also finds private chats where the owner wrote that name (match_type='addressed_in_outgoing', with `evidence`): people are often saved under a nickname but called by name in the chat.\n\nReturns: name, username, channel, channel_ref, similarity_score, match_type. Plus:\n- entity_id: local DB key — pass to contacts.profile. Null for live-discovered contacts (skip contacts.profile for those).\n- telegram_user_id (when channel='telegram'): the Telegram user ID — pass to calls.make / messages.send. NOT entity_id.",
+      "category": "contacts",
+      "effects": [
+        "read",
+        "external_api"
+      ],
+      "tags": [
+        "contacts",
+        "search",
+        "entities",
+        "people"
+      ],
+      "version": "1.1.0",
+      "can_undo": false,
+      "idempotent": true,
+      "requires_approval": false,
+      "can_auto_execute": true
+    },
+    {
+      "id": "files.create_upload_url",
+      "name": "Create Upload URL",
+      "description": "Get a URL to upload a local file DIRECTLY to storage, without passing its bytes through this conversation.\n\nUse this for any file you already have on disk — it is the only way to send one without spending tokens on its contents, and the only way to send anything above ~50 KB at all.\n\nThree steps:\n1. files_create_upload_url(filename, mime_type, size_bytes, sha256)\n2. curl -X PUT --data-binary @/path/to/file <upload_url> (send every header from `headers` verbatim)\n3. files_complete_upload(file_id) -> the file is ready\n\nPass sha256 when you can: if the workspace already holds that exact file you get its file_id back immediately with deduplicated=true and no upload at all.\n\nReturns: file_id, upload_url, method, headers, expires_at.",
+      "category": "files",
+      "effects": [
+        "write"
+      ],
+      "tags": [
+        "files",
+        "upload"
+      ],
+      "version": "1.0.0",
+      "can_undo": false,
+      "idempotent": false,
+      "requires_approval": false,
+      "can_auto_execute": true
+    },
+    {
+      "id": "files.complete_upload",
+      "name": "Complete Upload",
+      "description": "Finish an upload started with files_create_upload_url, after the bytes have been PUT to the upload_url.\n\nVerifies the object actually landed and matches the size (and sha256, when one was declared), then makes the file usable: from here file_id works in messages_send, messages_send_email attachments, documents.create, and the rest.\n\nA file over 100 MB is stored only: it can be sent, downloaded or passed on by file_id, but its contents are not indexed for search (`indexed: false`).\n\nReturns: file_id, status, byte_size, mime_type, indexed (on the call that completes the upload).",
+      "category": "files",
+      "effects": [
+        "write"
+      ],
+      "tags": [
+        "files",
+        "upload"
+      ],
+      "version": "1.0.0",
+      "can_undo": false,
+      "idempotent": false,
+      "requires_approval": false,
+      "can_auto_execute": true
+    },
+    {
+      "id": "messages.read_history",
+      "name": "Read Message History",
+      "description": "Read messages from a conversation thread. Use text_contains to find specific messages by content; media_type (photo, document, video, voice, link), date_from/date_to (YYYY-MM-DD, inclusive) and direction (incoming, outgoing) narrow the search and work without text: a photo with no caption sent by the other side in a given month is media_type='photo', direction='incoming' and the dates. A search runs over the loaded part of the conversation and, when that is not all of it, asks the channel's own server (Telegram) to search the rest and stores the hits (a search with text_contains also stores the neighbouring messages of its first 20 hits; one without words stores the hits alone). `search_coverage` says which: `complete = true` with a `source`, or `complete = false` with the reason, in which case an empty list is not proof the text is absent. `sync.loaded_from` is the date since which EVERY message is stored (null when unknown); `sync.oldest_stored_at` is the oldest message stored at all, gaps or not. Returns the most recent messages, including sender info and timestamps. A message people reacted to carries `reactions` (which emoji, who, when): a reaction is often the answer itself, e.g. a thumbs-up under a draft.\n\nVoice calls: each row carries a `meta` object with allowlisted keys (`event_type` ∈ 'call_started'|'call_ended'|null, `source` ∈ 'voice_transcript'|null, `call_id`, `speaker_display_name`, `duration_seconds`, `outcome`, `direction`) plus per-message `channel`. To find calls without scanning every row, use `calls.list_history` instead.\n\nUsage:\n1. Get thread_id from threads.list first, OR\n2. Use contact_name to auto-resolve thread_id\n\nExamples:\n- User: 'show me messages from chat with [contact]' → read_history(contact_name='[contact]', limit=10)\n- User: 'last 5 messages from thread 571' → read_history(thread_id=571, limit=5)",
+      "category": "messages",
+      "effects": [
+        "read"
+      ],
+      "tags": [
+        "messages",
+        "history",
+        "read",
+        "conversation"
+      ],
+      "version": "1.0.1",
+      "can_undo": false,
+      "idempotent": true,
+      "requires_approval": false,
+      "can_auto_execute": true
+    },
+    {
+      "id": "messages.send",
+      "name": "Send Message",
+      "description": "Send a message to a thread, channel, or contact. Supports Telegram, Email, LinkedIn, and other connected channels. For LinkedIn posts (comment_thread kind), this posts a comment on the post. Can automatically resolve recipients and channels when not specified. Can send files/images/documents as attachments — pass `attachments=[file_id, ...]` with integer file IDs obtained from collections.list_files, search.files, or files.search. `text` is optional when attachments are provided.",
+      "category": "messages",
+      "effects": [
+        "send",
+        "write"
+      ],
+      "tags": [
+        "message",
+        "send",
+        "telegram",
+        "email",
+        "linkedin",
+        "comment",
+        "communicate"
+      ],
+      "version": "1.0.0",
+      "can_undo": true,
+      "idempotent": true,
+      "requires_approval": true,
+      "can_auto_execute": false
+    },
+    {
+      "id": "search.threads",
+      "name": "Search Threads",
+      "description": "Find or list chat threads/conversations — by topic, participant, unread/unanswered status, or recency. Omit `query` to list threads by filter. For message content use search.messages; for files use search.files. `since` filters by recency and pairs with only_unread / only_unanswered. Each thread names the LINE it speaks from (`account`: id, channel, name, phone, email) and whether the owner ever really wrote there (`has_real_outgoing`; imported history does not count). The same person can appear once per connected number — pick the thread by `account`, not by title, before you messages.send.",
+      "category": "search",
+      "effects": [
+        "read"
+      ],
+      "tags": [],
+      "version": "1.0.0",
+      "can_undo": false,
+      "idempotent": true,
+      "requires_approval": false,
+      "can_auto_execute": true
+    },
+    {
+      "id": "workspace.current",
+      "name": "Current Workspace",
+      "description": "Return the workspace this MCP API key is currently routed to, with the caller's role inside it. Use this to confirm context before/after `workspace.switch`.",
+      "category": "workspace",
+      "effects": [
+        "read"
+      ],
+      "tags": [
+        "workspace",
+        "current"
+      ],
+      "version": "1.0.0",
+      "can_undo": false,
+      "idempotent": true,
+      "requires_approval": false,
+      "can_auto_execute": true
+    }
+  ],
+  "total": 7,
+  "mode": "draft",
+  "categories": [
+    "messages",
+    "knowledge",
+    "system"
+  ],
+  "statistics": {},
+  "default_agent_tools": []
+}

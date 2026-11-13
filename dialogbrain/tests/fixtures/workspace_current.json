@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "data": {
+    "id": 128,
+    "name": "Test User",
+    "slug": "test-user",
+    "type": "team",
+    "role": "owner"
+  },
+  "error": null,
+  "effects_applied": [],
+  "metadata": {
+    "execution_time_ms": 17
+  },
+  "trace_id": "549d16c1-8580-4be2-8985-346a5f199f96",
+  "timestamp": "2026-11-13T12:07:49.781789"
+}
