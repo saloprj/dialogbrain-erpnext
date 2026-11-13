@@ -26,6 +26,9 @@ bench --site test.localhost set-config allow_tests true
 # Frappe v16 ticks the scheduler every 4 minutes by default; DialogBrain's reconcile
 # (every minute in private mode) needs a 60 s tick.
 bench set-config -g scheduler_tick_interval 60
+# Browser-facing API host for the OAuth issuer check (containers reach DialogBrain via
+# host.docker.internal, but DialogBrain derives `issuer` from the request Host).
+bench --site frontend set-config dialogbrain_oauth_issuer http://localhost:8000
 
 # 5. install app + migrate
 for site in test.localhost frontend; do
