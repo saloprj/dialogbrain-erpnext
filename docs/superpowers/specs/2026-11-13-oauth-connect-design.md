@@ -5,7 +5,7 @@ Status: approved 2026-11-13. Extends Plan 1 (Core & Sync); lands before Plan 2 (
 ## Intent
 Any ERPNext owner installs the `dialogbrain` app and links their site to their DialogBrain account themselves. Two ways, as with DialogBrain ↔ ChatGPT/Claude:
 1. **"Connect with DialogBrain"** (OAuth) — log in to DialogBrain, pick a workspace, Authorize; no key copying.
-2. **"Paste key"** — the existing flow (API key `db_live_…` → Connect).
+2. **"Connect with API key"** — the existing flow (API key `db_live_…` → Connect).
 
 ## Goals / non-goals / anti-goals
 - Goal: a non-technical admin connects in under a minute, public or private (no public URL) site.
@@ -19,8 +19,8 @@ Any ERPNext owner installs the `dialogbrain` app and links their site to their D
 - B (rejected): one pre-registered "ERPNext" client in DialogBrain — needs DialogBrain changes, gains nothing since DCR exists.
 
 ## Design
-- Settings form: buttons "Connect with DialogBrain" (primary) and "Paste API key" (secondary, current fields).
-- OAuth start (whitelisted, System Manager, POST): discover endpoints from `base_url`; register a client once per site (redirect_uri = `<site>/api/method/dialogbrain.api.oauth.callback`, client_name `ERPNext — <site host>`), store client_id; create PKCE verifier + random `state`, keep them server-side (cache, ~10 min TTL) bound to the session user; return the authorize URL; the browser navigates to it.
+- Settings form: buttons "Connect with DialogBrain" (primary) and "Connect with API key" (secondary, current fields).
+- OAuth start (whitelisted, System Manager, POST): discover endpoints from `base_url`; register a client once per site (redirect_uri = `<site>/api/method/dialogbrain.setup.oauth.callback`, client_name `ERPNext — <site host>`), store client_id; create PKCE verifier + random `state`, keep them server-side (cache, ~10 min TTL) bound to the session user; return the authorize URL; the browser navigates to it.
 - Callback (GET, logged-in System Manager who started it): validate `state` (single use, same user), exchange code + verifier at the token endpoint, store the key in the `api_key` Password field, run `connect()`, redirect to the Settings form with a success/error message. Never echo the key or code.
 - Private sites work: redirect goes through the admin's browser, not the internet.
 - Disconnect: as now (remove webhook); additionally revoke the key in DialogBrain if an API-key revoke endpoint is usable with the key itself — else document "revoke in DialogBrain → Settings → Developer".

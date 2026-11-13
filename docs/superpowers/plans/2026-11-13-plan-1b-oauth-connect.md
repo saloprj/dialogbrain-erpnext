@@ -22,7 +22,11 @@
   - Token: `POST token_endpoint` form-encoded `grant_type=authorization_code, code, redirect_uri, client_id, code_verifier` → `{"access_token": "db_live_…", "token_type": "bearer", "expires_in": 31536000, "refresh_token": <same key>}`.
   - No API-key self-revoke endpoint usable with the key itself (`DELETE /api/developer/keys/{id}` needs a user JWT) → Disconnect tells the admin where to revoke.
 - Secrets: the API key, the authorization code and the PKCE verifier never go into a URL ERPNext builds, a log, an error message, `frappe.msgprint`, or the browser. Error texts from DialogBrain pass through `client.mask`/scrub.
-- Callback paths: `/api/method/dialogbrain.setup.oauth.callback`. Only a logged-in System Manager who started the flow can complete it; `state` is single-use, 10-minute TTL, bound to `frappe.session.user`.
+- Callback path: `/api/method/dialogbrain.setup.oauth.callback`. Only a logged-in System Manager who started the flow can complete it; `state` is single-use (atomic claim: the request whose Redis `DELETE` of the state key returns 1 wins; any other refuses), 10-minute TTL, bound to `frappe.session.user`.
+- Callback UX: EVERY outcome of the callback is a redirect, never a raw error page. The method is `allow_guest=True`: if `frappe.session.user == "Guest"` (session expired during consent) it does NOT touch the state and redirects to `/login?redirect-to=<urlencoded full callback URL with its query>`; after login the callback runs normally. Role is checked with `ROLE in frappe.get_roles()` (not `frappe.only_for`) and a failure is stored as a result like the other refusals.
+- `iss` is MANDATORY on the callback: missing or different from the expected issuer → refused. Expected issuer = metadata `issuer` from discovery, unless site config `dialogbrain_oauth_issuer` is set (dev only: the browser-facing API host differs from the container-facing one — `http://localhost:8000` vs `http://host.docker.internal:8000` — and DialogBrain derives `issuer` from the request Host). `dev/install.sh` sets `bench --site frontend set-config dialogbrain_oauth_issuer http://localhost:8000`. Production never sets it.
+- Known server behaviour: DialogBrain keeps a registered client in Redis for a limited time (about a day unused, ~90 days after a successful authorization). A stale `oauth_client_id` still works today (an empty redirect list is not checked) but the consent page then shows a neutral name. Accepted; `start` re-registers when the redirect URI changes.
+- Key prefixes: treat any `db_…` key as a DialogBrain key. `client.mask` becomes prefix-agnostic (`db_…` + last 4) and errors are scrubbed by replacing the actual secret values (key, code, verifier), not by prefix matching.
 - Live e2e only against the local dev DialogBrain (API `http://localhost:8000` from the browser, `http://host.docker.internal:8000` from containers; frontend `http://localhost:3000`), workspace **Test User (128)**. Never print `dev/dialogbrain-dev.env`. Never send messages to real threads.
 
 ## Review Focus
@@ -39,6 +43,8 @@
 
 **Files:**
 - Create: `dialogbrain/setup/oauth.py` (protocol helpers only in this task)
+- Modify: `dialogbrain/client.py` (`mask` prefix-agnostic: `db_…` + last 4; update its tests)
+- Modify: `dev/install.sh` (set `dialogbrain_oauth_issuer` on `frontend`)
 - Test: `dialogbrain/tests/test_oauth.py`
 
 **Interfaces:**
@@ -48,7 +54,7 @@
   - `register_client(registration_endpoint: str, redirect_uri: str, client_name: str) -> str` — returns `client_id`.
   - `pkce_pair() -> tuple[str, str]` — `(verifier, challenge)`; verifier 43–128 chars from `secrets.token_urlsafe`; challenge = base64url(sha256(verifier)) without padding.
   - `authorize_url(authorization_endpoint: str, client_id: str, redirect_uri: str, state: str, challenge: str) -> str` — appends the query (keeps an existing query string).
-  - `exchange_code(token_endpoint: str, code: str, verifier: str, client_id: str, redirect_uri: str) -> str` — returns the API key; raises `DialogBrainError` (message without code/verifier/key) on non-200 or when `access_token` is missing or does not start with `db_`.
+  - `exchange_code(token_endpoint: str, code: str, verifier: str, client_id: str, redirect_uri: str) -> str` — returns the API key; raises `DialogBrainError` (message scrubbed of the code, verifier and any returned token) on non-200 or when `access_token` is missing or does not start with `db_`.
   - `redirect_allowed(uri: str) -> bool` — `https` any host, `http` only on `localhost`/`127.0.0.1`/`::1`.
   - Timeout 20 s on every request.
 
@@ -80,7 +86,7 @@
   - `CALLBACK_PATH = "/api/method/dialogbrain.setup.oauth.callback"`, `STATE_TTL = 600`, cache key `f"dialogbrain:oauth:{state}"`, result key `f"dialogbrain:oauth_result:{user}"`.
   - `connect._connect(doc) -> dict` — the body of today's `connect()` (same return dict); `connect()` becomes `frappe.only_for(ROLE); return _connect(frappe.get_single(SETTINGS))`.
   - `@frappe.whitelist(methods=["POST"]) start() -> dict` → `{"authorize_url": str}`. Steps: `only_for(ROLE)`; `redirect_uri = frappe.utils.get_url(CALLBACK_PATH)`; if not `redirect_allowed(redirect_uri)` → `frappe.throw(_("Sign-in with DialogBrain needs an https site address. Use \"Connect with API key\" instead."))`; `meta = discover(doc.base_url)`; reuse `doc.oauth_client_id` only if `doc.oauth_redirect_uri == redirect_uri`, else `register_client(meta["registration_endpoint"], redirect_uri, f"ERPNext — {host}")` and save both via `_server_save`; `verifier, challenge = pkce_pair()`; `state = secrets.token_urlsafe(32)`; cache `{"user", "verifier", "redirect_uri", "client_id", "token_endpoint", "issuer"}` for `STATE_TTL`; return `authorize_url(...)`.
-  - `@frappe.whitelist(methods=["GET"]) callback(code=None, state=None, error=None, iss=None, **kwargs)` — always ends in a redirect to `/app/dialogbrain-settings` (`frappe.local.response["type"] = "redirect"`, `["location"]`). Before anything: read and DELETE the cache entry for `state` (single use). Refuse (result = error, nothing saved) when: no entry; `entry["user"] != frappe.session.user`; user lacks `ROLE`; `iss` given and `!= entry["issuer"]`; `error` given (result text `_("DialogBrain sign-in was cancelled or refused: {0}").format(error)` with `error` truncated to 100 chars). Otherwise `key = exchange_code(...)`; set `doc.api_key = key`; if `doc.network_mode == "public"` and not `doc.public_site_url` → `doc.public_site_url = frappe.utils.get_url()`; `_server_save(doc)`; `res = _connect(doc)`; result = ok with `res`. Any `DialogBrainError`/`frappe.ValidationError` → result = error with its (masked) message; if `_connect` failed the stored key stays so the admin can press Connect again.
+  - `@frappe.whitelist(allow_guest=True, methods=["GET"]) callback(code=None, state=None, error=None, iss=None, **kwargs)` — always ends in a redirect (`frappe.local.response["type"] = "redirect"`, `["location"]`): Guest → `/login?redirect-to=…` without touching state; otherwise `/app/dialogbrain-settings`. Then: read the cache entry for `state` and claim it atomically (Redis `DELETE` returns 1). Refuse (result = error, nothing saved) when: no entry or claim lost; `entry["user"] != frappe.session.user`; `ROLE not in frappe.get_roles()`; `iss` missing or `!= entry["issuer"]` (expected issuer per Global Constraints, stored in the entry at `start`); `error` given (result text `_("DialogBrain sign-in was cancelled or refused: {0}").format(error)` with `error` truncated to 100 chars). Otherwise `key = exchange_code(...)`; set `doc.api_key = key`; if `doc.network_mode == "public"` and not `doc.public_site_url` → `doc.public_site_url = frappe.utils.get_url()` and the result carries `public_site_url_filled: <value>` so the form tells the admin what was filled in; `_server_save(doc)`; `res = _connect(doc)`; result = ok with `res`. Any `DialogBrainError`/`frappe.ValidationError` → result = error with its (masked) message; if `_connect` failed the stored key stays so the admin can press Connect again.
   - `pop_result(user) -> dict | None` — reads and deletes the result key; `{"ok": bool, "message": str, "workspace"?, "channels"?, "warning"?}`.
 - [ ] **Step 1: Write failing tests** (`TestOAuthFlow`; patch `discover`, `register_client`, `exchange_code`, and `connect._connect` where noted; run as a System Manager test user via `frappe.set_user`):
   - `test_start_registers_client_and_caches_state` — returns an `authorize_url` with `state`; cache entry holds the session user and verifier; Settings gets `oauth_client_id` and `oauth_redirect_uri`.
@@ -90,7 +96,10 @@
   - `test_callback_happy_path_stores_key_and_connects` — `_connect` called once; `api_key` password equals the exchanged key; redirect location `/app/dialogbrain-settings`; `pop_result` ok.
   - `test_callback_unknown_state_refused` and `test_callback_state_is_single_use` — second call with same state refused; `exchange_code` called once total (Review Focus 1).
   - `test_callback_other_user_refused` (Review Focus 2).
-  - `test_callback_iss_mismatch_refused`.
+  - `test_callback_iss_mismatch_refused`, `test_callback_missing_iss_refused`, `test_callback_issuer_override_from_site_config`.
+  - `test_callback_guest_redirects_to_login_keeping_state` — as Guest: location starts with `/login?redirect-to=` and contains the callback path; the state entry still exists.
+  - `test_callback_non_manager_redirects_with_error` — a logged-in user without System Manager who somehow holds a valid state gets a redirect and an error result, not an exception.
+  - `test_state_claim_is_atomic` — two claims of the same state: exactly one wins.
   - `test_callback_access_denied_keeps_existing_key` — Settings already has a key; after `error=access_denied` the stored key is unchanged and `pop_result` has `ok: False` (Review Focus 4).
   - `test_callback_sets_public_site_url_when_empty`.
   - `test_server_fields_protected` — a form save (no server flag) cannot change `oauth_client_id` / `oauth_redirect_uri` (R14).
@@ -106,7 +115,7 @@
 **Files:**
 - Modify: `dialogbrain/dialogbrain/doctype/dialogbrain_settings/dialogbrain_settings.js`
 - Modify: `dialogbrain/dialogbrain/doctype/dialogbrain_settings/dialogbrain_settings.json` (section "Connect with API key" collapsible holding `base_url`, `api_key`)
-- Modify: `README.md` (install + connect instructions: both ways; http-site limitation; where to revoke the key)
+- Modify: `README.md` (install + connect instructions: both ways; http-site limitation; behind a reverse proxy set `host_name` in site_config.json or forward `X-Forwarded-Proto`, otherwise the site looks like `http` and OAuth refuses; where to revoke the key)
 
 **Interfaces:**
 - Consumes: `dialogbrain.setup.oauth.start`, `frm.doc.__onload.oauth_result`.
@@ -115,7 +124,7 @@
 - [ ] **Step 1: Implement**:
   - Not connected: primary button `__("Connect with DialogBrain")` → `frappe.call("dialogbrain.setup.oauth.start")` → `window.location.href = r.message.authorize_url`; secondary button `__("Connect with API key")` → existing `connect` call (requires `api_key`; if empty, expand the API-key section and focus it).
   - Connected: unchanged buttons (Reconnect/Re-sync/Check webhook/Disconnect) plus `__("Reconnect with DialogBrain")` in the group.
-  - On load, if `__onload.oauth_result`: ok → green alert `Connected to {workspace}: {channels} channels, history import queued` and `show_warning(res.warning)`; error → `frappe.msgprint` with the message, red indicator.
+  - On load, if `__onload.oauth_result`: ok → green alert `Connected to {workspace}: {channels} channels, history import queued`, `show_warning(res.warning)`, and if `public_site_url_filled` a notice `Webhook address set to {0} — change it if DialogBrain can't reach this address`; error → `frappe.msgprint` with the message, red indicator.
   - After Disconnect: alert `__("Disconnected. You can revoke the key \"ERPNext — {0}\" in DialogBrain → Settings → Developer.")` with the site host.
 - [ ] **Step 2: Verify** the form renders on `frontend` (`bench --site frontend clear-cache`, open `http://localhost:8080/app/dialogbrain-settings` in a browser, screenshot both states). Run the full suite: expect all OK.
 - [ ] **Step 3: Commit** `feat: Settings form offers OAuth and API-key connect`.
