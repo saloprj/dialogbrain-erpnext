@@ -4,16 +4,28 @@ services:
   backend:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-short:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-long:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   scheduler:
@@ -35,3 +47,9 @@ services:
       # /socket.io while Host stays $host, so Frappe realtime rejects every connection
       # with "Invalid origin". Same template without that line.
       - ./dialogbrain_erpnext/dev/nginx/frappe.conf.template:/templates/nginx/frappe.conf.template:ro
+
+networks:
+  # D1: the dev DialogBrain stack's network, so the media proxy can reach `minio`.
+  dialogbrain:
+    name: dialogbrain_dialogbrain-network
+    external: true
