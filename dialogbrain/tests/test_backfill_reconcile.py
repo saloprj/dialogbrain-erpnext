@@ -521,6 +521,50 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		self.assertEqual(private.tool_calls("list_webhooks"), [])
 		self.assertEqual(private.activated, [])
 
+	def test_deleted_webhook_does_not_freeze_cursor(self):
+		"""F9: activate 404 = the subscription is gone for good. Clear it, tell the admin to
+		Reconnect, and let the cursor advance (no endless deep re-reads)."""
+		from frappe.utils.password import get_decrypted_password
+
+		from dialogbrain.sync.reconcile import WEBHOOK_MISSING_STATUS, reconcile
+
+		frappe.db.set_single_value(SETTINGS, "webhook_secret", "s3cret")
+		from frappe.utils.password import set_encrypted_password
+
+		set_encrypted_password(SETTINGS, SETTINGS, "s3cret", "webhook_secret")
+		msgs = [_hmsg(1, self.now - timedelta(hours=1), "known")]
+		self._store("1001", msgs)
+		before = get_datetime(self._get("last_reconcile_at"))
+
+		gone = FakeDialogBrain([_entry("1001")], {"1001": msgs}, webhooks=[])
+		gone.activate_webhook = MagicMock(side_effect=DialogBrainError("HTTP 404: not found", status=404))
+		self._run(reconcile, gone)
+
+		self.assertGreater(get_datetime(self._get("last_reconcile_at")), before)
+		self.assertFalse(self._get("webhook_id"))
+		self.assertFalse(get_decrypted_password(SETTINGS, SETTINGS, "webhook_secret", raise_exception=False))
+		self.assertEqual(self._get("webhook_status"), WEBHOOK_MISSING_STATUS)
+		self.assertIn("Reconnect", WEBHOOK_MISSING_STATUS)
+		# the pass that found it missing re-reads the window (events were lost)
+		self.assertTrue(any(p.get("date_from") for p in gone.history_calls("1001")))
+
+		# next pass: no webhook check at all, the status stays visible
+		again = FakeDialogBrain([_entry("1001")], {"1001": msgs}, webhooks=[])
+		self._run(reconcile, again)
+		self.assertEqual(again.tool_calls("list_webhooks"), [])
+		self.assertEqual(self._get("webhook_status"), WEBHOOK_MISSING_STATUS)
+
+	def test_webhook_activate_other_error_keeps_cursor(self):
+		"""Only a 404 means "deleted"; any other activate error keeps the cursor (R13)."""
+		from dialogbrain.sync.reconcile import reconcile
+
+		before = get_datetime(self._get("last_reconcile_at"))
+		down = FakeDialogBrain([], {}, webhooks=[])
+		down.activate_webhook = MagicMock(side_effect=DialogBrainError("HTTP 503", status=503))
+		self._run(reconcile, down)
+		self.assertEqual(get_datetime(self._get("last_reconcile_at")), before)
+		self.assertEqual(self._get("webhook_id"), "9")
+
 	def test_reconcile_waits_for_backfill(self):
 		from dialogbrain.sync.reconcile import reconcile
 

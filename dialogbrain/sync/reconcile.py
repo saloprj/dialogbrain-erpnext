@@ -31,7 +31,9 @@ thread is skipped (kept and shown in ``reconcile_status``) until a manual Re-syn
 Webhook health (public mode): DialogBrain lists only active subscriptions. When ours is
 missing it is re-activated and the pass re-reads every thread of the window from
 ``since`` (events of the paused period were never delivered, and a later delivered one
-would hide them from the probe).
+would hide them from the probe). A subscription deleted at DialogBrain (activate answers 404)
+is forgotten (id/secret cleared, status "missing … run Reconnect") without failing the
+pass, so the cursor keeps moving; reconcile then polls until the admin reconnects.
 
 Unconfirmed replies (ruling R11): outgoing rows still ``unknown`` without ``db_id`` and older
 than 10 minutes are resolved by reading their thread from the reply's day (echo matching
@@ -44,8 +46,9 @@ from datetime import timedelta
 import frappe
 from frappe.utils import get_datetime, now_datetime
 from frappe.utils.background_jobs import is_job_enqueued
+from frappe.utils.password import remove_encrypted_password
 
-from dialogbrain.client import DialogBrainClient
+from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.sync.backfill import (
 	BACKFILL_JOB_ID,
 	SETTINGS,
@@ -75,6 +78,7 @@ UNCONFIRMED_AFTER = timedelta(minutes=10)
 MAX_THREAD_FAILURES = 5
 STATUS_TEXT_LENGTH = 1000
 UNCONFIRMED_ERROR = "Not confirmed by DialogBrain — check the chat before resending"
+WEBHOOK_MISSING_STATUS = "missing: the DialogBrain webhook was deleted — run Reconnect"
 SETTINGS_FIELDS = (
 	"connected",
 	"network_mode",
@@ -287,13 +291,37 @@ def reconcile() -> None:
 
 
 def _ensure_webhook_active(client, webhook_id) -> bool:
-	"""Re-activate our subscription if DialogBrain paused it. True when it was paused."""
+	"""Re-activate our subscription if DialogBrain paused it. True when it was paused (or
+	is gone): events may have been lost, so the pass re-reads the whole window.
+
+	A 404 on activate means the subscription was deleted on the DialogBrain side: retrying
+	every pass would keep the cursor frozen forever. Its id and secret are cleared and
+	Settings shows :data:`WEBHOOK_MISSING_STATUS` (Reconnect creates a new one); until then
+	reconcile polls like private mode, every public interval.
+	"""
 	active = {str(w.get("id")) for w in (client.list_webhooks() or []) if w.get("active", True)}
 	if str(webhook_id) in active:
 		return False
-	client.activate_webhook(webhook_id)
+	try:
+		client.activate_webhook(webhook_id)
+	except DialogBrainError as exc:
+		if exc.status != 404:
+			raise
+		_forget_webhook()
+		return True
 	set_setting("webhook_status", f"reactivated {now_datetime()} (was paused)")
 	return True
+
+
+def _forget_webhook():
+	set_setting("webhook_id", None)
+	set_setting("webhook_secret", None)
+	remove_encrypted_password(SETTINGS, SETTINGS, "webhook_secret")
+	set_setting("webhook_status", WEBHOOK_MISSING_STATUS)
+	frappe.log_error(
+		title="DialogBrain webhook deleted",
+		message="The DialogBrain webhook subscription no longer exists (404). Run Reconnect in DialogBrain Settings.",
+	)
 
 
 def _newest_stored(conversation):
