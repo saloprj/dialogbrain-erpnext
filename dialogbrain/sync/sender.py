@@ -4,13 +4,17 @@ Never send twice
 ----------------
 * ``client_ref`` (unique) makes :func:`create_reply` idempotent: a double click or a
   re-submitted request returns the existing row and enqueues nothing.
-* :func:`deliver` only acts on a ``pending`` row and calls ``messages.send`` once. There is
-  no ``request_id`` passthrough in DialogBrain yet, so when the outcome is unknown (read
-  timeout, 502/504 from the gateway, unexpected exception after the request left) the row
-  becomes ``unknown`` and is NOT retried: the webhook echo (``upsert_message`` echo
-  matching, which accepts ``unknown`` rows) or reconcile resolves it.
-* Only ``failed`` rows (DialogBrain answered with an error, or nothing was sent) can be
-  retried, via :func:`retry_reply`.
+* :func:`deliver` first *claims* the row atomically (``pending`` -> ``unknown``, committed)
+  and only then calls ``messages.send``, once. A second job, or a re-run after a killed
+  worker, finds ``unknown`` and sends nothing. There is no ``request_id`` passthrough in
+  DialogBrain yet, so an ambiguous outcome (read timeout, 502/504 from the gateway,
+  unexpected exception after the request left, a crash) leaves the row ``unknown``: the
+  webhook echo (``upsert_message`` echo matching accepts ``unknown``) or reconcile resolves
+  it. While the send is in flight the row is ``unknown`` with an empty ``error``.
+* Every outcome write after the claim is conditional (row still ``unknown`` and no
+  ``db_id``): an echo that completed the row during the send is never overwritten.
+* Only ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error, or
+  nothing was sent) can be retried, via :func:`retry_reply`.
 
 Echo reconciliation (agrees with ``dialogbrain.sync.upsert``)
 ------------------------------------------------------------
@@ -134,13 +138,16 @@ def create_reply(conversation, text, client_ref, file_urls=None, user=None) -> d
 
 
 def retry_reply(message: str) -> None:
-	"""Re-deliver a ``failed`` reply. Anything else (pending/unknown/sent) is refused."""
+	"""Re-deliver a ``failed`` reply. Anything else (pending/unknown/sent), or a row that
+	already has a DialogBrain ``db_id`` (it was delivered), is refused."""
 	conversation = frappe.db.get_value("DB Message", message, "conversation")
 	if not conversation:
 		frappe.throw(_("Message not found"), frappe.DoesNotExistError)
 	assert_can_access(conversation)
-	status = frappe.db.get_value("DB Message", message, "delivery_status", for_update=True)
-	if status != "failed":
+	row = frappe.db.get_value(
+		"DB Message", message, ["delivery_status", "db_id"], as_dict=True, for_update=True
+	)
+	if row.delivery_status != "failed" or row.db_id:
 		frappe.throw(_("Only failed messages can be retried"))
 	frappe.db.set_value("DB Message", message, {"delivery_status": "pending", "error": None})
 	publish(conversation, "message_updated", {"message": message})
@@ -154,9 +161,47 @@ def _error_text(exc):
 	return (str(exc) or type(exc).__name__)[:MAX_ERROR_LENGTH]
 
 
-def _set_status(name, conversation, status, error=None):
+def _commit():
+	"""Commit the job's transaction (makes the claim visible and durable, ends the read
+	snapshot). Skipped under tests, which rely on rollback for isolation."""
+	if not frappe.flags.in_test:
+		frappe.db.commit()
+
+
+def _claim(name):
+	"""Atomically move ``pending`` -> ``unknown`` before anything is sent.
+
+	``unknown`` is the honest state while the request is in flight or after a crash: it is
+	never sent again automatically, and echo matching accepts it. Returns the row or None
+	when another job (or nobody: wrong state) owns it.
+	"""
+	row = frappe.db.get_value(
+		"DB Message",
+		name,
+		["name", "conversation", "text", "delivery_status", "db_id", "raw"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not row or row.delivery_status != "pending" or row.db_id:
+		return None
+	frappe.db.set_value("DB Message", name, {"delivery_status": "unknown", "error": None})
+	_commit()
+	return row
+
+
+def _settle(name, conversation, status, error=None):
+	"""Write the job's outcome only if the row is still as the job left it.
+
+	A webhook echo may have completed the row (``db_id`` + ``sent``) while the send was in
+	flight; that result must not be overwritten (a ``failed`` row would be retryable =
+	sent twice; ``unknown`` with a ``db_id`` would never be matched again).
+	"""
+	row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id"], as_dict=True, for_update=True)
+	if not row or row.delivery_status != "unknown" or row.db_id:
+		return False
 	frappe.db.set_value("DB Message", name, {"delivery_status": status, "error": error})
 	publish(conversation, "message_updated", {"message": name})
+	return True
 
 
 def _stored_file_urls(raw):
@@ -200,13 +245,8 @@ def _send_params(conv, text, attachments):
 
 def deliver(message_name: str) -> None:
 	"""Background job (queue ``short``): upload files, ``messages.send`` once, record result."""
-	msg = frappe.db.get_value(
-		"DB Message",
-		message_name,
-		["name", "conversation", "text", "delivery_status", "raw"],
-		as_dict=True,
-	)
-	if not msg or msg.delivery_status != "pending":
+	msg = _claim(message_name)
+	if not msg:
 		return
 	conv = frappe.db.get_value(
 		"DB Conversation", msg.conversation, ["thread_id", "thread_ref", "channel"], as_dict=True
@@ -220,29 +260,43 @@ def deliver(message_name: str) -> None:
 		attachments = _upload_files(client, _stored_file_urls(msg.raw))
 		params = _send_params(conv, msg.text, attachments)
 	except Exception as e:  # noqa: BLE001 - recorded on the row, user can retry
-		_set_status(message_name, msg.conversation, "failed", _error_text(e))
+		_settle(message_name, msg.conversation, "failed", _error_text(e))
 		return
 
 	try:
 		data = client.execute("messages.send", params)
 	except DialogBrainError as e:
+		_commit()  # new snapshot: see what the echo did meanwhile
 		ambiguous = isinstance(e, DialogBrainTimeout) or e.status in AMBIGUOUS_HTTP_STATUSES
-		_set_status(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
+		# ambiguous: stays "unknown" (claimed), only the error text is recorded
+		_settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
 		return
 	except Exception as e:  # noqa: BLE001 - the request may have gone out: never resend
-		_set_status(message_name, msg.conversation, "unknown", _error_text(e))
-		frappe.log_error(title="DialogBrain send: unexpected error", reference_doctype="DB Message", reference_name=message_name)
+		_commit()
+		_settle(message_name, msg.conversation, "unknown", _error_text(e))
+		frappe.log_error(
+			title="DialogBrain send: unexpected error", reference_doctype="DB Message", reference_name=message_name
+		)
 		return
 
+	_commit()  # new snapshot: _record_sent must see an echo committed during the send
 	save_point = "dialogbrain_record_sent"
 	frappe.db.savepoint(save_point)
 	try:
 		_record_sent(message_name, data if isinstance(data, dict) else {}, attachments)
-	except Exception:  # noqa: BLE001 - it WAS sent: never leave it pending/failed
-		frappe.db.rollback(save_point=save_point)
-		frappe.log_error(title="DialogBrain send: recording the result failed", reference_doctype="DB Message", reference_name=message_name)
-		# db_id stays empty: the echo (status "sent" is echo-matchable) or reconcile fills it
-		_set_status(message_name, msg.conversation, "sent")
+	except Exception:  # noqa: BLE001 - it WAS sent: never leave it failed
+		try:
+			frappe.db.rollback(save_point=save_point)
+		except Exception:  # noqa: BLE001 - e.g. a deadlock already ended the transaction
+			frappe.db.rollback()
+			return  # the claim (unknown) stands; the echo or reconcile resolves it
+		frappe.log_error(
+			title="DialogBrain send: recording the result failed",
+			reference_doctype="DB Message",
+			reference_name=message_name,
+		)
+		# db_id stays empty: the echo ("sent" is echo-matchable) or reconcile fills it
+		_settle(message_name, msg.conversation, "sent")
 
 
 def _record_sent(name, data, attachments):

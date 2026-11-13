@@ -210,6 +210,93 @@ class TestSend(DialogBrainTestCase):
 		self.assertEqual(len(rows), 1)
 		self.assertEqual((rows[0].name, rows[0].db_id), (name, "27771418"))
 
+	# --- never sent twice: claim + conditional outcome ----------------------
+
+	def test_deliver_twice_sends_once(self):
+		name = self._send()["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		self._deliver(name, client)
+		self.assertEqual(client.execute.call_count, 1)
+
+	def test_deliver_claims_and_commits_before_sending(self):
+		name = self._send()["name"]
+		seen = []
+
+		def execute(*a, **k):
+			seen.append(frappe.db.get_value("DB Message", name, "delivery_status"))
+			return copy.deepcopy(SEND)
+
+		with patch("dialogbrain.sync.sender._commit") as commit:
+			commit.side_effect = lambda: seen.append("commit")
+			self._deliver(name, _mock_client(execute=execute))
+		self.assertEqual(seen[:2], ["commit", "unknown"])  # claimed and committed before the call
+
+	def test_killed_worker_leaves_claim_and_redeliver_does_not_send(self):
+		name = self._send()["name"]
+
+		def killed(*a, **k):
+			raise SystemExit  # worker dies mid-request; the claim was committed before
+
+		with self.assertRaises(SystemExit):
+			self._deliver(name, _mock_client(execute=killed))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)  # e.g. a re-enqueued job
+		client.execute.assert_not_called()
+
+	def test_echo_during_send_then_error_stays_sent_and_retry_refused(self):
+		from dialogbrain.api.inbox import retry
+
+		name = self._send()["name"]
+
+		def execute(*a, **k):
+			_process_echo()  # channel delivered, echo committed sent + db_id
+			raise DialogBrainError("DialogBrain HTTP 500: boom", status=500)
+
+		self._deliver(name, _mock_client(execute=execute))
+		msg = frappe.get_doc("DB Message", name)
+		self.assertEqual((msg.delivery_status, msg.db_id), ("sent", "27771418"))
+		with self.assertRaises(frappe.ValidationError):
+			retry(name)
+
+	def test_echo_during_send_then_timeout_stays_sent(self):
+		name = self._send()["name"]
+
+		def execute(*a, **k):
+			_process_echo()
+			raise DialogBrainTimeout("read timeout")
+
+		self._deliver(name, _mock_client(execute=execute))
+		msg = frappe.get_doc("DB Message", name)
+		self.assertEqual((msg.delivery_status, msg.db_id), ("sent", "27771418"))
+
+	def test_retry_refused_when_db_id_set(self):
+		from dialogbrain.api.inbox import retry
+
+		name = self._send()["name"]
+		frappe.db.set_value("DB Message", name, {"delivery_status": "failed", "db_id": "123"})
+		with self.assertRaises(frappe.ValidationError):
+			retry(name)
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+
+	def test_record_failure_with_broken_rollback_leaves_claim(self):
+		name = self._send()["name"]
+		calls = []
+
+		def rollback(save_point=None, **kw):
+			calls.append(save_point)
+			if save_point:
+				raise frappe.QueryDeadlockError("deadlock")
+			# a full rollback would wipe the test's own data: emulate it as a no-op here
+
+		with patch("dialogbrain.sync.sender._record_sent", side_effect=frappe.QueryDeadlockError), patch.object(
+			frappe.db, "rollback", side_effect=rollback
+		):
+			self._deliver(name, _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND)))
+		self.assertEqual(calls, ["dialogbrain_record_sent", None])
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+
 	def test_deliver_skips_non_pending(self):
 		name = self._send()["name"]
 		frappe.db.set_value("DB Message", name, "delivery_status", "unknown")
