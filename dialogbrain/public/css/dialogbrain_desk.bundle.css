@@ -1,0 +1,118 @@
+/* DialogBrain desk-wide styles: the "Chats" badge item and the Customer / Lead "Chats" section. */
+
+.dialogbrain-chats-link {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
+	border-radius: var(--border-radius, 6px);
+	color: var(--text-color);
+	font-size: var(--text-base, 13px);
+	text-decoration: none;
+	position: relative;
+}
+.dialogbrain-chats-link:hover,
+.dialogbrain-chats-link:focus-visible {
+	background: var(--sidebar-hover-color, var(--fg-hover-color, var(--control-bg)));
+	color: var(--text-color);
+	text-decoration: none;
+}
+.dialogbrain-chats-icon {
+	display: inline-flex;
+	color: var(--icon-stroke, var(--text-muted));
+}
+.dialogbrain-chats-label {
+	flex: 1 1 auto;
+}
+.dialogbrain-chats-count {
+	min-width: 18px;
+	height: 18px;
+	padding: 0 5px;
+	border-radius: 999px;
+	background: var(--red-500, var(--danger));
+	color: var(--white, #fff);
+	font-size: var(--text-xs, 11px);
+	font-weight: 600;
+	line-height: 18px;
+	text-align: center;
+}
+.dialogbrain-chats-count.hidden {
+	display: none;
+}
+/* the dock is an icon strip: icon only, count as a corner badge */
+.dialogbrain-chats-dock {
+	justify-content: center;
+	padding: 6px;
+}
+.dialogbrain-chats-dock .dialogbrain-chats-label {
+	display: none;
+}
+.dialogbrain-chats-dock .dialogbrain-chats-count {
+	position: absolute;
+	top: -2px;
+	right: -4px;
+	min-width: 16px;
+	height: 16px;
+	line-height: 16px;
+	padding: 0 4px;
+}
+
+.dialogbrain-chats-list {
+	display: flex;
+	flex-direction: column;
+}
+.dialogbrain-chat-row {
+	display: flex;
+	gap: 12px;
+	justify-content: space-between;
+	padding: 8px 4px;
+	border-bottom: 1px solid var(--border-color);
+	color: var(--text-color);
+	text-decoration: none;
+}
+.dialogbrain-chat-row:last-child {
+	border-bottom: 0;
+}
+.dialogbrain-chat-row:hover {
+	background: var(--fg-hover-color, var(--control-bg));
+	text-decoration: none;
+	color: var(--text-color);
+}
+.dialogbrain-chat-main {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+.dialogbrain-chat-title {
+	font-weight: 600;
+}
+.dialogbrain-chat-meta,
+.dialogbrain-chat-when {
+	color: var(--text-muted);
+	font-size: var(--text-xs, 12px);
+}
+.dialogbrain-chat-preview {
+	color: var(--text-muted);
+	font-size: var(--text-sm, 12px);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dialogbrain-chat-side {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+/* v15 top navbar: "Chats" text (the icon only when the sprite has it) + count, next to
+   the notifications bell */
+.dialogbrain-chats-navbar {
+	padding: 6px 8px;
+	gap: 4px;
+	white-space: nowrap;
+}
+.dialogbrain-chats-navbar .dialogbrain-chats-label {
+	flex: 0 0 auto;
+}

@@ -151,6 +151,19 @@ class TestSend(DialogBrainTestCase):
 		self._send(user=self.other, client_ref="cref-2")
 		self.assertEqual(frappe.db.get_value("DB Conversation", self.conv, "assigned_to"), self.agent)
 
+	def test_send_auto_assign_publishes_conversation(self):
+		# the open conversation's header shows the assignee: it refreshes on a
+		# `conversation` event, not on `message` (live e2e, Plan 2 Task 8)
+		with patch("dialogbrain.sync.sender.publish") as publish:
+			self._send()
+		kinds = [c.args[1] for c in publish.call_args_list]
+		self.assertIn("conversation", kinds)
+		self.assertIn("message", kinds)
+		# already assigned: no extra conversation event
+		with patch("dialogbrain.sync.sender.publish") as publish:
+			self._send(user=self.other, client_ref="cref-2")
+		self.assertEqual([c.args[1] for c in publish.call_args_list], ["message"])
+
 	def test_send_forbidden_for_restricted_channel(self):
 		channel = frappe.get_doc("DB Channel", "201")
 		channel.append("allowed_users", {"user": self.other})
