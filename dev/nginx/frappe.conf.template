@@ -44,7 +44,14 @@ server {
 		proxy_set_header Upgrade $http_upgrade;
 		proxy_set_header Connection "upgrade";
 		proxy_set_header X-Frappe-Site-Name ${FRAPPE_SITE_NAME_HEADER};
-		proxy_set_header Host $host;
+		# dialogbrain dev (D3): Frappe realtime requires hostname(Host) == hostname(Origin)
+		# and authenticates by fetching <Origin>/api/method/frappe.realtime.get_user_info from
+		# inside the websocket container. The stock template forced Origin to the site name
+		# while Host stayed $host ("Invalid origin"); the browser's own Origin
+		# (http://localhost:8080) is unreachable from that container ("fetch failed"). Point
+		# both at the backend upstream: same hostname, reachable, site from X-Frappe-Site-Name.
+		proxy_set_header Origin http://${BACKEND};
+		proxy_set_header Host ${BACKEND};
 
 		proxy_pass http://socketio-server;
 	}
