@@ -118,3 +118,71 @@ class TestClient(DialogBrainTestCase):
 
 	def test_mask(self):
 		self.assertEqual(mask("db_live_abcdef1234"), "db_live_…1234")
+
+	def test_read_timeout_is_dialogbrain_timeout(self):
+		import requests
+
+		from dialogbrain.client import DialogBrainTimeout
+
+		with patch("requests.Session.request", side_effect=requests.ReadTimeout("slow db_live_x")):
+			with self.assertRaises(DialogBrainTimeout) as ctx:
+				client().execute("messages.send", {"thread_id": "1", "text": "x"})
+		self.assertIsInstance(ctx.exception, DialogBrainError)
+		self.assertNotIn("db_live_x", str(ctx.exception))
+
+	def test_connect_timeout_is_not_ambiguous(self):
+		# the request never reached the server: a plain error, safe to retry
+		import requests
+
+		from dialogbrain.client import DialogBrainTimeout
+
+		with patch("requests.Session.request", side_effect=requests.ConnectTimeout("no route")):
+			with self.assertRaises(DialogBrainError) as ctx:
+				client().execute("messages.send", {"thread_id": "1", "text": "x"})
+		self.assertNotIsInstance(ctx.exception, DialogBrainTimeout)
+
+	def test_upload_file_three_steps(self):
+		import hashlib
+
+		calls = []
+
+		def execute(tool_id, params, thread_id=None):
+			calls.append((tool_id, params))
+			if tool_id == "files.create_upload_url":
+				return {"file_id": 77, "upload_url": "https://s3.test/put", "method": "PUT", "headers": {"Content-Type": "text/plain"}}
+			return {"file_id": 77, "status": "ready"}
+
+		c = client()
+		with patch.object(c, "execute", side_effect=execute), patch(
+			"requests.request", return_value=make_response(200, None)
+		) as put:
+			file_id = c.upload_file("a.txt", b"hello", "text/plain")
+		self.assertEqual(file_id, 77)
+		self.assertEqual(calls[0][0], "files.create_upload_url")
+		self.assertEqual(
+			calls[0][1],
+			{"filename": "a.txt", "mime_type": "text/plain", "size_bytes": 5, "sha256": hashlib.sha256(b"hello").hexdigest()},
+		)
+		args, kwargs = put.call_args
+		self.assertEqual(args[:2], ("PUT", "https://s3.test/put"))
+		self.assertEqual(kwargs["data"], b"hello")
+		self.assertEqual(kwargs["headers"], {"Content-Type": "text/plain"})
+		self.assertNotIn("Authorization", kwargs["headers"])
+		self.assertEqual(calls[1], ("files.complete_upload", {"file_id": 77}))
+
+	def test_upload_file_deduplicated_skips_put(self):
+		c = client()
+		with patch.object(c, "execute", return_value={"file_id": 5, "deduplicated": True}) as ex, patch(
+			"requests.request"
+		) as put:
+			self.assertEqual(c.upload_file("a.txt", b"x", "text/plain"), 5)
+		put.assert_not_called()
+		self.assertEqual(ex.call_count, 1)
+
+	def test_upload_file_put_failure_raises(self):
+		c = client()
+		with patch.object(c, "execute", return_value={"file_id": 5, "upload_url": "https://s3.test/put"}), patch(
+			"requests.request", return_value=make_response(403, None, text="denied")
+		):
+			with self.assertRaises(DialogBrainError):
+				c.upload_file("a.txt", b"x", "text/plain")

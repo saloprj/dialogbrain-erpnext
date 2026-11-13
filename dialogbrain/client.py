@@ -4,6 +4,8 @@ Auth: ``Authorization: Bearer db_live_...`` (one key = one workspace).
 The API key is never included in exceptions or logs; use ``mask()`` to log it.
 """
 
+import hashlib
+
 import requests
 
 
@@ -17,6 +19,14 @@ class DialogBrainError(Exception):
 		super().__init__(message)
 		self.status = status
 		self.code = code
+
+
+class DialogBrainTimeout(DialogBrainError):
+	"""The request reached (or may have reached) DialogBrain but no answer came back.
+
+	The call may or may not have taken effect, so a non-idempotent call (``messages.send``)
+	must not be retried blindly. A connect timeout is NOT this (nothing was sent).
+	"""
 
 
 class DialogBrainClient:
@@ -53,6 +63,10 @@ class DialogBrainClient:
 			kwargs["params"] = params
 		try:
 			resp = self._session.request(method, self.base_url + path, **kwargs)
+		except requests.ConnectTimeout as e:
+			raise DialogBrainError(f"DialogBrain request failed: {self._scrub(e)}") from None
+		except requests.Timeout as e:
+			raise DialogBrainTimeout(f"DialogBrain request timed out: {self._scrub(e)}") from None
 		except requests.RequestException as e:
 			raise DialogBrainError(f"DialogBrain request failed: {self._scrub(e)}") from None
 		if resp.status_code >= 400:
@@ -103,6 +117,42 @@ class DialogBrainClient:
 			msg = err.get("message") if isinstance(err, dict) else err
 			raise DialogBrainError(self._scrub(msg or f"{tool_id} failed"), code=code)
 		return payload.get("data")
+
+	def upload_file(self, filename: str, content: bytes, mime_type: "str | None" = None) -> int:
+		"""Upload bytes as a workspace file; returns its ``file_id`` (usable in messages.send).
+
+		``files.create_upload_url`` -> HTTP PUT to the presigned URL (headers verbatim, no
+		API key) -> ``files.complete_upload``. A sha256 the workspace already holds comes back
+		``deduplicated`` and needs no upload.
+		"""
+		params = {
+			"filename": filename,
+			"mime_type": mime_type,
+			"size_bytes": len(content),
+			"sha256": hashlib.sha256(content).hexdigest(),
+		}
+		ticket = self.execute("files.create_upload_url", {k: v for k, v in params.items() if v is not None})
+		if not isinstance(ticket, dict) or ticket.get("file_id") is None:
+			raise DialogBrainError("files.create_upload_url returned no file_id")
+		file_id = ticket["file_id"]
+		if ticket.get("deduplicated"):
+			return file_id
+		if not ticket.get("upload_url"):
+			raise DialogBrainError("files.create_upload_url returned no upload_url")
+		try:
+			resp = requests.request(
+				ticket.get("method") or "PUT",
+				ticket["upload_url"],
+				data=content,
+				headers=dict(ticket.get("headers") or {}),
+				timeout=max(self.timeout, 60),
+			)
+		except requests.RequestException as e:
+			raise DialogBrainError(f"File upload failed: {type(e).__name__}") from None
+		if resp.status_code >= 400:
+			raise DialogBrainError(f"File upload failed: HTTP {resp.status_code}", status=resp.status_code)
+		self.execute("files.complete_upload", {"file_id": file_id})
+		return file_id
 
 	def list_tools(self) -> set:
 		"""Tool ids available to this key (GET /api/tools/catalog)."""
