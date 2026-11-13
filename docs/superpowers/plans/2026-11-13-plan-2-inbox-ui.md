@@ -59,7 +59,7 @@
 
 **Messages**
 - Ordered by `sent_at`, then `creation`, never by arrival.
-- Message text is stored HTML from DialogBrain. Render it only after `frappe.utils.xss_sanitise` on the server, or as text. Never inject unsanitised HTML.
+- Message text is stored HTML from DialogBrain. Render it only after `frappe.utils.html_utils.sanitize_html(html, always_sanitize=True)` on the server (exists on v15 and v16; `xss_sanitise` does NOT exist on v16), or as text. Never inject unsanitised HTML. List previews use the stored `last_message_preview` (plain text), not text recomputed from messages.
 - All user-visible strings in JS are wrapped in `__()`. Python strings are wrapped in `_()`. Translations themselves are Plan 4.
 
 **Media**
@@ -67,11 +67,18 @@
 - Checks: access to the message's conversation, and `file_id` belongs to that message's attachments.
 - Size cap: `MEDIA_MAX_BYTES = 50 * 1024 * 1024`. Larger files are refused with 413.
 - Response headers: `Cache-Control: private, max-age=300`, and `Content-Disposition` with the filename.
-- `file_id` is resolved to a fresh download URL on demand. The plan builder checks which DialogBrain tool returns it (`files.info`, else `files.read`) against `~/projects/dialogbrain` and records the choice in the module docstring.
+- `file_id` is resolved to a fresh download URL on demand via the DialogBrain tool `files.info` with params `{"file_ids": [int(file_id)]}` (returns `download_url`, `expires_in: 3600`). `files.read` is text-only and must not be used.
+- Streaming: the method returns a `werkzeug.wrappers.Response(<generator>, headers=…, direct_passthrough=True)` directly (`frappe.handler` passes a Response through unchanged). `frappe.local.response` types `download`/`binary` buffer the whole body and force `attachment`, so they must not be used.
 
 **Paging**
 - Conversation list: 50 per page, ordered by `last_message_at desc, name desc`. A keyset cursor is the `(last_message_at, name)` of the last row.
 - Messages: 50 per page, newest first from the server and reversed in the UI. Cursor `before = (sent_at, name)`.
+- The conversation-list sort key is `COALESCE(last_message_at, creation)`: conversations created by `conversation.started` have no messages yet, so `last_message_at` is NULL. The cursor uses that key plus `name`.
+
+**Known limitations (Plan 1 model, not Plan 2 bugs)**
+- `unread_count` is per conversation, not per user: opening a chat clears it for everyone.
+- AI draft text is truncated by DialogBrain (webhook `draft.created` ≤ 500 chars; `agents.list_drafts` ≤ 300 + "..."), and the full text cannot be fetched today. "Approve as is" works (DialogBrain sends its own full text); "Edit" is blocked on truncated drafts. DialogBrain PR for Plan 3: full draft text (`agents.get_draft`, or no limit in `list_drafts`).
+- Auto-assign on reply already exists (Plan 1 `sender._auto_assign`); Plan 2 doesn't re-implement it.
 
 **Live e2e**
 - Run only on the `frontend` site, against the local dev DialogBrain, workspace **Test User (128)**.
@@ -93,7 +100,7 @@
 
 **Files:**
 - Create: `dialogbrain/api/conversations.py`
-- Modify: `dialogbrain/permissions.py`. Add `is_manager(user=None) -> bool` (True for Chat Manager or System Manager), only if it does not already exist.
+- Modify: `dialogbrain/permissions.py`. Add `is_manager(user=None) -> bool`, built on the existing `SEE_ALL_ROLES`.
 - Test: `dialogbrain/tests/test_inbox_api.py`
 
 **Interfaces** (all `@frappe.whitelist()`; mutating methods use `methods=["POST"]`):
@@ -115,7 +122,7 @@
   - `channel: {name, title, channel_type, agent_mode}`;
   - `permissions: {can_assign_any: bool}`.
 - `get_messages(conversation, before: dict | str | None = None, limit: int = 50) -> {"rows": [...], "next_before": dict | None}`
-  - Each row has: `name, direction, author_type, sent_by, sent_by_name, html` (sanitised), `text` (plain), `sent_at, delivery_status, error` (if failed), and `attachments: [{file_id, filename, mime_type, media_type, size}]`.
+  - Each row has: `name, client_ref` (outgoing replies from ERPNext; the UI replaces its optimistic row by it), `direction, author_type, sent_by, sent_by_name, html` (sanitised), `text` (plain), `sent_at, delivery_status, error` (if failed), and `attachments: [{file_id, filename, mime_type, media_type, size}]`.
 - `get_messages_by_name(conversation, names: list) -> rows`. Used by realtime refresh. Every name must belong to the conversation.
 - `mark_read(conversation)`: sets `unread_count = 0` and publishes `conversation`.
 - `assign(conversation, user: str | None)`
@@ -123,12 +130,12 @@
   - Manager: anyone, or None.
   - The target user must have Chat Agent or Chat Manager and be able to see the channel (`permitted_users`).
   - Publishes `conversation`.
-- `set_status(conversation, status: "Open" | "Closed")`: follows the Status semantics, then publishes.
-- `get_drafts(conversation) -> [{name, draft_id, text, created_at}]`. Pending only, newest first.
+- `set_status(conversation, status: "Open" | "Closed")`: follows the Status semantics (Close also clears `needs_human`), then publishes.
+- `get_drafts(conversation) -> [{name, draft_id, text, created_at, truncated}]`. Pending only, newest first. `truncated` is true when `len(text) == 500`, or when `len(text) >= 300` and the text ends with "...".
 
 - [ ] **Step 1: Write failing tests** in `test_inbox_api.py`. Fixtures: two channels (A open to everyone, B restricted to `agent_b`); users `agent_a` (Chat Agent), `agent_b` (Chat Agent) and `mgr` (Chat Manager); conversations and messages created via the Plan 1 upsert helpers or direct inserts.
   - `test_list_scopes_and_filters`: status, mine, unassigned, unanswered, channel and channel_type each return exactly the expected names.
-  - `test_list_paging_keyset`: 120 conversations give 3 pages with no overlap or gaps; ordered by `last_message_at desc`.
+  - `test_list_paging_keyset`: 120 conversations (some with `last_message_at` NULL) give 3 pages with no overlap or gaps; ordered by `COALESCE(last_message_at, creation)` desc.
   - `test_list_search_by_phone_and_text`.
   - `test_agent_cannot_see_restricted_channel`: `list_conversations` / `get_conversation` / `get_messages` / `mark_read` / `assign` / `set_status` on a channel-B conversation as `agent_a` raise `frappe.PermissionError` (Review Focus 1).
   - `test_agent_assign_rules` (Review Focus 2):
@@ -140,11 +147,14 @@
   - `test_close_and_reopen_set_timestamps`.
   - `test_mark_read_zeroes_unread`.
   - `test_messages_ordered_by_sent_at_and_paged`: insert out of order and check.
-  - `test_message_html_sanitised`: `<p>hi</p><script>x</script><img src=x onerror=y>` comes back with no `script` and no `onerror`; `last_message_preview` is plain text (Review Focus 3).
+  - `test_message_html_sanitised`: `<p>hi</p><script>x</script><img src=x onerror=y>` comes back with no `script` and no `onerror`; a tag-less string containing `javascript:` stays inert; `last_message_preview` is plain text (Review Focus 3).
+  - `test_close_clears_needs_human`.
+  - `test_message_rows_carry_client_ref`.
+  - `test_drafts_truncated_flag`.
   - `test_counters_match_list`.
   - `test_get_messages_by_name_rejects_foreign_names`.
 - [ ] **Step 2: Run, expect FAIL.**
-- [ ] **Step 3: Implement.** Reuse `assert_can_access`, `permitted_users`, `allowed_channels`. Use `frappe.utils.xss_sanitise` (or `frappe.utils.html_utils.sanitize_html`, whichever exists on both v15 and v16; check) for `html`, and `frappe.utils.strip_html` for text. The search must not interpolate user input into SQL; use parameters / qb.
+- [ ] **Step 3: Implement.** Reuse `assert_can_access`, `permitted_users`, `allowed_channels`. Use `frappe.utils.html_utils.sanitize_html(html, always_sanitize=True)` for `html`, and `frappe.utils.strip_html` for text. The search must not interpolate user input into SQL; use parameters / qb.
 - [ ] **Step 4: Run, expect PASS. Run the full suite.**
 - [ ] **Step 5: Commit** `feat: inbox read and action API`.
 
@@ -153,7 +163,7 @@
 **Files:**
 - Create DocTypes under `dialogbrain/dialogbrain/doctype/`:
   - `db_note`: `conversation` Link DB Conversation (reqd), `text` Small Text (reqd). Standard `owner`/`creation` are the author and time. Permissions: Chat Agent and Chat Manager can create and read through `has_permission` / `permission_query_conditions` reusing `_via_conversation`; owner-only delete.
-  - `db_quick_reply`: `title` Data (reqd), `shortcut` Data (unique per owner, e.g. `/price`), `text` Text (reqd), `company` Link Company (optional), `shared` Check. Permissions:
+  - `db_quick_reply`: `title` Data (reqd), `shortcut` Data (e.g. `/price`; unique per (owner, shortcut), checked in `validate`, NOT Frappe's global `unique` flag), `text` Text (reqd), `company` Link Company (optional), `shared` Check. Permissions:
     - Chat Manager has full rights;
     - Chat Agent can create/read/write/delete their own;
     - everyone with Chat Agent can read shared ones;
@@ -174,7 +184,7 @@
   - The sent message arrives through the normal webhook/echo path; do not insert it here.
   - On DialogBrain error: `frappe.throw` with a safe message, and the draft stays pending.
 - `reject_draft(draft)` (POST): `agents.reject_draft` → `rejected`.
-- Draft text: Plan 1 stores up to 500 chars from the webhook. `get_full_draft(draft)` fetches the full text via `agents.list_drafts` (filter by thread/draft id) when the stored text is exactly 500 chars, updates the row and returns it.
+- Draft text: Plan 1 stores up to 500 chars from the webhook, and no full-text fetch exists (see Known limitations). `approve_draft` with edited text on a truncated draft (Task 1's rule) is refused server-side: `frappe.throw(_("This draft was shortened by DialogBrain. Approve it as is or reject it."))`.
 - Every method: `assert_can_access` on the draft's or note's conversation.
 
 - [ ] **Step 1: Write failing tests:**
@@ -187,7 +197,7 @@
   - `approve_draft`: patch the DialogBrain client; check params, status and the publish call;
   - `reject_draft`;
   - DialogBrain error keeps the draft pending;
-  - `get_full_draft` fetches only at 500 chars;
+  - edited approve on a truncated draft refused; approve as is on a truncated draft allowed;
   - permission refusal on a foreign draft.
 - [ ] **Step 2: Run, expect FAIL.**
 - [ ] **Step 3: Implement.** Migrate both sites.
@@ -206,7 +216,7 @@
     - `assert_can_access` on the message's conversation;
     - `file_id` is one of that message's `DB Message Attachment.file_id`, otherwise PermissionError (Review Focus 5).
   - Resolves a download URL through the DialogBrain client: the tool chosen per Global Constraints, re-resolved on every request.
-  - Streams with `requests.get(url, stream=True, timeout=30)` into `frappe.local.response` as `type="download"`-like binary. Refuses if `Content-Length` > `MEDIA_MAX_BYTES`, or if the stream exceeds it.
+  - Streams with `requests.get(url, stream=True, timeout=30)` by returning a `werkzeug.wrappers.Response(<chunk generator>, headers=…, direct_passthrough=True)` (see Global Constraints). Refuses with 413 if `Content-Length` > `MEDIA_MAX_BYTES`, and stops the stream if it exceeds it.
   - Headers: Content-Type from the attachment's `mime_type` (fallback from the response), `Cache-Control: private, max-age=300`. Content-Disposition is `inline` for image/audio/video and `attachment` otherwise.
   - Errors from DialogBrain become a 502 with a short message; no URL in the message.
 - Composer uploads keep using Frappe File: the UI uploads with `frappe.ui.FileUploader`-compatible `upload_file` (private) and passes `file_urls` to `send`. Plan 1's `send` already accepts `file_urls`. No server change unless a test shows a gap.
@@ -239,7 +249,7 @@
   - for a Lead: `lead: {name, status, company_name}`, with no orders;
   - `suggestions`: the result of `party.find_parties(phone, email)` when no party is linked.
 - ERPNext permissions apply to the order and invoice data:
-  - use `frappe.get_list` for Sales Order / Sales Invoice, so a manager without Sales User sees `stats: null` and no lists, instead of an error;
+  - check `frappe.has_permission("Sales Order", "read")` and `("Sales Invoice", "read")` BEFORE querying (`frappe.get_list` raises PermissionError without read access), so a manager without Sales User gets `stats: null` and no lists instead of an error;
   - `has_access` flags in the response tell the UI what to hide.
 - `search_parties(conversation, txt)` returns up to 10 Customers and Leads matching name/phone/email, via `frappe.get_list` with permissions.
 - New-document prefill helpers (client-side, documented here for Task 6): Sales Order / Quotation open through `frappe.new_doc(doctype, {customer | party_name, ...})`. Lead creation uses the existing `party.create_lead`.
@@ -278,7 +288,7 @@
 
 - [ ] **Step 1: Implement the skeleton.**
 - [ ] **Step 2: Build and check it renders.** `bench build --app dialogbrain` must succeed and the page must render the three empty panes:
-  - Confirm the `import { createApp } from "vue"` resolution works on this v16 bench. If it fails, record the fix in the commit: an app `package.json` with `vue` matching frappe's version, or the import path frappe exposes.
+  - `import { createApp } from "vue"` and `.vue` files build without an app `package.json` on v16 (frappe has vue ^3.3, esbuild-plugin-vue3, and NODE_PATHS include frappe's node_modules). Note in the report that v15 needs the same check in CI (Plan 4).
   - Restart the frontend and backend.
   - Open `http://localhost:8080/app/dialogbrain-inbox` in a browser (Administrator / admin — local dev site test credentials). Screenshot it, and check the console has no errors from the bundle. If no browser tool is available, report that and the controller checks.
 - [ ] **Step 3: Run the full suite** (Python, unchanged).
@@ -327,7 +337,7 @@
     - auto-scroll to the bottom on open and on a new message only when the user is already near the bottom.
 - **DraftBar**: for each pending draft, show the text plus Approve / Edit / Reject.
   - Edit puts the text into the composer in "editing draft" mode; Send then calls `approve_draft(draft, text)`.
-  - When the text is 500 chars, call `get_full_draft` first.
+  - When `truncated`, Edit is disabled with the hint "Text shortened by DialogBrain — approve as is or reject".
 - **Composer**
   - Textarea: Enter sends, Shift+Enter makes a newline.
   - Attach files via `upload_file` (private), with a chip per file and a remove button.
@@ -364,7 +374,7 @@
   - `dialogbrain:draft`: refresh the drafts of the open conversation.
   - Unsubscribes when the page is destroyed.
 - Create `dialogbrain/public/js/dialogbrain_desk.bundle.js`, included through `app_include_js` in `hooks.py`:
-  - a navbar badge: a "Chats" icon with `unread_total` from `counters()`, refreshed on `dialogbrain:conversation` events and every 60 s as a fallback;
+  - a navbar badge: a "Chats" icon with `unread_total` from `counters()`, refreshed on `dialogbrain:conversation` events (debounced 2 s) and every 60 s as a fallback, but only while `document.visibilityState === "visible"`;
   - only for users with Chat Agent, Chat Manager or System Manager;
   - when a `dialogbrain:message` arrives with `direction == "in"`, the inbox page is not focused, and the user is permitted (they got the event), play a short sound. Ship `dialogbrain/public/sounds/new_message.mp3`, under 30 KB, a self-made or CC0 tone recorded in the commit message. Respect a user toggle stored in `localStorage` (try/catch).
 - Customer and Lead forms (`doctype_js` in `hooks.py`): a "Chats" section listing linked conversations (`list_conversations` with a `party` filter — add the `party_type` + `party` filter keys to Task 1's API with a test). Each one links to `/app/dialogbrain-inbox?conversation=<name>`.
