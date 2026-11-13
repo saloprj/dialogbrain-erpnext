@@ -79,6 +79,42 @@
   - `create_draft_order(items=[{item_code, qty}])`: a Draft Sales Order for that customer, never submitted, with `db_conversation` set. It creates a Notification Log for the assigned manager, or for the channel's permitted users if unassigned.
 - Write tools (`create_lead`, `create_draft_order`) are listed in `denied_tools` for every agent by default. The Settings checkbox `allow_agent_writes` removes them.
 
+**Review amendments (binding; they override the task text where they differ)**
+
+- **A1**
+  - `execute_tool` echoes `request_id` at the top level of its JSON response, so clients can detect the capability with one cheap `workspace.current` call.
+  - Sends with a client-supplied `request_id` are cached for idempotency for at least 24 h. Raise the TTL for that path only. Today `TOOL_EXECUTION_CACHE_TTL` is 3600.
+  - The PR body must state the behaviour change for ALL API-key clients: every `messages.send` made with an API key now counts as a human reply, so the agent pauses and obsolete drafts are cancelled.
+  - Tests cover the echo and the ≥ 24 h window.
+- **A2**
+  - `threads.set_agent_paused` has `planner_hidden=True`.
+  - It refuses unless the caller is an operator by the same rule as `human_takeover.operator_user_id`: the context carries `api_key_id` or `mcp_session_id`. An agent run must never be able to unpause itself.
+  - Test: a call from an agent-run context (no `api_key_id`/`mcp_session_id`) is refused, and the tool is hidden from the planner catalog.
+- **A3**
+  - The signed string is `f"{timestamp}.{thread_id}.{METHOD}.{path}.{body_sha256}"`. `body_sha256` is the lowercase hex SHA-256 of the exact request body bytes; an empty body hashes `b""`.
+  - Replay of the identical request within ±300 s is an accepted compromise: the call is read-only, and writes are denied by default.
+  - `thread_id` is always DialogBrain's internal numeric thread id. Resolve `context.metadata["thread_id"]` or a channel ref to the internal id before signing. Test this.
+- **B1**
+  - Create the role `DialogBrain Agent API` with `desk_access=1`, like the other roles in `install.py`. Otherwise Frappe's `User.validate`/`set_system_user` demotes the agent user to Website User, and `get_list` switches to if_owner rules.
+  - Do not grant the role read access on Company, Price List, Warehouse, UOM or Account. The Draft Sales Order is inserted by app code after its own scope checks, with `insert(ignore_permissions=True)`.
+- **B2**
+  - Frappe's `get_newargs` silently DROPS kwargs that are not in the signature. Each customer tool therefore declares `**kwargs`, removes Frappe's own keys (`cmd` and similar) and raises `frappe.ValidationError("Unexpected argument(s): …; the customer is identified from the chat")` on any remainder.
+- **B3**
+  - **Tool names:** DialogBrain generates the integration tool names, and they may carry a prefix. Take them from the `add_endpoints` response (`new_tools`) or from `integrations.get_endpoints`, never as `dialogbrain.agent_api.<m>`. Store the method → tool-name map in Settings, as a JSON server field.
+  - **Attaching to agents:** call `agents.set_integration(agent_id=…, workspace_integration_id=<id>, enabled=true, denied_tools=[…])`. The parameter is `workspace_integration_id`. Always pass `denied_tools` explicitly, built from the DialogBrain names of create_lead/create_draft_order unless `allow_agent_writes` is set.
+  - **Agent user key on every (re)Connect:** always rotate. Call `generate_keys` and push the new `Authorization: token k:s` via `integrations.set_auth` (custom_headers). Never store the API secret beyond the call.
+  - **`request_id` capability:** a `workspace.current` call made with `request_id=<uuid>` returns that same `request_id`.
+- **B4**
+  - Retrying an `unknown` reply with the same `client_ref` is allowed only when the `request_id` capability is set and the first attempt was less than 23 h ago.
+  - A4 and B4 together close the Plan 2 follow-up "Edit blocked on truncated drafts".
+- **B6**
+  - The seed data lives only in the `frontend` dev DB. It was created during Plan 1 setup by the session seed script:
+    - items LAPTOP-14, MOUSE-WL and MONITOR-27;
+    - customer "Иван Петров", +380501112233;
+    - SAL-ORD-2026-00001 and ACC-SINV-2026-00001.
+  - Re-create equivalent data if it is missing.
+- **Review Focus 4** reads: "agent API called by a desk user, by Guest, or by the agent user after its `DialogBrain Agent API` role was removed → PermissionError".
+
 ## Review Focus
 
 1. **A forged, replayed or old thread-context header, or a context naming another workspace's or another chat's thread.** Expected: no customer data, and the call is logged as `identified=0`. Tests in B2 (ERPNext verify) and A3 (DialogBrain signs only for the run's own thread).
