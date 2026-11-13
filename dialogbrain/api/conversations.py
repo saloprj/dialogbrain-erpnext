@@ -11,6 +11,7 @@ import json
 from datetime import timedelta
 
 import frappe
+from bs4 import BeautifulSoup
 from frappe import _
 from frappe.utils import cint, get_datetime, now_datetime, strip_html
 from frappe.utils.html_utils import sanitize_html
@@ -32,6 +33,11 @@ MESSAGE_SEARCH_MIN = 3
 MAX_LIMIT = 500
 DRAFT_WEBHOOK_LIMIT = 500
 DRAFT_LIST_LIMIT = 300
+# Tags a message must never render: phishing forms, document-level/meta tags, embeds.
+DISALLOWED_TAGS = [
+	"form", "input", "button", "select", "textarea", "option", "link", "meta",
+	"html", "head", "body", "iframe", "object", "embed", "style", "base",
+]
 
 ROW_FIELDS = (
 	f"{C}.`name`",
@@ -107,6 +113,18 @@ def _require_read():
 def _can_see_channel(channel, user):
 	channels = allowed_channels(user)
 	return channels is None or channel in channels
+
+
+def sanitize_message_html(value):
+	"""Message HTML safe to inject: Frappe's sanitiser minus forms/meta/embeds, and no
+	``style`` attributes at all (no full-screen ``position:fixed`` overlays)."""
+	clean = sanitize_html(value or "", always_sanitize=True, disallowed_tags=DISALLOWED_TAGS)
+	if "style" not in clean:
+		return clean
+	soup = BeautifulSoup(clean, "html.parser")
+	for tag in soup.find_all(style=True):
+		del tag["style"]
+	return str(soup)
 
 
 def _plain(value):
@@ -311,7 +329,7 @@ def _format_messages(rows):
 				"author_type": r["author_type"],
 				"sent_by": r["sent_by"],
 				"sent_by_name": r["sent_by_name"],
-				"html": sanitize_html(raw, always_sanitize=True),
+				"html": sanitize_message_html(raw),
 				"text": _plain(raw),
 				"sent_at": r["sent_at"],
 				"delivery_status": r["delivery_status"],
@@ -399,7 +417,10 @@ def get_drafts(conversation: str) -> list:
 
 @frappe.whitelist(methods=["POST"])
 def mark_read(conversation: str) -> dict:
+	"""Clear ``unread_count``; writes and publishes only when there was something unread."""
 	assert_can_access(conversation)
+	if not cint(frappe.db.get_value("DB Conversation", conversation, "unread_count")):
+		return _row(_get_row(conversation))
 	frappe.db.set_value("DB Conversation", conversation, "unread_count", 0)
 	return _changed(conversation, {"unread_count": 0})
 
@@ -411,12 +432,19 @@ def assign(conversation: str, user: "str | None" = None) -> dict:
 	Chat Agent: only to themself, and only when unassigned or already theirs; may unassign
 	only their own. Chat Manager / System Manager: anyone, or nobody. The target must be a
 	user permitted on the conversation's channel.
+
+	Race-safe: the row is locked for the request transaction, and an agent's write is a
+	conditional UPDATE re-checked afterwards, so of two agents taking the same unassigned
+	conversation at once only one succeeds; the other gets ``PermissionError``.
 	"""
 	assert_can_access(conversation)
 	me = frappe.session.user
 	user = user or None
-	current = frappe.db.get_value("DB Conversation", conversation, ["assigned_to", "channel"], as_dict=True)
-	if not is_manager(me):
+	manager = is_manager(me)
+	current = frappe.db.get_value(
+		"DB Conversation", conversation, ["assigned_to", "channel"], as_dict=True, for_update=True
+	)
+	if not manager:
 		if user and user != me:
 			frappe.throw(_("You can only assign conversations to yourself"), frappe.PermissionError)
 		if user is None and current.assigned_to != me:
@@ -425,15 +453,34 @@ def assign(conversation: str, user: "str | None" = None) -> dict:
 			frappe.throw(_("This conversation is assigned to someone else"), frappe.PermissionError)
 	if user and user not in permitted_users(current.channel):
 		frappe.throw(_("{0} cannot be assigned to this conversation").format(user))
-	if (current.assigned_to or None) != user:
-		frappe.db.set_value("DB Conversation", conversation, "assigned_to", user)
+	if manager:
+		if (current.assigned_to or None) != user:
+			frappe.db.set_value("DB Conversation", conversation, "assigned_to", user)
+	else:
+		_agent_assign(conversation, me, user)
 	return _changed(conversation, {"assigned_to": user})
+
+
+def _agent_assign(conversation, me, user):
+	"""Conditional write for an agent: take only if unassigned or already theirs; unassign
+	only if theirs. Re-read under the row lock the UPDATE holds to detect a lost race."""
+	allowed = "('', %(me)s)" if user else "(%(me)s)"
+	frappe.db.sql(
+		f"""UPDATE {C} SET `assigned_to` = %(user)s, `modified` = %(now)s, `modified_by` = %(me)s
+		WHERE `name` = %(name)s AND COALESCE(`assigned_to`, '') IN {allowed}""",
+		{"user": user, "me": me, "now": now_datetime(), "name": conversation},
+	)
+	after = frappe.db.sql(
+		f"SELECT `assigned_to` FROM {C} WHERE `name` = %(name)s FOR UPDATE", {"name": conversation}
+	)[0][0]
+	if (after or None) != user:
+		frappe.throw(_("This conversation is assigned to someone else"), frappe.PermissionError)
 
 
 @frappe.whitelist(methods=["POST"])
 def set_status(conversation: str, status: str) -> dict:
 	"""Close (``closed_at`` = now, ``needs_human`` cleared) or reopen (``opened_at`` = now,
-	``closed_at`` cleared)."""
+	``closed_at`` cleared, ``first_response_seconds`` reset to 0)."""
 	assert_can_access(conversation)
 	if status not in ("Open", "Closed"):
 		frappe.throw(_("Invalid status"))
@@ -443,7 +490,13 @@ def set_status(conversation: str, status: str) -> dict:
 	if status == "Closed":
 		updates = {"status": "Closed", "closed_at": now_datetime(), "needs_human": 0}
 	else:
-		updates = {"status": "Open", "opened_at": now_datetime(), "closed_at": None}
+		# 0 = first response "not measured yet", as in the Plan 1 reopen on inbound
+		updates = {
+			"status": "Open",
+			"opened_at": now_datetime(),
+			"closed_at": None,
+			"first_response_seconds": 0,
+		}
 	frappe.db.set_value("DB Conversation", conversation, updates)
 	payload = {"status": status}
 	if status == "Closed":

