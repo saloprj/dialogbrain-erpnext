@@ -132,10 +132,14 @@ def _log_failure(tool, ctx, exc) -> None:
 	"""Log a refused/failed call. Frappe rolls the request back after an exception,
 	which would drop the row; re-write it after that rollback and commit it alone."""
 	error = _error_text(exc)
-	_log(tool, ctx, 0, error)
+	try:
+		_log(tool, ctx, 0, error)
+	except Exception:
+		pass  # a broken transaction must not mask the original exception
 
 	def _after_rollback():
 		_log(tool, ctx, 0, error)
+		# NB: commit() resets after_rollback, so callbacks queued after this one never run.
 		frappe.db.commit()  # nosemgrep: the request already failed; only the log row is written
 
 	frappe.db.after_rollback.add(_after_rollback)
@@ -274,11 +278,18 @@ def create_lead(name=None, phone=None, email=None, note=None):
 	return _run("create_lead", _create_lead, name=name, phone=phone, email=email, note=note)
 
 
+LEAD_EXISTS = "A lead with these details already exists"
+
+
 def _create_lead(ctx, name, phone, email, note):
 	_require_writes()
 	name = (name or "").strip()
 	if not name:
 		frappe.throw(_("A name is required to create a lead"))
+	if ctx and ctx.conversation:
+		existing = _chat_lead(ctx.conversation)
+		if existing:  # Ruling R7: one Lead per chat
+			return {"lead": existing, "existing": True}, 1
 	lead = frappe.get_doc(
 		{
 			"doctype": "Lead",
@@ -289,7 +300,16 @@ def _create_lead(ctx, name, phone, email, note):
 			"db_conversation": ctx.conversation if ctx else None,
 		}
 	)
-	lead.insert(ignore_permissions=True)  # after the guard and the writes switch
+	messages = len(frappe.local.message_log or [])
+	frappe.db.savepoint("dialogbrain_agent_lead")
+	try:
+		lead.insert(ignore_permissions=True)  # after the guard and the writes switch
+	except frappe.DuplicateEntryError:
+		# Ruling R7: never reveal the other Lead (ERPNext's message links to it). Undo
+		# anything before_insert wrote (e.g. an auto-created Contact) and drop the message.
+		frappe.db.rollback(save_point="dialogbrain_agent_lead")
+		del frappe.local.message_log[messages:]
+		return {"lead": None, "existing": True, "message": _(LEAD_EXISTS)}, 0
 	if (note or "").strip():
 		lead.add_comment("Comment", text=escape_html(note.strip()))
 	if ctx and ctx.conversation:
@@ -297,13 +317,32 @@ def _create_lead(ctx, name, phone, email, note):
 	return {"lead": lead.name}, 1
 
 
+def _chat_lead(conversation) -> str | None:
+	"""The Lead this chat already has: its linked party, else a Lead created from it."""
+	conv = frappe.db.get_value("DB Conversation", conversation, ["party_type", "party"], as_dict=True)
+	if conv and conv.party_type == "Lead" and conv.party and frappe.db.exists("Lead", conv.party):
+		return conv.party
+	return frappe.db.get_value("Lead", {"db_conversation": conversation}, "name", order_by="creation asc")
+
+
 def _link_unlinked(conversation, lead):
-	"""Link the chat to the new Lead unless it already has a party (never relink)."""
+	"""Link the chat to the new Lead unless it already has a party (never relink).
+
+	Ruling R6: ``auto_unverified``. The agent acted on what the person typed in the chat,
+	so the link neither identifies the customer nor blocks a later re-link."""
 	if frappe.db.get_value("DB Conversation", conversation, "party"):
 		return
-	frappe.db.set_value(
-		"DB Conversation", conversation, {"party_type": "Lead", "party": lead, "link_source": "manual"}
-	)
+	from dialogbrain.party import _primary_contact
 	from dialogbrain.sync.notify import publish
 
+	frappe.db.set_value(
+		"DB Conversation",
+		conversation,
+		{
+			"party_type": "Lead",
+			"party": lead,
+			"contact": _primary_contact("Lead", lead),
+			"link_source": "auto_unverified",
+		},
+	)
 	publish(conversation, "conversation", {})

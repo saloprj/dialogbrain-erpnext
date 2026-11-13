@@ -12,7 +12,9 @@ import frappe
 from frappe.utils import now_datetime
 
 from dialogbrain import agent_api
+from dialogbrain.party import _primary_contact
 from dialogbrain.tests.test_inbox_api import _channel, _conv, _user
+from dialogbrain.tests.test_party_card import _customer
 from dialogbrain.tests.utils import DialogBrainTestCase
 from dialogbrain.thread_context import Context
 
@@ -280,22 +282,68 @@ class TestAgentApi(DialogBrainTestCase):
 			out = agent_api.create_lead("Visitor Petro")
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("Lead", out["lead"], "db_conversation"), conv)
-		row = frappe.db.get_value("DB Conversation", conv, ["party_type", "party", "link_source"], as_dict=True)
-		self.assertEqual((row.party_type, row.party, row.link_source), ("Lead", out["lead"], "manual"))
+		row = frappe.db.get_value(
+			"DB Conversation", conv, ["party_type", "party", "link_source", "contact"], as_dict=True
+		)
+		# Ruling R6: the agent acted on unverified chat claims -> never "manual"
+		self.assertEqual((row.party_type, row.party, row.link_source), ("Lead", out["lead"], "auto_unverified"))
+		self.assertEqual(row.contact, _primary_contact("Lead", out["lead"]))
 		(log,) = _logs()
 		self.assertEqual((log.conversation, log.thread_id), (conv, "t-1"))
 
 	def test_create_lead_never_relinks_a_linked_conversation(self):
 		_set_settings(allow_agent_writes=1)
-		existing = frappe.get_doc({"doctype": "Lead", "first_name": "Existing"}).insert(ignore_permissions=True).name
-		conv = _conv(_channel("agent-ch3", "livechat"), party_type="Lead", party=existing, link_source="auto_unverified")
-		ctx = Context(thread_id="t-2", conversation=conv, party_type="Lead", party=existing, identified=False)
+		customer = _customer("Agent Linked Customer")
+		conv = _conv(_channel("agent-ch3", "livechat"), party_type="Customer", party=customer,
+					 link_source="auto_unverified")
+		ctx = Context(thread_id="t-2", conversation=conv, party_type="Customer", party=customer, identified=False)
 		self._as_agent()
 		with patch.object(agent_api, "_context", return_value=ctx):
 			out = agent_api.create_lead("Someone Else")
 		frappe.set_user("Administrator")
-		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "party"), existing)
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "party"), customer)
 		self.assertEqual(frappe.db.get_value("Lead", out["lead"], "db_conversation"), conv)
+
+	def test_create_lead_returns_the_chats_linked_lead(self):
+		_set_settings(allow_agent_writes=1)
+		existing = frappe.get_doc({"doctype": "Lead", "first_name": "Existing"}).insert(ignore_permissions=True).name
+		conv = _conv(_channel("agent-ch4", "livechat"), party_type="Lead", party=existing, link_source="auto_unverified")
+		ctx = Context(thread_id="t-3", conversation=conv, party_type="Lead", party=existing, identified=False)
+		before = frappe.db.count("Lead")
+		self._as_agent()
+		with patch.object(agent_api, "_context", return_value=ctx):
+			out = agent_api.create_lead("Existing Again")
+		frappe.set_user("Administrator")
+		self.assertEqual(out, {"lead": existing, "existing": True})
+		self.assertEqual(frappe.db.count("Lead"), before)
+
+	def test_create_lead_returns_the_lead_created_from_this_chat(self):
+		_set_settings(allow_agent_writes=1)
+		customer = _customer("Agent Linked Customer")
+		conv = _conv(_channel("agent-ch5", "livechat"), party_type="Customer", party=customer, link_source="manual")
+		ctx = Context(thread_id="t-4", conversation=conv, party_type="Customer", party=customer, identified=True)
+		self._as_agent()
+		with patch.object(agent_api, "_context", return_value=ctx):
+			first = agent_api.create_lead("Visitor One")
+			second = agent_api.create_lead("Visitor One Again")
+		frappe.set_user("Administrator")
+		self.assertEqual(second, {"lead": first["lead"], "existing": True})
+		self.assertEqual(frappe.db.count("Lead", {"db_conversation": conv}), 1)
+
+	def test_create_lead_duplicate_email_is_generic(self):
+		_set_settings(allow_agent_writes=1)
+		frappe.db.set_single_value("CRM Settings", "allow_lead_duplication_based_on_emails", 0)
+		other = frappe.get_doc({"doctype": "Lead", "first_name": "Private Person",
+								"email_id": "taken-agent@example.com"}).insert(ignore_permissions=True).name
+		leads, contacts = frappe.db.count("Lead"), frappe.db.count("Contact")
+		self._as_agent()
+		out = agent_api.create_lead("Impostor", email="taken-agent@example.com")
+		self.assertEqual(out, {"lead": None, "existing": True, "message": agent_api.LEAD_EXISTS})
+		self.assertNotIn(other, frappe.as_json(frappe.local.message_log or []))
+		frappe.set_user("Administrator")
+		self.assertEqual((frappe.db.count("Lead"), frappe.db.count("Contact")), (leads, contacts))
+		(log,) = _logs()
+		self.assertEqual((log.tool, log.result_count, log.error), ("create_lead", 0, None))
 
 	# --- call log --------------------------------------------------------------------
 
@@ -309,6 +357,12 @@ class TestAgentApi(DialogBrainTestCase):
 		(log,) = _logs()
 		self.assertEqual(log.tool, "create_lead")
 		self.assertIn("disabled", log.error)
+
+	def test_a_broken_failure_log_does_not_mask_the_original_error(self):
+		self._as_agent()
+		with patch.object(agent_api, "_log", side_effect=frappe.db.InternalError("txn broken")):
+			with self.assertRaises(frappe.PermissionError):
+				agent_api.create_lead("Masked?")
 
 	def test_cleanup_deletes_rows_older_than_30_days(self):
 		from dialogbrain.sync.maintenance import cleanup_agent_call_log
