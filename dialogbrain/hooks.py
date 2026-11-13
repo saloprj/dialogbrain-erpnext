@@ -6,3 +6,5 @@ app_email = "dev@dialogbrain.com"
 app_license = "mit"
 
 required_apps = ["erpnext"]
+
+after_install = "dialogbrain.install.after_install"

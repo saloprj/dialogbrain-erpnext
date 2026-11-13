@@ -1,0 +1,54 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "file_id",
+  "filename",
+  "mime_type",
+  "media_type",
+  "size"
+ ],
+ "fields": [
+  {
+   "fieldname": "file_id",
+   "fieldtype": "Data",
+   "label": "File Id",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "filename",
+   "fieldtype": "Data",
+   "label": "Filename",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "mime_type",
+   "fieldtype": "Data",
+   "label": "Mime Type"
+  },
+  {
+   "fieldname": "media_type",
+   "fieldtype": "Data",
+   "label": "Media Type"
+  },
+  {
+   "fieldname": "size",
+   "fieldtype": "Int",
+   "label": "Size"
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DB Message Attachment",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "istable": 1,
+ "editable_grid": 1
+}

@@ -1,0 +1,129 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "base_url",
+  "api_key",
+  "workspace_id",
+  "workspace_name",
+  "network_mode",
+  "public_site_url",
+  "webhook_id",
+  "webhook_secret",
+  "webhook_status",
+  "last_reconcile_at",
+  "backfill_days",
+  "backfill_status",
+  "default_company",
+  "connected"
+ ],
+ "fields": [
+  {
+   "fieldname": "base_url",
+   "fieldtype": "Data",
+   "label": "Base Url",
+   "default": "https://api.dialogbrain.com"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "Api Key"
+  },
+  {
+   "fieldname": "workspace_id",
+   "fieldtype": "Data",
+   "label": "Workspace Id"
+  },
+  {
+   "fieldname": "workspace_name",
+   "fieldtype": "Data",
+   "label": "Workspace Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "network_mode",
+   "fieldtype": "Select",
+   "label": "Network Mode",
+   "options": "public\nprivate",
+   "default": "public"
+  },
+  {
+   "fieldname": "public_site_url",
+   "fieldtype": "Data",
+   "label": "Public Site Url"
+  },
+  {
+   "fieldname": "webhook_id",
+   "fieldtype": "Data",
+   "label": "Webhook Id",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret"
+  },
+  {
+   "fieldname": "webhook_status",
+   "fieldtype": "Small Text",
+   "label": "Webhook Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_reconcile_at",
+   "fieldtype": "Datetime",
+   "label": "Last Reconcile At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "backfill_days",
+   "fieldtype": "Int",
+   "label": "Backfill Days",
+   "default": "30"
+  },
+  {
+   "fieldname": "backfill_status",
+   "fieldtype": "Data",
+   "label": "Backfill Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "default_company",
+   "fieldtype": "Link",
+   "label": "Default Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "connected",
+   "fieldtype": "Check",
+   "label": "Connected",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DialogBrain Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "report": 1,
+   "share": 1,
+   "email": 1,
+   "print": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "issingle": 1
+}

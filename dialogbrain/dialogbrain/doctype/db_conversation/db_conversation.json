@@ -1,0 +1,224 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "thread_id",
+  "thread_ref",
+  "channel",
+  "title",
+  "contact_name",
+  "phone",
+  "email",
+  "handle",
+  "avatar_url",
+  "db_contact_id",
+  "party_type",
+  "party",
+  "contact",
+  "link_source",
+  "status",
+  "assigned_to",
+  "agent_override",
+  "needs_human",
+  "last_message_at",
+  "last_message_preview",
+  "last_inbound_at",
+  "last_message_direction",
+  "first_response_seconds",
+  "unread_count",
+  "opened_at",
+  "closed_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "thread_id",
+   "fieldtype": "Data",
+   "label": "Thread Id",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "thread_ref",
+   "fieldtype": "Data",
+   "label": "Thread Ref"
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Link",
+   "label": "Channel",
+   "options": "DB Channel",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "contact_name",
+   "fieldtype": "Data",
+   "label": "Contact Name"
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone"
+  },
+  {
+   "fieldname": "email",
+   "fieldtype": "Data",
+   "label": "Email"
+  },
+  {
+   "fieldname": "handle",
+   "fieldtype": "Data",
+   "label": "Handle"
+  },
+  {
+   "fieldname": "avatar_url",
+   "fieldtype": "Data",
+   "label": "Avatar Url"
+  },
+  {
+   "fieldname": "db_contact_id",
+   "fieldtype": "Data",
+   "label": "Db Contact Id"
+  },
+  {
+   "fieldname": "party_type",
+   "fieldtype": "Link",
+   "label": "Party Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "party",
+   "fieldtype": "Dynamic Link",
+   "label": "Party",
+   "options": "party_type"
+  },
+  {
+   "fieldname": "contact",
+   "fieldtype": "Link",
+   "label": "Contact",
+   "options": "Contact"
+  },
+  {
+   "fieldname": "link_source",
+   "fieldtype": "Select",
+   "label": "Link Source",
+   "options": "\nauto_verified\nauto_unverified\nmanual"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Open\nClosed",
+   "in_list_view": 1,
+   "default": "Open"
+  },
+  {
+   "fieldname": "assigned_to",
+   "fieldtype": "Link",
+   "label": "Assigned To",
+   "options": "User"
+  },
+  {
+   "fieldname": "agent_override",
+   "fieldtype": "Select",
+   "label": "Agent Override",
+   "options": "default\nhuman\nagent",
+   "default": "default"
+  },
+  {
+   "fieldname": "needs_human",
+   "fieldtype": "Check",
+   "label": "Needs Human"
+  },
+  {
+   "fieldname": "last_message_at",
+   "fieldtype": "Datetime",
+   "label": "Last Message At"
+  },
+  {
+   "fieldname": "last_message_preview",
+   "fieldtype": "Small Text",
+   "label": "Last Message Preview"
+  },
+  {
+   "fieldname": "last_inbound_at",
+   "fieldtype": "Datetime",
+   "label": "Last Inbound At"
+  },
+  {
+   "fieldname": "last_message_direction",
+   "fieldtype": "Select",
+   "label": "Last Message Direction",
+   "options": "in\nout"
+  },
+  {
+   "fieldname": "first_response_seconds",
+   "fieldtype": "Int",
+   "label": "First Response Seconds"
+  },
+  {
+   "fieldname": "unread_count",
+   "fieldtype": "Int",
+   "label": "Unread Count"
+  },
+  {
+   "fieldname": "opened_at",
+   "fieldtype": "Datetime",
+   "label": "Opened At"
+  },
+  {
+   "fieldname": "closed_at",
+   "fieldtype": "Datetime",
+   "label": "Closed At"
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DB Conversation",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "report": 1,
+   "share": 1,
+   "email": 1,
+   "print": 1
+  },
+  {
+   "role": "Chat Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "Chat Agent",
+   "read": 1,
+   "write": 1,
+   "create": 0,
+   "delete": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "autoname": "hash",
+ "title_field": "title",
+ "track_changes": 1
+}
