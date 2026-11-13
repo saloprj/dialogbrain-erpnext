@@ -584,20 +584,96 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 			self.assertTrue(row["enabled"])
 			self.assertEqual(row["denied_tools"], [])
 
-	def test_toggle_refused_with_empty_tool_map(self):
+	def test_toggle_with_empty_tool_map(self):
+		"""0->1 is refused (store only after success); 1->0 is stored anyway, with a warning."""
 		from dialogbrain.setup import agent_integration as mod
 
 		fake = FakeDialogBrain()
 		self._connect(fake)
 		frappe.db.set_single_value(SETTINGS, "agent_tool_names", "")
 		before = len(fake.called("agents.set_integration"))
-		for allow in (1, 0):
-			frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1 - allow)
-			with patch.object(mod, "_client", return_value=fake), self.assertRaises(frappe.ValidationError) as cm:
-				mod.set_agent_writes(allow)
-			self.assertIn("Not changed", str(cm.exception))
-			self.assertEqual(self._get("allow_agent_writes"), 1 - allow)
+
+		with patch.object(mod, "_client", return_value=fake), self.assertRaises(frappe.ValidationError) as cm:
+			mod.set_agent_writes(1)
+		self.assertIn("Not changed", str(cm.exception))
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+		with patch.object(mod, "_client", return_value=fake):
+			result = mod.set_agent_writes(0)
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+		self.assertIn("Writes are off in ERPNext; DialogBrain could not be updated", result["warning"])
 		self.assertEqual(len(fake.called("agents.set_integration")), before)
+
+	def test_turning_writes_off_with_dialogbrain_down_is_stored_with_a_warning(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		fake.fail["agents.list"] = DialogBrainError("DialogBrain HTTP 503", status=503)
+		with patch.object(mod, "_client", return_value=fake):
+			result = mod.set_agent_writes(0)
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+		self.assertIn("press Reconnect", result["warning"])
+
+	def test_failed_revert_says_partially_updated(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		fake.fail["agents.set_integration"] = DialogBrainError("down")
+		with patch.object(mod, "_client", return_value=fake), self.assertRaises(frappe.ValidationError) as cm:
+			mod.set_agent_writes(1)
+		self.assertIn("DialogBrain may be partially updated — press Reconnect", str(cm.exception))
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+
+	def test_set_auth_failure_then_integration_gone_creates_with_a_fresh_valid_key(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		old = int(self._get("integration_id"))
+		old_key = self._agent_secret()
+		fake.fail["integrations.set_auth"] = DialogBrainError("DialogBrain HTTP 503", status=503)
+		del fake.integrations[old]  # add_endpoints(integration_id) -> not_found -> create
+		self._connect(fake)
+
+		new = int(self._get("integration_id"))
+		self.assertNotEqual(new, old)
+		key, secret = self._agent_secret()
+		self.assertNotEqual((key, secret), old_key)
+		# DialogBrain holds exactly the key ERPNext now accepts
+		self.assertEqual(fake.integrations[new]["auth"]["headers"]["Authorization"], f"token {key}:{secret}")
+		self.assertNotIn("previous key is kept", self._get("agent_tools_status"))
+
+	def test_fail_closed_disable_failure_is_a_problem(self):
+		fake = FakeDialogBrain()
+		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		fake._opid = lambda path: "zz" + str(sum(map(ord, path)))
+		original = fake.execute
+
+		def execute(tool_id, params, thread_id=None, request_id=None):
+			if tool_id == "agents.set_integration" and params["agent_id"] == 6:
+				raise DialogBrainError("agent busy")
+			return original(tool_id, params, thread_id, request_id)
+
+		fake.execute = execute
+		self._connect(fake)
+		self.assertIn("could not be switched off", self._get("agent_tools_status"))
+
+	def test_descriptions_fit_dialogbrains_catalog_cap(self):
+		from dialogbrain.setup import agent_integration as mod
+
+		for method in mod.ENDPOINTS:
+			self.assertLessEqual(len(mod._endpoint(method)["description"]), 750, method)
+		with patch.dict(mod.ENDPOINTS["get_item"], description="x" * 2000):
+			self.assertEqual(len(mod._endpoint("get_item")["description"]), 750)
+
+	def test_order_lines_capped_in_schema(self):
+		from dialogbrain.agent_api import MAX_ORDER_LINES
+		from dialogbrain.setup import agent_integration as mod
+
+		items = mod._endpoint("create_draft_order")["request_schema"]["properties"]["items"]
+		self.assertEqual(items["maxItems"], MAX_ORDER_LINES)
 
 	def test_toggle_dialogbrain_failure_is_not_changed(self):
 		from dialogbrain.setup import agent_integration as mod

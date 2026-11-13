@@ -101,7 +101,18 @@ const dialogbrain_settings = {
 			args: { allow },
 			freeze: true,
 			freeze_message: __("Updating DialogBrain agents…"),
-			callback: () => {
+			callback: (r) => {
+				const res = r.message || {};
+				if (res.warning) {
+					// writes are off in ERPNext (the real guard); DialogBrain lags behind
+					frappe.msgprint({
+						message: frappe.utils.escape_html(String(res.warning)),
+						indicator: "orange",
+						title: __("DialogBrain"),
+					});
+					frm.reload_doc();
+					return;
+				}
 				frappe.show_alert({
 					message: allow
 						? __("AI agents may now create Leads and draft Sales Orders")

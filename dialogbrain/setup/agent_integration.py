@@ -70,6 +70,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
+from dialogbrain.agent_api import MAX_ORDER_LINES
 from dialogbrain.client import DialogBrainError
 
 SETTINGS = "DialogBrain Settings"
@@ -77,6 +78,8 @@ ROLE = "System Manager"
 PATH = "/api/method/dialogbrain.agent_api.{}"
 STATUS_LENGTH = 1000
 KEY_SAVEPOINT = "dialogbrain_agent_key"
+# DialogBrain's catalog cuts tool descriptions at 800 characters (PER_TOOL_DESCRIPTION_CAP_CHARS).
+DESCRIPTION_MAX = 750
 ADMIN_KEY_MESSAGE = "Customer data tools need an admin/owner DialogBrain API key"
 
 # Tools ERPNext needs to register itself; without them registration is skipped.
@@ -198,6 +201,7 @@ ENDPOINTS = {
 				"items": {
 					"type": "array",
 					"minItems": 1,
+					"maxItems": MAX_ORDER_LINES,
 					"description": "The products and quantities the customer asked for.",
 					"items": {
 						"type": "object",
@@ -250,7 +254,7 @@ def _scrub(text, *hidden) -> str:
 
 def _endpoint(method: str) -> dict:
 	spec = ENDPOINTS[method]
-	ep = {"method": "POST", "path": PATH.format(method), "description": spec["description"]}
+	ep = {"method": "POST", "path": PATH.format(method), "description": spec["description"][:DESCRIPTION_MAX]}
 	if spec["request_body"] is not None:
 		ep["request_body"] = spec["request_body"]  # older DialogBrain infers the schema from it
 	if spec.get("request_schema"):
@@ -397,10 +401,15 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 
 	# Rotate inside a savepoint: if the new key does not reach DialogBrain, roll back to
 	# the previous key, which DialogBrain still holds, so working tools keep working.
-	frappe.db.savepoint(KEY_SAVEPOINT)
-	api_key, api_secret = _rotate_agent_key(user)
-	auth = {"type": "custom_headers", "headers": {"Authorization": f"token {api_key}:{api_secret}"}}
-	hidden = (api_secret,)  # scrubbed from any message; the secret is never stored here
+	hidden = []  # every secret issued here, scrubbed from any message; never stored here
+
+	def new_key() -> dict:
+		frappe.db.savepoint(KEY_SAVEPOINT)
+		api_key, api_secret = _rotate_agent_key(user)
+		hidden.append(api_secret)
+		return {"type": "custom_headers", "headers": {"Authorization": f"token {api_key}:{api_secret}"}}
+
+	auth = new_key()
 
 	def keep_previous_key(exc) -> str:
 		frappe.db.rollback(save_point=KEY_SAVEPOINT)
@@ -438,6 +447,11 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 			if not iid or "not_found" not in str(exc):
 				raise
 			params.pop("integration_id")
+			if key_in_dialogbrain is None:
+				# that key was rolled back after set_auth failed: issue a fresh one for the
+				# new integration (its own savepoint), and drop the now-wrong problem
+				auth = new_key()
+				problems.clear()
 			params["auth"] = auth
 			added = client.execute("integrations.add_endpoints", params) or {}
 	except DialogBrainError as exc:
@@ -451,7 +465,7 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	customer_ok = False
 	if caps.get("thread_context"):
 		secret = secrets.token_hex(32)
-		hidden += (secret,)
+		hidden.append(secret)
 		try:
 			client.execute(
 				"integrations.set_thread_context", {"integration_id": iid, "enabled": True, "secret": secret}
@@ -478,7 +492,13 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 		# Fail closed: without the write tools' names they can't be denied, so the
 		# integration is switched off for every agent rather than handed over whole.
 		problems.append(_("write tools could not be identified; agents not attached"))
-		_attach_agents(client, iid, [], enabled=False)
+		_off, off_failed = _attach_agents(client, iid, [], enabled=False)
+		if off_failed:
+			problems.append(
+				_("{0} agent(s) could not be switched off and may still have the ERPNext tools — press Reconnect").format(
+					off_failed
+				)
+			)
 		attached, failed = 0, 0
 	else:
 		attached, failed = _attach_agents(client, iid, denied_tools(doc, names))
@@ -623,27 +643,51 @@ def apply_denied_tools(doc, client=None) -> int:
 	return attached
 
 
+WRITES_OFF_WARNING = "Writes are off in ERPNext; DialogBrain could not be updated — press Reconnect"
+PARTIAL_WARNING = "DialogBrain may be partially updated — press Reconnect"
+
+
 @frappe.whitelist(methods=["POST"])
 def set_agent_writes(allow) -> dict:
-	"""The Settings toggle: re-apply ``denied_tools``, then store ``allow_agent_writes``.
-	Nothing is stored when DialogBrain could not be updated."""
+	"""The Settings toggle. ``agent_api._require_writes`` reads the stored value and is
+	the real guard, so:
+
+	* writes OFF is stored first, always (fail-safe), then DialogBrain is updated; a
+	  failure there only returns ``warning``;
+	* writes ON is stored only after DialogBrain was updated (and refused when the write
+	  tools' DialogBrain names are unknown); on failure nothing is stored."""
 	frappe.only_for(ROLE)
 	allow = 1 if cint(allow) else 0
 	doc = frappe.get_single(SETTINGS)
 	previous = cint(doc.allow_agent_writes)
 	doc.allow_agent_writes = allow
+
+	if not allow:
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 0)
+		try:
+			agents = apply_denied_tools(doc)
+		except (DialogBrainError, frappe.ValidationError) as exc:
+			return {
+				"allow_agent_writes": 0,
+				"agents": 0,
+				"warning": _(WRITES_OFF_WARNING),
+				"detail": str(exc)[:300],
+			}
+		return {"allow_agent_writes": 0, "agents": agents}
+
 	try:
 		agents = apply_denied_tools(doc)
 	except (DialogBrainError, frappe.ValidationError) as exc:
+		message = _("Not changed: DialogBrain could not be updated ({0})").format(str(exc)[:300])
 		if previous != allow and not isinstance(exc, WriteToolsUnknown):
 			doc.allow_agent_writes = previous  # best effort: put back agents already updated
 			try:
 				apply_denied_tools(doc)
 			except (DialogBrainError, frappe.ValidationError):
-				pass
-		frappe.throw(_("Not changed: DialogBrain could not be updated ({0})").format(str(exc)[:300]))
-	frappe.db.set_single_value(SETTINGS, "allow_agent_writes", allow)
-	return {"allow_agent_writes": allow, "agents": agents}
+				message += ". " + _(PARTIAL_WARNING)
+		frappe.throw(message)
+	frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+	return {"allow_agent_writes": 1, "agents": agents}
 
 
 def on_disconnect(doc, client) -> "str | None":
