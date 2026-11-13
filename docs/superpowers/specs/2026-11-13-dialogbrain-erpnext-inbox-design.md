@@ -99,15 +99,54 @@ Usable with an API key:
   hex-decoded part after `whsec_`). Retries 5/10/20/40/80 s then subscription
   auto-pauses (`PATCH /api/v1/webhooks/{id}/activate` to resume).
 
+Verified details (DialogBrain code, plan-1 review 2026-11-13):
+- **Message identity:** in events `message.message_id` is the *channel* ref
+  (e.g. Telegram number / `whatsapp:3EB0…`) and `message.db_id` is DialogBrain's
+  global id. The `messages.send` path publishes `message_id=str(db id)` first and
+  channel sync may later deliver the same message with the channel ref. → The
+  mirror's unique key is **`db_id`**; `message_id` (channel ref) is stored
+  non-unique.
+- **Text:** event `text` is truncated to 100 chars; the full body is in `html`.
+  → Always store `html` as the message text.
+- **Thread id:** event `thread_id` is the thread's channel ref (fallback: internal
+  id); `thread.db_id` is the internal id. Which form `messages.send` /
+  `messages.read_history` accept is verified when fixtures are recorded.
+- **Authorship:** sends through the tool path publish `from_id="system"`,
+  `from_name=<agent name>` for agent sends or `"You"` otherwise. Outgoing messages
+  can also come from the DialogBrain UI or the owner's phone (not via ERPNext).
+- **Listing/reading:** `search.threads.since` is a **date** (`YYYY-MM-DD`), not a
+  timestamp; `include_last_messages` ≤ 2 and truncated. `messages.read_history`
+  pages stored chats with `limit`/`offset` (`next_offset`), filters `date_from`/
+  `date_to` (days, UTC); its `direction` means incoming/outgoing, not paging
+  direction. There is no "messages after X" cursor.
+- **Webhook pausing:** a subscription is deactivated after **3 consecutive failed
+  deliveries** → the receiver must answer 2xx for anything that is not a real
+  authentication failure.
+- **Agent pause per thread:** `agent.silence` only ends the agent's current turn —
+  it is NOT a per-thread pause. Per-thread pause exists as `POST
+  /threads/{id}/pause-agent` / `unpause-agent` (user login only today). A human
+  reply auto-pauses the agent and cancels obsolete drafts (`human_replied`) only
+  when the tool context carries the caller's `api_key_id`, which
+  `/api/tools/{id}/execute` currently does not set.
+- **Idempotency:** `messages.send` is idempotent per `request_id`, but
+  `/api/tools/{id}/execute` does not pass one through.
+
 Gaps (handled on ERPNext side in v1):
 - No thread status (open/closed) and no assignment via API key → stored in ERPNext.
 - `POST /api/v1/messages/send` is broken (wrong param name) → use tools/execute.
 - No external-id on contacts → mapping stored in ERPNext.
 - No embeddable inbox → UI is built natively in ERPNext.
 
-DialogBrain-side changes: **signed thread context for integration tool calls (§7.3)
-is part of v1**; fixing `/api/v1/messages/send` is a nice-to-have (the app uses
-tools/execute anyway).
+DialogBrain-side changes that are **part of v1** (one PR series in the dialogbrain
+repo, Plan 3):
+1. Signed thread context for integration tool calls (§7.3).
+2. `/api/tools/{id}/execute`: accept `request_id` (→ ToolContext, enables send
+   idempotency) and set `api_key_id` on the context (→ a manager reply from ERPNext
+   counts as a human reply: agent auto-pauses, obsolete drafts are cancelled).
+3. `pause-agent` / `unpause-agent` per thread callable with an API key (REST or a
+   tool).
+Nice-to-have later: a cursor/changes API for messages (would make reconcile
+cheaper); fixing `/api/v1/messages/send`.
 
 ## 6. Approaches considered
 
@@ -141,24 +180,29 @@ DocTypes (prefix `DB`):
 - **DB Conversation**: thread_id (unique), channel (Link DB Channel), title,
   contact_name, phone, email, handle, avatar_url, db_contact_id,
   party_type (Customer | Lead), party (Dynamic Link), contact (Link Contact),
+  link_source (auto_verified | auto_unverified | manual),
   status (Open | Closed), assigned_to (User), agent_override (default | human |
   agent), needs_human (Check), last_message_at, last_message_preview,
   last_inbound_at, first_response_seconds (per opening), unread_count, opened_at,
   closed_at.
   Indexes: (status, last_message_at), (assigned_to, status), phone, email.
-- **DB Message**: message_id (unique), conversation (Link), direction (in | out),
+- **DB Message**: db_id (unique — DialogBrain global id; empty only while a reply
+  is pending), message_id (channel ref, not unique), conversation (Link), direction (in | out),
   author_type (customer | manager | agent | system), sent_by (User, for replies from
   ERPNext), text, sent_at, attachments (child table DB Message Attachment:
-  file_id, filename, mime_type, media_type, size), delivery_status (pending | sent |
-  failed), client_ref (idempotency key), raw (JSON, trimmed).
+  file_id, filename, mime_type, media_type, size — no URLs stored; links are
+  resolved on demand by file_id), delivery_status (pending | sent | failed |
+  unknown | deleted), client_ref (idempotency key, unique, NULL for inbound),
+  raw (JSON, trimmed). Text = event `html` (full body).
   Index (conversation, sent_at).
 - **DB Draft**: draft_id, conversation, text, created_at, status (pending |
   approved | rejected | superseded).
 - **DB Quick Reply**: title, shortcut, text (supports `{customer_name}` etc.),
   company (optional), owner/shared.
 - **DB Note**: conversation, text (internal notes; never sent).
-- **DB Webhook Log**: delivery_id (unique), event, received_at, status, error —
-  for dedupe and support; auto-cleared after 14 days.
+- **DB Webhook Log**: delivery_id (unique), event, payload, received_at, status
+  (queued | processed | failed), attempts, error — for dedupe, retry and support;
+  rows (they contain customer text) are deleted after 14 days by a daily job.
 
 Roles: **Chat Agent** (sees **all conversations of channels they are allowed on**
 — DB Channel.allowed_users empty or containing them; reply, assign to self or
@@ -168,42 +212,60 @@ assign anyone, settings for channels, reports). System Manager configures Settin
 
 ### 7.2 Sync
 
-- **Connect** (Settings → Connect): capability check (tools/execute, webhooks,
-  integrations, agents APIs respond for this key; no plan gating found in
-  DialogBrain today, but fail with a clear message if any is missing); validate key (`agents.list` or
+- **Connect** (Settings → Connect): capability check (tools/execute works;
+  required tools exist in the tool list: `search.threads`, `messages.read_history`,
+  `messages.send`, `files.create_upload_url`, `channels.list`; webhooks API
+  responds; fail with a message naming what is missing); validate key (`agents.list` or
   `workspace.current`), store workspace; create webhook subscription to
   `{public_site_url}/api/method/dialogbrain.api.webhook.receive` for events in §5;
   store secret; fetch channels into DB Channel; enqueue backfill; register ERPNext
   integration (§7.3).
 - **Two network modes (user decision: support both).**
-  - *Public* (site reachable from DialogBrain): webhooks + agent tools. Connect
-    verifies reachability by registering the webhook and asking DialogBrain to
-    deliver a test event (or calling one agent tool through `integrations.execute_tool`).
+  - *Public* (site reachable from DialogBrain): webhooks + agent tools.
+    DialogBrain has no "send test event", so Settings shows webhook health from
+    `GET /api/v1/webhooks/{id}/deliveries` (last delivery time/status, active
+    flag) and warns when deliveries fail or the subscription is paused.
   - *Private* (behind NAT / LAN): sync_mode=polling (reconcile every 1 min, plus
     an on-demand refresh when a user opens the inbox / a conversation), agent tools
     not registered. Settings shows a persistent warning "AI agent can't see ERPNext
     data — make the site public or use a tunnel" with a docs link (cloudflared /
     frp). Switching modes later is a button, not a reinstall.
-- **Webhook endpoint** (`allow_guest`, POST only): verify HMAC on raw body (reject
-  otherwise), insert DB Webhook Log by delivery_id (duplicate → 200 no-op),
-  `frappe.enqueue` processing on `short` queue, return 200 fast.
-- **Processing**: upsert conversation by thread_id, upsert message by message_id
-  (dedupe), match outgoing echo of an ERPNext-sent reply via message_id returned
-  by send (or client_ref), update counters/preview, auto-link party (§7.4), reopen
-  closed conversation on new inbound, `frappe.publish_realtime` to permitted users,
-  Notification Log + sound for assigned user (or Chat Agents of channel if
-  unassigned). `draft.created` → DB Draft; `handoff.requested` → needs_human=1,
+- **Webhook endpoint** (`allow_guest`, POST only): verify HMAC on raw body (bad
+  signature → 401, the only non-2xx besides 413 for > 1 MB), insert DB Webhook Log
+  by delivery_id (duplicate → 200 no-op), `frappe.enqueue` processing on `short`
+  queue, return 200 fast. Not connected → 200 and drop (so DialogBrain doesn't pause
+  the subscription). Failed or stuck (`queued` > 10 min) log rows are re-processed
+  by the scheduler tick (max 5 attempts).
+- **Processing**: upsert conversation by thread_id, upsert message by **db_id**
+  (dedupe; `message.received` and `message.updated` go through the same upsert +
+  echo matching, because an outgoing message may come back as an update), match
+  the echo of an ERPNext-sent reply by db_id returned by send, falling back to
+  same conversation + outgoing + identical full text within 120 s; update
+  counters/preview, auto-link party (§7.4), reopen closed conversation on new
+  inbound, `frappe.publish_realtime` to permitted users (every message).
+  **Notifications** (Notification Log + sound): for an assigned conversation — the
+  assignee on every inbound; for an unassigned one — permitted users only on the
+  first inbound of a new or re-opened conversation (no spam with many agents);
+  handoff requests always. Reconcile in polling mode notifies the same way;
+  only backfill is silent.
+  **Authorship:** out + matched to an ERPNext reply → manager + sent_by; out with
+  `from_id == "system"` and `from_name` not in ("You", "") → agent; other out →
+  manager with empty sent_by (sent from DialogBrain UI or a phone). `draft.created` → DB Draft; `handoff.requested` → needs_human=1,
   notify; `message.updated/deleted` → update/soft-delete.
 - **Backfill** (long queue): `search.threads since=now-backfill_days`, then
   `messages.read_history` per thread, paged; resumable; progress in Settings.
 - **Reconcile** (scheduler every 5 min in webhook mode, every 1 min in polling
-  mode): cursor-based, no fixed window — `search.threads since=last_reconcile_at -
-  2 min` (paged), and for every returned thread whose last activity is newer than
-  our newest stored message, `messages.read_history` after that message (paged)
-  until caught up. (`include_last_messages` is capped at 2 and truncated, so it is
-  never used as the source of messages.) Cursor advances only after a successful
-  pass, so any outage length — including a paused webhook subscription, which
-  drops events — is recovered. Also re-activates a paused subscription.
+  mode), on today's API: `search.threads since=<date of (last_reconcile_at − 1
+  day)>` paged by offset; for each thread whose last-activity timestamp is newer
+  than our newest stored `sent_at` for it, `messages.read_history thread_id,
+  date_from=<day of our newest message>` paged by offset, upsert by db_id
+  (duplicates are no-ops). `last_reconcile_at` advances only after a fully
+  successful pass, so an outage of any length — including a paused subscription,
+  which drops events — is recovered (the `since` date simply goes further back).
+  Also re-activates a paused subscription.
+  *Load estimate:* a shop with 200 active threads/day → ~4 `search.threads` pages
+  plus one read per changed thread per pass; at 1-min polling ≈ 5–20 calls/min.
+  Acceptable for v1; a cursor API in DialogBrain is a later optimisation.
 - **Ordering**: messages ordered by DialogBrain `sent_at`; UI sorts, never trusts
   arrival order.
 
@@ -240,7 +302,10 @@ the owner enables them.
   so other integrations are unaffected. Calls not made from a thread run carry no
   context.
 - *ERPNext side:* verify signature and timestamp (±5 min); look up DB Conversation
-  by thread_id → its linked party. No context, bad signature or unlinked
+  by thread_id → its linked party, **only if `link_source` is `manual` or
+  `auto_verified`** (phone verified by the channel itself: WhatsApp, Viber,
+  Telegram with shared phone). Links made from a phone/email typed in livechat or
+  from email are `auto_unverified` and give the agent no customer data. No context, bad signature or unlinked
   conversation → the tool returns "customer not identified" (never data). Generic
   tools (`get_item`, `create_lead`) work without context.
 - Every call is logged (DB Agent Call Log: tool, thread, party, result size).
@@ -251,8 +316,13 @@ prices and stock.
 
 ### 7.4 Party linking
 
-On new conversation / contact.updated: normalise phone (E.164 digits) and email;
-look up Contact by phone/mobile/email → its Customer (preferred) or Lead link.
+On new conversation / contact.updated: normalise phone (digits; leading `00`
+stripped) and email; look up Contact by phone/mobile/email → its Customer
+(preferred) or Lead link. Phone equality: full digit equality; a last-9-digits
+match is allowed only when one side is in local format (starts with a single `0`),
+to avoid cross-country false matches. `link_source` = auto_verified when the
+matched phone comes from a channel that verifies it, otherwise auto_unverified;
+manual links = manual.
 Exactly one match → link automatically; several → leave unlinked and show
 candidates in the card; none → unlinked with "Create Lead" / "Link customer".
 Manual link also creates/updates ERPNext Contact phone/email. Creating Sales Order /
@@ -264,16 +334,16 @@ channel; saved document gets a link back to the conversation (custom field
 
 Composer → `dialogbrain.api.inbox.send(conversation, text, files[], client_ref)`:
 insert DB Message (pending, client_ref unique → double click / retry safe),
-enqueue job (passes client_ref as the tool's `request_id` — `messages.send` is
-idempotent with request_id and synchronously returns `message_id` /
-`db_message_id`; builder verifies how request_id is passed through
-`/api/tools/{id}/execute`, and if it cannot be, a timed-out send is NOT retried
-automatically but marked "unknown" and resolved by reconcile matching the echo):
+enqueue job (sends client_ref as `request_id` once DialogBrain accepts it — Plan
+3; until then a timed-out send is NOT retried automatically but marked "unknown"
+and resolved by reconcile/echo matching; the job stores `db_message_id` from the
+response as db_id):
 upload files (`files.create_upload_url` → PUT → `complete_upload`),
 call `messages.send`, store returned message_id, status sent / failed (+ retry
 button). First reply on an opened conversation sets first_response_seconds. Sending
-as manager auto-assigns an unassigned conversation to them and silences the agent
-(`agent.silence`) when the channel is in autopilot (= take over).
+as manager auto-assigns an unassigned conversation to them; once DialogBrain sets
+`api_key_id` on tools/execute (Plan 3) the reply also auto-pauses the agent on that
+thread and cancels obsolete drafts (= take over).
 
 Drafts: Approve → `agents.approve_draft(draft_id, edited_text)`; Reject →
 `agents.reject_draft`. Media: thumbnails/files served via
@@ -289,8 +359,9 @@ may be presigned/expiring → on 403/404 re-resolve by file_id via `files.info` 
   Changing it in ERPNext calls `agents.trigger_update`. If the workspace has several
   agents/triggers per channel, Settings shows the mapping and the user picks the
   agent.
-- Per conversation: "Take over" → agent.silence + agent_override=human; "Give back
-  to agent" → un-silence + override=agent.
+- Per conversation: "Take over" → DialogBrain `pause-agent` for the thread +
+  agent_override=human; "Give back to agent" → `unpause-agent` + override=agent
+  (both need the API-key access added in Plan 3).
 
 ### 7.7 UI
 
@@ -346,6 +417,8 @@ user.
   without ERPNext data, with a visible warning).
 - Signed thread context in DialogBrain is part of v1; customer-scoped agent tools
   never trust LLM-supplied identifiers.
+- Reconcile on today's API (date + offset), cursor API later (Claude's call after
+  plan review; load estimate in §7.2).
 - Channel-level access for managers, default "all channels for everyone".
 
 ## 9. Builder's calls (proposed by Claude, open to correction)
