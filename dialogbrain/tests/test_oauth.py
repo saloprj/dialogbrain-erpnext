@@ -252,15 +252,24 @@ class TestOAuthFlow(DialogBrainTestCase):
 	def _entry(self, state):
 		return frappe.cache().get_value(f"dialogbrain:oauth:{state}", expires=True)
 
-	def _callback(self, connect_result=OK_RES, connect_error=None, exchange_error=None, **params):
+	def _callback(self, connect_result=OK_RES, connect_error=None, exchange_error=None, workspace=None, **params):
 		frappe.local.response = frappe._dict()
 		ex = MagicMock(return_value=KEY, side_effect=exchange_error)
 		conn = MagicMock(return_value=connect_result, side_effect=connect_error)
+		self.client_cls = MagicMock()
+		self.client_cls.return_value.execute.return_value = workspace or {"id": 128, "name": "Test User"}
 		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(oauth, "exchange_code", ex), patch.object(
 			connect_mod, "_connect", conn
-		):
+		), patch.object(oauth, "DialogBrainClient", self.client_cls, create=True):
 			oauth.callback(**params)
 		return frappe.local.response, ex, conn
+
+	def _mark_connected(self, workspace_id="128", workspace_name="Test User"):
+		frappe.db.set_single_value(
+			SETTINGS,
+			{"connected": 1, "workspace_id": workspace_id, "workspace_name": workspace_name, "webhook_id": "wh-1"},
+		)
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
 
 	def _ok_params(self, state, **kw):
 		return dict({"code": CODE, "state": state, "iss": META["issuer"]}, **kw)
@@ -515,6 +524,63 @@ class TestOAuthFlow(DialogBrainTestCase):
 		result = oauth.pop_result(self.admin)
 		self.assertFalse(result["ok"])
 		self.assertIn("messages.send", result["message"])
+
+	# --- F1 (R4b): reconnect must not switch workspaces --------------------------------
+
+	def test_callback_refuses_workspace_switch(self):
+		self._mark_connected()
+		state = self._state(self._start()[0])
+		frappe.local.flags.commit = False
+		_, ex, conn = self._callback(workspace={"id": 999, "name": "Other <b>WS</b>"}, **self._ok_params(state))
+		ex.assert_called_once()
+		self.client_cls.assert_called_once_with("https://api.dialogbrain.test", KEY)
+		client = self.client_cls.return_value
+		client.execute.assert_called_once_with("workspace.current", {})
+		client.delete_webhook.assert_not_called()
+		client.create_webhook.assert_not_called()
+		client.list_webhooks.assert_not_called()
+		conn.assert_not_called()
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), OLD_KEY)
+		self.assertEqual(self._get("workspace_id"), "128")
+		self.assertEqual(self._get("webhook_id"), "wh-1")
+		self.assertFalse(frappe.local.flags.commit)  # nothing saved
+		result = oauth.pop_result(self.admin)
+		self.assertFalse(result["ok"])
+		self.assertEqual(
+			result["message"],
+			"This site is connected to Test User. Disconnect first to switch to Other <b>WS</b>.",
+		)
+		self.assertNotIn(KEY, str(result))
+
+	def test_callback_same_workspace_reconnect_proceeds(self):
+		self._mark_connected()
+		state = self._state(self._start()[0])
+		_, _, conn = self._callback(workspace={"id": 128, "name": "Test User"}, **self._ok_params(state))
+		self.client_cls.return_value.execute.assert_called_once_with("workspace.current", {})
+		conn.assert_called_once()
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), KEY)
+		self.assertTrue(oauth.pop_result(self.admin)["ok"])
+
+	def test_callback_connect_failure_on_connected_site_restores_old_key(self):
+		self._mark_connected()
+		state = self._state(self._start()[0])
+		err = frappe.ValidationError("This DialogBrain API key has no access to: messages.send")
+		_, _, conn = self._callback(connect_error=err, **self._ok_params(state))
+		conn.assert_called_once()
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), OLD_KEY)
+		self.assertEqual(self._get("connected"), 1)
+		self.assertEqual(self._get("workspace_id"), "128")
+		self.assertEqual(self._get("webhook_id"), "wh-1")
+		result = oauth.pop_result(self.admin)
+		self.assertFalse(result["ok"])
+		self.assertIn("messages.send", result["message"])
+
+	def test_callback_connect_failure_on_unconnected_site_keeps_new_key(self):
+		state = self._state(self._start()[0])
+		err = frappe.ValidationError("Invalid API key or DialogBrain unreachable")
+		self._callback(connect_error=err, **self._ok_params(state))
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), KEY)
+		self.assertFalse(oauth.pop_result(self.admin)["ok"])
 
 	def test_callback_unexpected_error_redirects_and_logs_deferred(self):
 		state = self._state(self._start()[0])

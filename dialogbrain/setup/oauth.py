@@ -16,7 +16,7 @@ import frappe
 import requests
 from frappe import _
 
-from dialogbrain.client import DialogBrainError, mask
+from dialogbrain.client import DialogBrainClient, DialogBrainError, mask
 
 TIMEOUT = 20
 KEY_PREFIX = "db_"
@@ -248,6 +248,23 @@ def _redirect(location: str) -> None:
 	frappe.local.response["location"] = location
 
 
+def _workspace_switch(doc, key) -> "str | None":
+	"""Refusal text when ``key`` belongs to another workspace than the connected one."""
+	workspace = DialogBrainClient(doc.base_url, key).execute("workspace.current", {}) or {}
+	new_id = str(workspace.get("id") or "")
+	if new_id == str(doc.workspace_id or ""):
+		return None
+	current = str(doc.workspace_name or doc.workspace_id or "")[:100]
+	new = str(workspace.get("name") or new_id)[:100]
+	return _("This site is connected to {0}. Disconnect first to switch to {1}.").format(current, new)
+
+
+def _restore_key(conn, old_key) -> None:
+	doc = frappe.get_single(conn.SETTINGS)
+	doc.api_key = old_key
+	conn._server_save(doc)
+
+
 @frappe.whitelist(allow_guest=True, methods=["GET"])
 def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 	"""DialogBrain redirects the admin's browser here. Every outcome is a redirect."""
@@ -281,6 +298,13 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 	try:
 		key = exchange_code(entry["token_endpoint"], code, verifier, entry["client_id"], entry["redirect_uri"])
 		doc = frappe.get_single(conn.SETTINGS)
+		was_connected = bool(doc.connected)
+		old_key = doc.get_password("api_key", raise_exception=False) if was_connected else None
+		if was_connected:
+			# R4b: a reconnect must not silently move a connected site to another workspace
+			switch = _workspace_switch(doc, key)
+			if switch:
+				return _refuse(user, switch)
 		doc.api_key = key
 		filled = {}
 		if (doc.network_mode or "public") == "public" and not doc.public_site_url:
@@ -295,6 +319,9 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 			res = conn._connect(doc)
 		except Exception:
 			frappe.db.rollback(save_point="dialogbrain_oauth_connect")
+			if was_connected and old_key:
+				# the existing connection stays as it was (Review Focus 4)
+				_restore_key(conn, old_key)
 			raise
 		_store_result(
 			user,
