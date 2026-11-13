@@ -19,8 +19,8 @@ frappe.pages["dialogbrain-inbox"].on_page_load = function (wrapper) {
 
 frappe.pages["dialogbrain-inbox"].on_page_show = function (wrapper) {
 	const state = wrapper.dialogbrain_inbox;
-	const conversation = frappe.utils.get_query_params().conversation;
-	if (state && state.mounted && conversation && frappe.dialogbrain.selectConversation) {
-		frappe.dialogbrain.selectConversation(conversation);
-	}
+	if (!state || !state.mounted || !frappe.dialogbrain.selectConversation) return;
+	// the URL is the source of truth: ?conversation=<name> selects it, no param clears it
+	const conversation = frappe.utils.get_query_params().conversation || null;
+	frappe.dialogbrain.selectConversation(conversation, { updateUrl: false });
 };

@@ -1,8 +1,10 @@
 // Thin wrappers around frappe.call for the DialogBrain inbox server API.
-const call = (method, args = {}, type = "GET") =>
-	frappe
-		.call({ method, args, type, freeze: false })
-		.then((r) => r.message);
+// Returns a native Promise; on a server error Frappe has already shown the message, and the
+// promise rejects (callers catch to restore UI state, never to show the error twice).
+const call = (method, args = {}, type = "GET", extra = {}) =>
+	Promise.resolve(frappe.call({ method, args, type, freeze: false, ...extra })).then(
+		(r) => r && r.message
+	);
 
 const CONV = "dialogbrain.api.conversations.";
 const COMP = "dialogbrain.api.composer.";
@@ -18,11 +20,15 @@ export const api = {
 			limit,
 		}),
 	counters: () => call(CONV + "counters"),
+	channelTypes: () => call(CONV + "channel_types"),
+	assignableUsers: (conversation = null) => call(CONV + "assignable_users", { conversation }),
 	getConversation: (name) => call(CONV + "get_conversation", { name }),
 	getMessages: (conversation, before = null, limit = 50) =>
 		call(CONV + "get_messages", { conversation, before, limit }),
-	getMessagesByName: (conversation, names) =>
-		call(CONV + "get_messages_by_name", { conversation, names: JSON.stringify(names) }),
+	getMessagesByName: (conversation, names, silent = false) =>
+		call(CONV + "get_messages_by_name", { conversation, names: JSON.stringify(names) }, "GET", {
+			silent,
+		}),
 	getDrafts: (conversation) => call(CONV + "get_drafts", { conversation }),
 	markRead: (conversation) => call(CONV + "mark_read", { conversation }, "POST"),
 	assign: (conversation, user = null) => call(CONV + "assign", { conversation, user }, "POST"),
@@ -44,6 +50,31 @@ export const api = {
 	setParty: (conversation, party_type, party) =>
 		call(PARTY + "set_party", { conversation, party_type, party }, "POST"),
 	createLead: (conversation) => call(PARTY + "create_lead", { conversation }, "POST"),
+
+	// Private upload through Frappe's upload_file; resolves to the File doc ({file_url, file_name}).
+	uploadFile: (file) => {
+		const form = new FormData();
+		form.append("file", file, file.name);
+		form.append("is_private", 1);
+		form.append("folder", "Home/Attachments");
+		return fetch("/api/method/upload_file", {
+			method: "POST",
+			body: form,
+			headers: { Accept: "application/json", "X-Frappe-CSRF-Token": frappe.csrf_token },
+		}).then(async (res) => {
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.message) {
+				let detail = "";
+				try {
+					detail = JSON.parse(JSON.parse(data._server_messages || "[]")[0] || "{}").message;
+				} catch (e) {
+					detail = "";
+				}
+				throw new Error(detail || res.statusText || "upload failed");
+			}
+			return data.message;
+		});
+	},
 
 	mediaUrl: (message, file_id) =>
 		"/api/method/dialogbrain.api.media.get?" +
