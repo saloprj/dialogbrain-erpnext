@@ -75,11 +75,22 @@ frappe.provide("frappe.dialogbrain");
 
 	let unread = 0;
 
+	// The v15 icon sprite may lack "message-circle": frappe.utils.icon always returns an
+	// <svg><use href="#icon-…"> that then renders empty. Use the icon only when it returned
+	// markup and its sprite symbol is on the page.
+	const ICON = "message-circle";
+	function iconHtml() {
+		const html = frappe.utils.icon ? frappe.utils.icon(ICON, "sm", "", "", "", true) : "";
+		if (!html || !String(html).trim()) return "";
+		if (!document.getElementById("icon-" + ICON)) return "";
+		return `<span class="dialogbrain-chats-icon">${html}</span>`;
+	}
+
 	function badgeHtml(cls) {
 		const label = __("Chats");
 		return $(`<a class="dialogbrain-chats-link ${cls}" href="${INBOX_URL}"
 				title="${frappe.utils.escape_html(label)}" aria-label="${frappe.utils.escape_html(label)}">
-			<span class="dialogbrain-chats-icon">${frappe.utils.icon("message-circle", "sm", "", "", "", true)}</span>
+			${iconHtml()}
 			<span class="dialogbrain-chats-label">${frappe.utils.escape_html(label)}</span>
 			<span class="dialogbrain-chats-count hidden" aria-live="polite"></span>
 		</a>`);
