@@ -1,10 +1,15 @@
 """Tests for dialogbrain.agent_api (Plan 3, B1): agent user, guard, call log, generic tools.
 
+B2 adds the customer-scoped tools (TestCustomerTools), called through real signed
+requests.
+
 Shortcut: the test site has no ERPNext setup data, so Company / Warehouse / Item /
 Item Price / Bin rows are inserted with ``db_insert`` (as in test_party_card). The tools
 read only a handful of columns.
 """
 
+import json
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -13,8 +18,14 @@ from frappe.utils import now_datetime
 
 from dialogbrain import agent_api
 from dialogbrain.party import _primary_contact
+from dialogbrain.permissions import permitted_users
 from dialogbrain.tests.test_inbox_api import _channel, _conv, _user
-from dialogbrain.tests.test_party_card import _customer
+from dialogbrain.tests.test_party_card import _customer, _lead
+from dialogbrain.tests.test_thread_context import (
+	make_request,
+	set_secret,
+	signed_headers,
+)
 from dialogbrain.tests.utils import DialogBrainTestCase
 from dialogbrain.thread_context import Context
 
@@ -409,3 +420,426 @@ class TestAgentApi(DialogBrainTestCase):
 		frappe.db.set_value("Role", ROLE, "desk_access", 1)
 		create_roles()
 		self.assertTrue(frappe.db.exists("Role", ROLE))
+
+
+# --- customer-scoped tools (B2) ----------------------------------------------------------
+
+ORDER_CO = "Agent Order Co"
+ORDER_ABBR = "AOR"
+CUSTOMER_TOOLS = ("find_customer", "order_status", "unpaid_invoices", "create_draft_order")
+NOT_IDENTIFIED = {"identified": False, "message": "customer not identified"}
+
+
+def _clear_cached(doctype, name):
+	try:
+		from frappe.model.document import clear_document_cache
+	except ImportError:  # Frappe v15
+		clear_document_cache = frappe.clear_document_cache
+	clear_document_cache(doctype, name)
+
+
+def _so(customer, total, docstatus=1, date=None, currency="USD", **kw):
+	return _raw("Sales Order", customer=customer, grand_total=total, docstatus=docstatus, currency=currency,
+				status="To Deliver and Bill" if docstatus else "Draft", company=CO,
+				transaction_date=date or frappe.utils.today(), **kw)
+
+
+def _si(customer, outstanding, docstatus=1, due=None, currency="USD", grand_total=None):
+	return _raw("Sales Invoice", customer=customer, outstanding_amount=outstanding, docstatus=docstatus,
+				currency=currency, due_date=due or frappe.utils.today(), posting_date=frappe.utils.today(),
+				grand_total=grand_total if grand_total is not None else outstanding, company=CO)
+
+
+def _order_setup(item_code):
+	"""Just enough ERPNext master data for a real Sales Order insert (db_insert rows)."""
+	debtors = f"Debtors - {ORDER_ABBR}"
+	stores = f"Stores - {ORDER_ABBR}"
+	if not frappe.db.exists("Company", ORDER_CO):
+		_raw("Company", ORDER_CO, company_name=ORDER_CO, abbr=ORDER_ABBR, default_currency="USD",
+			 country="United States", default_receivable_account=debtors)
+	if not frappe.db.exists("Account", debtors):
+		_raw("Account", debtors, account_name="Debtors", company=ORDER_CO, account_currency="USD",
+			 account_type="Receivable", root_type="Asset", is_group=0)
+	if not frappe.db.exists("Warehouse", stores):
+		_raw("Warehouse", stores, warehouse_name="Stores", company=ORDER_CO, is_group=0)
+	if not frappe.db.exists("UOM", "Nos"):
+		_raw("UOM", "Nos", uom_name="Nos", enabled=1)
+	if not frappe.db.exists("Item Group", "All Item Groups"):
+		_raw("Item Group", "All Item Groups", item_group_name="All Item Groups", is_group=1)
+	if not frappe.db.exists("Price List", PRICE_LIST):
+		_raw("Price List", PRICE_LIST, price_list_name=PRICE_LIST, currency="USD", selling=1, enabled=1)
+	if not frappe.db.get_value("Fiscal Year", {"year_start_date": ["<=", frappe.utils.today()],
+											   "year_end_date": [">=", frappe.utils.today()]}):
+		year = frappe.utils.getdate(frappe.utils.today()).year
+		_raw("Fiscal Year", f"AGT-{year}", year=f"AGT-{year}", year_start_date=f"{year}-01-01",
+			 year_end_date=f"{year}-12-31")
+	frappe.db.set_value("Item", item_code, "item_group", "All Item Groups")
+	_raw("Item Default", parent=item_code, parenttype="Item", parentfield="item_defaults", idx=1,
+		 company=ORDER_CO, default_warehouse=stores)
+	for doctype, name in (("Company", ORDER_CO), ("Item", item_code), ("Price List", PRICE_LIST),
+						  ("UOM", "Nos"), ("Warehouse", stores), ("Account", debtors)):
+		_clear_cached(doctype, name)
+
+
+class TestCustomerTools(DialogBrainTestCase):
+	"""Customer tools through real signed requests (Review Focus 1-3)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel", LOG):
+			frappe.db.delete(dt)
+		frappe.db.delete("Sales Order", {"customer": ["like", "Agent %"]})
+		frappe.db.delete("Sales Invoice", {"customer": ["like", "Agent %"]})
+		frappe.db.delete("Item Price", {"price_list": PRICE_LIST})
+		self.agent = agent_api.ensure_agent_user()
+		_company(CO, "ATC")
+		_set_settings(default_company=CO, allow_agent_writes=0)
+		set_secret()
+		self.manager = _user("agent-b2-manager@example.com", "Chat Manager")
+		self.channel = _channel("agent-b2", "telegram")
+		self.customer = _customer("Agent Ivan")
+		self.other = _customer("Agent Mallory")
+		for customer in (self.customer, self.other):
+			frappe.db.set_value("Customer", customer, "default_currency", "USD")
+		self.thread = "73001"
+		self.conv = _conv(self.channel, thread_id=self.thread, party_type="Customer", party=self.customer,
+						  link_source="manual", title="Ivan chat")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.after_rollback.reset()
+		if hasattr(frappe.local, "request"):
+			del frappe.local.request
+
+	def call(self, tool, thread=None, headers=None, body=None, **kwargs):
+		"""POST ``tool`` the way DialogBrain does: JSON body (httpx spacing), signed for
+		``thread``, dispatched through ``frappe.call`` like Frappe's handler."""
+		path = f"/api/method/dialogbrain.agent_api.{tool}"
+		raw = json.dumps(kwargs).encode() if body is None else body
+		if headers is None:
+			headers = signed_headers(thread=thread or self.thread, ts=int(time.time()), path=path, body=raw)
+		frappe.local.request = make_request(path=path, body=raw, headers=headers)
+		frappe.set_user(self.agent)
+		try:
+			return frappe.call(getattr(agent_api, tool), **frappe._dict(kwargs, cmd=f"dialogbrain.agent_api.{tool}"))
+		finally:
+			del frappe.local.request
+			frappe.set_user("Administrator")
+
+	# --- identified ----------------------------------------------------------------
+
+	def test_find_customer_with_outstanding_totals_per_currency(self):
+		_si(self.customer, 40.004)
+		_si(self.customer, 10)
+		_si(self.customer, 7.556, currency="EUR")
+		_si(self.customer, 0)  # paid
+		_si(self.customer, 99, docstatus=0)  # draft
+		_si(self.other, 1000)  # another customer's
+		out = self.call("find_customer")
+		self.assertEqual(out, {
+			"identified": True,
+			"customer_name": "Agent Ivan",
+			"party_type": "Customer",
+			"outstanding_total": [{"currency": "EUR", "amount": 7.56}, {"currency": "USD", "amount": 50.0}],
+		})
+		(log,) = _logs()
+		self.assertEqual((log.tool, log.identified, log.conversation, log.thread_id, log.party_type, log.party,
+						  log.result_count, log.error),
+						 ("find_customer", 1, self.conv, self.thread, "Customer", self.customer, 1, None))
+
+	def test_auto_verified_link_is_identified(self):
+		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_verified")
+		self.assertTrue(self.call("find_customer")["identified"])
+
+	def test_order_status_lists_the_last_five_submitted_orders(self):
+		today = frappe.utils.today()
+		names = [_so(self.customer, 100 + i, date=frappe.utils.add_days(today, -i)) for i in range(7)]
+		_so(self.customer, 5, docstatus=0)  # draft
+		_so(self.customer, 6, docstatus=2)  # cancelled
+		_so(self.other, 7)
+		out = self.call("order_status")
+		self.assertTrue(out["identified"])
+		self.assertEqual([o["name"] for o in out["orders"]], names[:5])
+		self.assertEqual(set(out["orders"][0]), {"name", "date", "status", "delivery_date", "per_delivered",
+												 "per_billed", "grand_total", "currency"})
+		self.assertEqual(out["orders"][0]["date"], today)
+		(log,) = _logs()
+		self.assertEqual((log.result_count, log.identified), (5, 1))
+
+	def test_order_status_rounds_to_currency_precision(self):
+		name = _so(self.customer, 1299.999, per_delivered=33.3333, per_billed=0,
+				   delivery_date=frappe.utils.add_days(frappe.utils.today(), 3))
+		(order,) = self.call("order_status", order_no=name)["orders"]
+		self.assertEqual((order["grand_total"], order["currency"], order["per_delivered"]), (1300.0, "USD", 33.33))
+		self.assertEqual(order["delivery_date"], frappe.utils.add_days(frappe.utils.today(), 3))
+
+	def test_order_no_of_another_customer_returns_nothing(self):
+		"""Review Focus 3."""
+		mine = _so(self.customer, 100)
+		theirs = _so(self.other, 200)
+		draft = _so(self.customer, 300, docstatus=0)
+		self.assertEqual([o["name"] for o in self.call("order_status", order_no=mine)["orders"]], [mine])
+		for order_no in (theirs, draft, "SAL-ORD-DOES-NOT-EXIST", ["in", [theirs]]):
+			out = self.call("order_status", order_no=order_no)
+			self.assertEqual(out, {"identified": True, "orders": []}, order_no)
+			self.assertNotIn(theirs, frappe.as_json(out))
+
+	def test_unpaid_invoices(self):
+		due = frappe.utils.add_days(frappe.utils.today(), 10)
+		first = _si(self.customer, 12.346, due=frappe.utils.today(), grand_total=100.004)
+		for _i in range(11):
+			_si(self.customer, 1, due=due)
+		_si(self.customer, 0)
+		_si(self.customer, -5)  # credit note
+		_si(self.customer, 9, docstatus=0)
+		_si(self.other, 500)
+		out = self.call("unpaid_invoices")
+		self.assertTrue(out["identified"])
+		self.assertEqual(len(out["invoices"]), 10)
+		self.assertEqual(out["invoices"][0], {"name": first, "date": frappe.utils.today(),
+											  "due_date": frappe.utils.today(), "grand_total": 100.0,
+											  "outstanding_amount": 12.35, "currency": "USD"})
+		self.assertEqual(out["outstanding_total"], [{"currency": "USD", "amount": 23.35}])  # all 12, not only 10
+		(log,) = _logs()
+		self.assertEqual((log.result_count, log.identified), (10, 1))
+
+	def test_lead_party_is_identified_without_financials(self):
+		lead = _lead("Agent Olena")
+		frappe.db.set_value("DB Conversation", self.conv, {"party_type": "Lead", "party": lead})
+		self.assertEqual(self.call("find_customer"), {"identified": True, "customer_name": "Agent Olena",
+													  "party_type": "Lead", "outstanding_total": []})
+		self.assertEqual(self.call("order_status"), {"identified": True, "orders": []})
+		self.assertEqual(self.call("unpaid_invoices"),
+						 {"identified": True, "invoices": [], "outstanding_total": []})
+
+	# --- not identified (Review Focus 1, 2) -------------------------------------------
+
+	def _assert_not_identified_everywhere(self, label, **call_kwargs):
+		_so(self.customer, 100)
+		_si(self.customer, 40)
+		_set_settings(allow_agent_writes=1)
+		frappe.db.delete(LOG)
+		for tool in CUSTOMER_TOOLS:
+			kwargs = {"items": [{"item_code": "AGT-LAPTOP-14", "qty": 1}]} if tool == "create_draft_order" else {}
+			out = self.call(tool, **call_kwargs, **kwargs)
+			self.assertEqual(out, NOT_IDENTIFIED, f"{label}: {tool}")
+		logs = _logs()
+		self.assertEqual([r.tool for r in logs], list(CUSTOMER_TOOLS), label)
+		self.assertTrue(all(r.identified == 0 and r.result_count == 0 and not r.error for r in logs), label)
+		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}), label)
+		return logs
+
+	def _headers(self, tool="find_customer", body=b"{}", **kw):
+		path = f"/api/method/dialogbrain.agent_api.{tool}"
+		return signed_headers(**{"thread": self.thread, "ts": int(time.time()), "path": path, "body": body, **kw})
+
+	def test_bad_signature(self):
+		_set_settings(allow_agent_writes=1)
+		for tool in CUSTOMER_TOOLS:
+			headers = self._headers(tool)
+			headers["X-DialogBrain-Context-Signature"] = "sha256=" + "0" * 64
+			self.assertEqual(self.call(tool, headers=headers), NOT_IDENTIFIED, tool)
+		self.assertTrue(all(r.identified == 0 and not r.conversation for r in _logs()))
+
+	def test_signed_with_another_secret(self):
+		"""Another workspace's secret (or a forger without the secret)."""
+		self.assertEqual(self.call("find_customer", headers=self._headers(secret="e" * 64)), NOT_IDENTIFIED)
+
+	def test_stale_timestamp(self):
+		headers = self._headers(ts=int(time.time()) - 301)
+		self.assertEqual(self.call("find_customer", headers=headers), NOT_IDENTIFIED)
+		(log,) = _logs()
+		self.assertEqual((log.identified, log.conversation), (0, None))
+
+	def test_missing_header(self):
+		for header in ("X-DialogBrain-Thread-Id", "X-DialogBrain-Timestamp", "X-DialogBrain-Context-Signature"):
+			headers = self._headers()
+			del headers[header]
+			self.assertEqual(self.call("find_customer", headers=headers), NOT_IDENTIFIED, header)
+		self.assertEqual(self.call("find_customer", headers={}), NOT_IDENTIFIED)
+
+	def test_signature_replayed_for_another_chat_or_tool(self):
+		other_conv = _conv(self.channel, thread_id="73002", party_type="Customer", party=self.other,
+						   link_source="manual")
+		headers = self._headers()
+		headers["X-DialogBrain-Thread-Id"] = "73002"  # another chat's thread under this signature
+		self.assertEqual(self.call("find_customer", headers=headers), NOT_IDENTIFIED)
+		# a find_customer signature replayed against order_status
+		self.assertEqual(self.call("order_status", headers=self._headers()), NOT_IDENTIFIED)
+		# a signed body for one order replayed with another order_no
+		body = json.dumps({"order_no": "A"}).encode()
+		headers = self._headers("order_status", body=body)
+		out = self.call("order_status", headers=headers, body=json.dumps({"order_no": "B"}).encode(),
+						order_no="B")
+		self.assertEqual(out, NOT_IDENTIFIED)
+		self.assertTrue(all(r.identified == 0 for r in _logs()))
+		self.assertNotIn(other_conv, [r.conversation for r in _logs()])
+
+	def test_unknown_thread(self):
+		self._assert_not_identified_everywhere("unknown thread", thread="999999")
+
+	def test_auto_unverified_link_is_not_identified(self):
+		"""Review Focus 2: e.g. a phone typed into livechat matched a customer."""
+		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_unverified")
+		logs = self._assert_not_identified_everywhere("auto_unverified")
+		self.assertTrue(all(r.conversation == self.conv for r in logs))
+
+	def test_unlinked_conversation_is_not_identified(self):
+		frappe.db.set_value("DB Conversation", self.conv, {"party_type": None, "party": None, "link_source": None})
+		self._assert_not_identified_everywhere("unlinked")
+
+	def test_party_that_no_longer_exists_is_not_identified(self):
+		frappe.db.set_value("DB Conversation", self.conv, "party", "Agent Deleted Customer")
+		self.assertEqual(self.call("find_customer"), NOT_IDENTIFIED)
+
+	def test_no_context_at_all(self):
+		frappe.set_user(self.agent)
+		for tool in ("find_customer", "order_status", "unpaid_invoices"):
+			self.assertEqual(getattr(agent_api, tool)(), NOT_IDENTIFIED, tool)
+
+	# --- extra arguments (Review Focus 3) ----------------------------------------------
+
+	def test_customer_arguments_are_refused(self):
+		_si(self.other, 1000)
+		cases = [("find_customer", {"phone": "+380501112233"}),
+				 ("find_customer", {"customer": self.other}),
+				 ("order_status", {"order_no": "X", "email": "mallory@example.com"}),
+				 ("unpaid_invoices", {"customer": self.other, "phone": "1"}),
+				 ("create_draft_order", {"items": [], "customer": self.other})]
+		for tool, kwargs in cases:
+			with self.assertRaises(frappe.ValidationError, msg=tool) as cm:
+				self.call(tool, **kwargs)
+			message = str(cm.exception)
+			self.assertIn("Unexpected argument(s)", message)
+			self.assertIn("identified from the chat", message)
+			self.assertNotIn("order_no", message.split(";")[0])
+		logs = _logs()
+		self.assertEqual(len(logs), len(cases))
+		self.assertTrue(all("Unexpected argument" in r.error for r in logs))
+
+	def test_unexpected_argument_message_lists_the_names(self):
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self.call("unpaid_invoices", phone="1", customer="x")
+		self.assertIn("Unexpected argument(s): customer, phone;", str(cm.exception))
+
+	def test_frappe_keys_are_accepted(self):
+		out = self.call("find_customer", _="123", csrf_token="t")
+		self.assertTrue(out["identified"])
+
+	def test_customer_tools_are_guarded(self):
+		for user in ("Administrator", "Guest", self.manager):
+			frappe.set_user(user)
+			for tool in CUSTOMER_TOOLS:
+				with self.assertRaises(frappe.PermissionError, msg=f"{user} {tool}"):
+					getattr(agent_api, tool)()
+
+	# --- create_draft_order ------------------------------------------------------------
+
+	def _order_ready(self):
+		_item("AGT-LAPTOP-14", "Laptop 14 inch")
+		_price("AGT-LAPTOP-14", 1299.999)
+		_order_setup("AGT-LAPTOP-14")
+		frappe.db.set_single_value("Selling Settings", "selling_price_list", PRICE_LIST)
+		frappe.db.set_value("DB Channel", self.channel, "company", ORDER_CO)
+		_set_settings(allow_agent_writes=1)
+
+	def test_create_draft_order_refused_while_writes_are_off(self):
+		"""Ruling R4: enforced server-side, whatever DialogBrain's denied_tools say."""
+		self._order_ready()
+		_set_settings(allow_agent_writes=0)
+		with self.assertRaises(frappe.PermissionError):
+			self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}))
+		(log,) = _logs()
+		self.assertIn("disabled", log.error)
+
+	def test_create_draft_order_creates_a_draft_and_notifies_the_assignee(self):
+		self._order_ready()
+		frappe.db.set_value("DB Conversation", self.conv, "assigned_to", self.manager)
+		out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 2}])
+		self.assertEqual(out["identified"], True)
+		self.assertEqual(out["status"], "Draft")
+		self.assertEqual(out["currency"], "USD")
+		self.assertEqual(out["grand_total"], 2600.0)
+		self.assertEqual(out["items"], [{"item_code": "AGT-LAPTOP-14", "item_name": "Laptop 14 inch",
+										 "qty": 2.0, "rate": 1300.0}])
+		so = frappe.get_doc("Sales Order", out["order"])
+		self.assertEqual((so.docstatus, so.customer, so.db_conversation, so.company, so.owner),
+						 (0, self.customer, self.conv, ORDER_CO, self.agent))
+		self.assertEqual(so.items[0].warehouse, f"Stores - {ORDER_ABBR}")
+		notes = frappe.get_all("Notification Log", filters={"document_type": "Sales Order",
+															 "document_name": so.name}, pluck="for_user")
+		self.assertEqual(notes, [self.manager])
+		(log,) = _logs()
+		self.assertEqual((log.tool, log.identified, log.result_count, log.error), ("create_draft_order", 1, 1, None))
+		self.assertEqual(frappe.session.user, "Administrator")
+
+	def test_create_draft_order_currency_follows_the_party_not_the_site_default(self):
+		self._order_ready()
+		frappe.db.set_value("Customer", self.customer, "default_currency", None)
+		frappe.db.set_default("currency", "INR")  # the site-wide default a new document would get
+		out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertEqual(out["currency"], "USD")  # the company's currency
+
+	def test_create_draft_order_notifies_the_channel_users_when_unassigned(self):
+		self._order_ready()
+		agent_user = _user("agent-b2-chat@example.com", "Chat Agent")
+		channel = frappe.get_doc("DB Channel", self.channel)
+		channel.append("allowed_users", {"user": agent_user})
+		channel.save(ignore_permissions=True)
+		out = self.call("create_draft_order", items=json.dumps([{"item_code": "AGT-LAPTOP-14", "qty": 1}]))
+		notes = frappe.get_all("Notification Log", filters={"document_name": out["order"]}, pluck="for_user")
+		self.assertEqual(sorted(notes), permitted_users(self.channel))
+		self.assertTrue({self.manager, agent_user} <= set(notes))
+
+	def test_create_draft_order_restores_the_agent_session_on_failure(self):
+		self._order_ready()
+		frappe.local.request = make_request(path="/api/method/dialogbrain.agent_api.create_draft_order",
+											body=b"{}", headers={})
+		ctx = agent_api.Context(thread_id=self.thread, conversation=self.conv, party_type="Customer",
+								party=self.customer, identified=True)
+		frappe.set_user(self.agent)
+		with (
+			patch.object(agent_api, "_context", return_value=ctx),
+			patch("frappe.model.document.Document.insert", side_effect=frappe.ValidationError("boom")),
+			self.assertRaises(frappe.ValidationError),
+		):
+			agent_api.create_draft_order(items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertEqual(frappe.session.user, self.agent)
+
+	def test_create_draft_order_validates_items(self):
+		self._order_ready()
+		_item("AGT-OLD", "Old", disabled=1)
+		_item("AGT-PART", "Part", is_sales_item=0)
+		bad = [
+			[],
+			"not json",
+			[{"item_code": "AGT-LAPTOP-14", "qty": 0}],
+			[{"item_code": "AGT-LAPTOP-14", "qty": 1, "rate": 1}],
+			[{"item_code": "AGT-LAPTOP-14", "qty": 1, "warehouse": "x"}],
+			[{"item_code": "AGT-OLD", "qty": 1}],
+			[{"item_code": "AGT-PART", "qty": 1}],
+			[{"item_code": "AGT-NOPE", "qty": 1}],
+			[{"qty": 1}],
+			["AGT-LAPTOP-14"],
+			[{"item_code": "AGT-LAPTOP-14", "qty": 1}] * (agent_api.MAX_ORDER_LINES + 1),
+		]
+		for items in bad:
+			with self.assertRaises(frappe.ValidationError, msg=repr(items)[:60]):
+				self.call("create_draft_order", items=items)
+		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}))
+
+	def test_create_draft_order_for_a_lead(self):
+		self._order_ready()
+		lead = _lead("Agent Lead Buyer")
+		frappe.db.set_value("DB Conversation", self.conv, {"party_type": "Lead", "party": lead})
+		out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		self.assertEqual((out["identified"], out["order"]), (True, None))
+		self.assertFalse(frappe.db.exists("Sales Order", {"db_conversation": self.conv}))
+
+	def test_create_draft_order_is_never_submitted(self):
+		self._order_ready()
+		with patch("erpnext.selling.doctype.sales_order.sales_order.SalesOrder.submit") as submit:
+			out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		submit.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Sales Order", out["order"], "docstatus"), 0)
