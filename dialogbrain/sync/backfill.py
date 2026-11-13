@@ -59,7 +59,10 @@ def utc_day(dt) -> str:
 
 
 def set_setting(field, value):
-	frappe.db.set_single_value(SETTINGS, field, value)
+	"""Write a server-managed Settings field. ``modified`` is left alone so an admin with
+	the Settings form open can still save it (DialogBrainSettings.validate keeps these
+	fields from being overwritten by that save)."""
+	frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
 
 
 def error_text(exc) -> str:

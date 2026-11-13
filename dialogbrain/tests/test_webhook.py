@@ -43,6 +43,7 @@ class TestReceive(DialogBrainTestCase):
 		self._orig = (settings.connected, settings.get_password("webhook_secret", raise_exception=False))
 		settings.connected = 1
 		settings.webhook_secret = SECRET
+		settings.flags.dialogbrain_server_write = True  # server-managed fields (R14)
 		settings.save(ignore_permissions=True)
 		frappe.local.response = frappe._dict()
 
@@ -50,6 +51,7 @@ class TestReceive(DialogBrainTestCase):
 		settings = frappe.get_single("DialogBrain Settings")
 		settings.connected = self._orig[0]
 		settings.webhook_secret = self._orig[1]
+		settings.flags.dialogbrain_server_write = True  # server-managed fields (R14)
 		settings.save(ignore_permissions=True)
 		frappe.local.request = None
 
@@ -115,6 +117,7 @@ class TestReceive(DialogBrainTestCase):
 	def test_receive_when_not_connected_returns_200_and_drops(self):
 		settings = frappe.get_single("DialogBrain Settings")
 		settings.connected = 0
+		settings.flags.dialogbrain_server_write = True  # server-managed fields (R14)
 		settings.save(ignore_permissions=True)
 		with patch("frappe.enqueue") as enq:
 			res = self._post()
