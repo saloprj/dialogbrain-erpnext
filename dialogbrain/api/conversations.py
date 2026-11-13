@@ -34,6 +34,10 @@ MESSAGE_SEARCH_MIN = 3
 MAX_LIMIT = 500
 DRAFT_WEBHOOK_LIMIT = 500
 DRAFT_LIST_LIMIT = 300
+# A reply the sender has claimed (pending -> unknown, no error yet) is still in flight
+# for this long after the claim (file uploads up to 60 s + the send); the UI shows it
+# as "sending". Older, or with an error text, it is a real "unknown".
+IN_FLIGHT_SECONDS = 120
 # Tags a message must never render: phishing forms, document-level/meta tags, embeds.
 DISALLOWED_TAGS = [
 	"form", "input", "button", "select", "textarea", "option", "link", "meta",
@@ -339,7 +343,7 @@ def _message_rows(where, params, order="DESC", limit=None):
 	sql = (
 		f"SELECT m.`name`, m.`client_ref`, m.`direction`, m.`author_type`, m.`sent_by`, "
 		f"u.`full_name` AS sent_by_name, m.`text`, m.`sent_at`, m.`delivery_status`, m.`error`, "
-		f"m.`creation`, {key} AS _key "
+		f"m.`creation`, m.`modified`, {key} AS _key "
 		f"FROM `tabDB Message` m LEFT JOIN `tabUser` u ON u.`name` = m.`sent_by` "
 		f"WHERE {where} ORDER BY {key} {order}, m.`creation` {order}, m.`name` {order}"
 	)
@@ -362,6 +366,7 @@ def _format_messages(rows):
 		):
 			parent = a.pop("parent")
 			attachments.setdefault(parent, []).append(dict(a))
+	in_flight_since = now_datetime() - timedelta(seconds=IN_FLIGHT_SECONDS)
 	out = []
 	for r in rows:
 		raw = r["text"] or ""
@@ -378,6 +383,12 @@ def _format_messages(rows):
 				"sent_at": r["sent_at"],
 				"delivery_status": r["delivery_status"],
 				"error": r["error"] if r["delivery_status"] == "failed" else None,
+				"in_flight": bool(
+					r["delivery_status"] == "unknown"
+					and not r["error"]
+					and r["modified"]
+					and get_datetime(r["modified"]) >= in_flight_since
+				),
 				"attachments": attachments.get(r["name"], []),
 			}
 		)

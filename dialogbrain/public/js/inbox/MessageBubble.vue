@@ -12,15 +12,15 @@
 			<div class="db-foot">
 				<span v-if="m.delivery_status === 'deleted'" class="db-deleted">{{ __("Deleted") }}</span>
 				<span class="db-time" :title="fullTime">{{ clockTime(m.sent_at) }}</span>
-				<span v-if="m.direction === 'out'" class="db-status" :class="'db-status-' + (m.delivery_status || 'sent')">
-					<svg v-if="m.delivery_status === 'pending'" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+				<span v-if="m.direction === 'out'" class="db-status" :class="'db-status-' + status">
+					<svg v-if="status === 'pending'" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
 						<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" />
 						<path d="M8 4.5V8l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 					</svg>
-					<svg v-else-if="m.delivery_status === 'sent'" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+					<svg v-else-if="status === 'sent'" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
 						<path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
 					</svg>
-					<span v-else-if="m.delivery_status === 'unknown'" class="db-unknown" :title="__('Delivery status unknown: DialogBrain did not confirm this message. Check the conversation before sending it again.')">?</span>
+					<span v-else-if="status === 'unknown'" class="db-unknown" :title="__('Delivery status unknown: DialogBrain did not confirm this message. Check the conversation before sending it again.')">?</span>
 					<span v-else-if="m.delivery_status === 'failed'" class="db-failed-mark">!</span>
 					<span class="sr-only">{{ statusLabel }}</span>
 				</span>
@@ -58,6 +58,8 @@ const fullTime = computed(() => {
 	const t = userMoment(props.m.sent_at);
 	return t && t.isValid() ? frappe.datetime.str_to_user(t.format("YYYY-MM-DD HH:mm:ss")) : "";
 });
+// A claimed reply (unknown, no error, just now) is still in flight: show it as sending.
+const status = computed(() => (props.m.in_flight ? "pending" : props.m.delivery_status || "sent"));
 const statusLabel = computed(
 	() =>
 		({
@@ -66,7 +68,7 @@ const statusLabel = computed(
 			unknown: __("Delivery status unknown"),
 			failed: __("Failed"),
 			deleted: __("Deleted"),
-		})[props.m.delivery_status] || ""
+		})[status.value] || ""
 );
 
 const retrying = ref(false);

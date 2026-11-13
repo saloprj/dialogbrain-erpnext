@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import get_datetime, now_datetime
+from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from dialogbrain.api import conversations as api
 from dialogbrain.permissions import is_manager
@@ -465,6 +465,27 @@ class TestInboxApi(DialogBrainTestCase):
 		)
 		self.assertEqual(api.get_messages_by_name(self.a_open_mine, [name]), [row])
 		self.assertEqual(api.get_messages_by_name(self.a_open_mine, frappe.as_json([name])), [row])
+
+	def test_unknown_in_flight_flag(self):
+		# the sender claims a reply (pending -> unknown, empty error) while the request is
+		# in flight; the UI shows it as "sending", not as "delivery unknown" (live e2e)
+		fresh = _msg(self.a_open_mine, text="r1", direction="out", client_ref="c-fresh",
+					 delivery_status="unknown", sent_by=self.agent_a)
+		ambiguous = _msg(self.a_open_mine, text="r2", direction="out", client_ref="c-amb",
+						 delivery_status="unknown", error="timed out", sent_by=self.agent_a)
+		stale = _msg(self.a_open_mine, text="r3", direction="out", client_ref="c-stale",
+					 delivery_status="unknown", sent_by=self.agent_a)
+		sent = _msg(self.a_open_mine, text="r4", direction="out", client_ref="c-sent",
+					delivery_status="sent", sent_by=self.agent_a)
+		old = add_to_date(now_datetime(), seconds=-(api.IN_FLIGHT_SECONDS + 5))
+		frappe.db.set_value("DB Message", stale, "modified", old, update_modified=False)
+		frappe.set_user(self.agent_a)
+		rows = {r["name"]: r for r in api.get_messages(self.a_open_mine)["rows"]}
+		self.assertTrue(rows[fresh]["in_flight"])
+		self.assertFalse(rows[ambiguous]["in_flight"])
+		self.assertFalse(rows[stale]["in_flight"])
+		self.assertFalse(rows[sent]["in_flight"])
+		self.assertEqual(rows[fresh]["delivery_status"], "unknown")  # the contract is unchanged
 
 	def test_get_messages_by_name_rejects_foreign_names(self):
 		mine = _msg(self.a_open_mine, text="a")

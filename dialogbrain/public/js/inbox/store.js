@@ -311,7 +311,7 @@ function watchPending(conv, name) {
 		setTimeout(() => {
 			const b = store.messages[conv];
 			const m = b && b.rows.find((r) => r.name === name);
-			if (m && m.delivery_status === "pending") refreshMessages(conv, [name]);
+			if (m && (m.delivery_status === "pending" || m.in_flight)) refreshMessages(conv, [name]);
 		}, ms)
 	);
 }
