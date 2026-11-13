@@ -151,3 +151,35 @@ class TestPartyLinking(DialogBrainTestCase):
 		d = frappe.db.get_value("DB Conversation", conv, ["party_type", "party", "link_source"], as_dict=1)
 		self.assertEqual((d.party_type, d.party, d.link_source), ("Lead", lead, "manual"))
 		self.assertEqual(frappe.db.get_value("Lead", lead, "mobile_no"), "380671234508")
+
+	def test_tail_match_on_verified_channel_is_unverified(self):
+		c = _customer("Pty Cust H", phone="0671234508")
+		conv = _conv("p-10", "whatsapp", phone="+48671234508")
+		self.assertEqual(link_party(conv), ("Customer", c))
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "link_source"), "auto_unverified")
+
+	def test_percent_email_matches_nothing(self):
+		frappe.get_doc({"doctype": "Lead", "first_name": "Pty Pct", "email_id": "pct@example.com"}).insert(
+			ignore_permissions=True
+		)
+		self.assertEqual(find_parties(None, "%"), [])
+		self.assertEqual(find_parties(None, "pct@exampl_.com"), [])
+
+	def test_set_party_ignores_junk_phone(self):
+		c = _customer("Pty Cust I", phone="+49 151 2345 6789")
+		conv = _conv("p-11", "livechat", phone="12")
+		set_party(conv, "Customer", c)
+		contact = frappe.get_doc("Contact", frappe.db.get_value("DB Conversation", conv, "contact"))
+		self.assertEqual(len(contact.phone_nos), 1)
+
+	def test_create_lead_twice_creates_one(self):
+		conv = _conv("p-12", "livechat", phone="380671234508")
+		a = create_lead(conv)
+		b = create_lead(conv)
+		self.assertEqual(a, b)
+		self.assertEqual(frappe.db.count("Lead", {"mobile_no": "380671234508"}), 1)
+
+	def test_set_party_invalid_type(self):
+		conv = _conv("p-13", "livechat", phone="380671234508")
+		with self.assertRaises(frappe.ValidationError):
+			set_party(conv, "Supplier", "x")

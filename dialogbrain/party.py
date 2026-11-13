@@ -43,14 +43,21 @@ def _find(phone, email):
 	"""Return a list of dicts {party_type, party, matched_by, contact}, Customers first."""
 	found = {}  # (party_type, party) -> dict
 
-	def add(party_type, party, matched_by, contact=None):
+	def add(party_type, party, matched_by, contact=None, exact=False):
 		key = (party_type, party)
 		cur = found.get(key)
 		if not cur:
-			found[key] = {"party_type": party_type, "party": party, "matched_by": matched_by, "contact": contact}
+			found[key] = {
+				"party_type": party_type,
+				"party": party,
+				"matched_by": matched_by,
+				"contact": contact,
+				"exact": exact,
+			}
 			return
 		if matched_by == "phone":
 			cur["matched_by"] = "phone"
+		cur["exact"] = cur["exact"] or exact
 		if contact and not cur["contact"]:
 			cur["contact"] = contact
 
@@ -68,7 +75,7 @@ def _find(phone, email):
 		)
 		for r in rows:
 			if phones_match(r.phone, phone):
-				add(r.link_doctype, r.link_name, "phone", r.contact)
+				add(r.link_doctype, r.link_name, "phone", r.contact, exact=normalize_phone(r.phone) == norm)
 		leads = frappe.db.sql(
 			f"""SELECT name, mobile_no, phone FROM `tabLead`
 			WHERE RIGHT({_digits_sql("mobile_no")}, 9) = %(tail)s
@@ -78,7 +85,12 @@ def _find(phone, email):
 		)
 		for r in leads:
 			if phones_match(r.mobile_no, phone) or phones_match(r.phone, phone):
-				add("Lead", r.name, "phone")
+				add(
+					"Lead",
+					r.name,
+					"phone",
+					exact=norm in (normalize_phone(r.mobile_no), normalize_phone(r.phone)),
+				)
 
 	email = (email or "").strip().lower()
 	if email:
@@ -92,9 +104,10 @@ def _find(phone, email):
 		)
 		for r in rows:
 			add(r.link_doctype, r.link_name, "email", r.contact)
-		for name in frappe.get_all("Lead", filters={"email_id": ["like", email]}, pluck="name"):
-			if (frappe.db.get_value("Lead", name, "email_id") or "").strip().lower() == email:
-				add("Lead", name, "email")
+		for name in frappe.db.sql_list(
+			"SELECT name FROM `tabLead` WHERE LOWER(TRIM(email_id)) = %s", (email,)
+		):
+			add("Lead", name, "email")
 
 	return sorted(found.values(), key=lambda d: d["party_type"] != "Customer")
 
@@ -121,7 +134,7 @@ def link_party(conversation):
 		return None
 
 	channel_type = (frappe.db.get_value("DB Channel", conv.channel, "channel_type") or "").lower() if conv.channel else ""
-	verified = chosen["matched_by"] == "phone" and channel_type in VERIFIED_PHONE_CHANNELS
+	verified = chosen["matched_by"] == "phone" and chosen["exact"] and channel_type in VERIFIED_PHONE_CHANNELS
 	frappe.db.set_value(
 		"DB Conversation",
 		conversation,
@@ -158,7 +171,7 @@ def _primary_contact(party_type, party):
 
 def _add_channel_details(contact, phone, email):
 	changed = False
-	if phone and not any(phones_match(p.phone, phone) for p in contact.phone_nos):
+	if phone and normalize_phone(phone) and not any(phones_match(p.phone, phone) for p in contact.phone_nos):
 		contact.append("phone_nos", {"phone": phone})
 		changed = True
 	if email and not any((e.email_id or "").lower() == email.lower() for e in contact.email_ids):
@@ -202,6 +215,8 @@ def set_party(conversation, party_type, party):
 @frappe.whitelist()
 def create_lead(conversation):
 	conv = _check_write(conversation)
+	if conv.party_type == "Lead" and conv.party and frappe.db.exists("Lead", conv.party):
+		return conv.party
 	name = conv.contact_name or conv.phone or conv.email or conv.thread_id
 	lead = frappe.get_doc(
 		{
