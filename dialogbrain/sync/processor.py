@@ -160,9 +160,12 @@ def _on_message(data):
 	if not channel:
 		raise ValueError("message event without account_id")
 	conversation, _ = upsert_conversation(_event_thread(data), channel)
-	name, created = upsert_message(conversation, data.get("message") or {})
+	# ``skip_push``: DialogBrain re-emitting fetched channel history (no push for it
+	# there either) -> mirror silently, like the backfill.
+	silent = data.get("skip_push") is True
+	name, created = upsert_message(conversation, data.get("message") or {}, silent=silent)
 	if created:
-		apply_message_counters(conversation, name)
+		apply_message_counters(conversation, name, silent=silent)
 
 
 def _on_message_deleted(data):

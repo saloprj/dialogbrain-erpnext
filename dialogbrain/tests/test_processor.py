@@ -634,6 +634,21 @@ class TestProcessor(DialogBrainTestCase):
 		_process(OUTGOING)
 		self.assertEqual(_logs(_conv_by_thread("8451249")), [])
 
+	def test_skip_push_history_message_is_silent(self):
+		"""DialogBrain re-emits fetched channel history as ``message.received`` with
+		``skip_push: true`` (seen live: 2022-2025 messages during our backfill). Mirror it,
+		but notify nobody and publish nothing."""
+		from dialogbrain.sync.processor import process_event
+
+		data = _data(INBOUND, db_id="1")
+		data["skip_push"] = True
+		with patch("frappe.publish_realtime") as pub:
+			process_event("message.received", data)
+		name = _conv_by_thread("1001")
+		self.assertTrue(_msg("1"))
+		self.assertEqual(_logs(name), [])
+		self.assertFalse([c for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")])
+
 	def test_silent_upsert_publishes_nothing(self):
 		from dialogbrain.sync.upsert import (
 			apply_message_counters,
