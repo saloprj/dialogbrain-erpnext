@@ -72,6 +72,53 @@ class TestOAuthProtocol(DialogBrainTestCase):
 			with self.assertRaises(DialogBrainError):
 				oauth.discover("https://api.dialogbrain.test")
 
+	# --- F2: discovery metadata is validated ------------------------------------------
+
+	def _discover(self, base_url, **overrides):
+		m = mock_requests(get=MagicMock(return_value=resp(200, dict(META, **overrides))))
+		with patch("dialogbrain.setup.oauth.requests", m):
+			return oauth.discover(base_url)
+
+	def test_discover_rejects_non_http_authorization_endpoint(self):
+		for bad in ("javascript:alert(1)", "data:text/html,x", "https://", "//evil.example.com/x"):
+			with self.assertRaises(DialogBrainError, msg=bad):
+				self._discover("https://api.dialogbrain.test", authorization_endpoint=bad)
+
+	def test_discover_requires_https_authorization_endpoint(self):
+		with self.assertRaises(DialogBrainError):
+			self._discover("https://api.dialogbrain.test", authorization_endpoint="http://app.dialogbrain.test/oauth/authorize")
+
+	def test_discover_rejects_foreign_token_endpoint(self):
+		for bad in ("https://evil.example.com/oauth/token", "http://api.dialogbrain.test/oauth/token",
+				"https://api.dialogbrain.test:8443/oauth/token"):
+			with self.assertRaises(DialogBrainError, msg=bad):
+				self._discover("https://api.dialogbrain.test", token_endpoint=bad)
+
+	def test_discover_rejects_foreign_registration_endpoint(self):
+		with self.assertRaises(DialogBrainError):
+			self._discover("https://api.dialogbrain.test", registration_endpoint="https://evil.example.com/oauth/register")
+
+	def test_discover_accepts_same_origin_variants(self):
+		meta = self._discover(
+			"https://API.dialogbrain.test:443/",
+			token_endpoint="https://api.dialogbrain.test/oauth/token",
+			registration_endpoint="https://api.DialogBrain.test:443/oauth/register",
+		)
+		self.assertEqual(meta["token_endpoint"], "https://api.dialogbrain.test/oauth/token")
+
+	def test_discover_accepts_dev_setup(self):
+		base = "http://host.docker.internal:8000"
+		meta = self._discover(
+			base,
+			issuer="http://localhost:8000",
+			authorization_endpoint="http://localhost:3000/oauth/authorize",
+			token_endpoint=base + "/oauth/token",
+			registration_endpoint=base + "/oauth/register",
+		)
+		self.assertEqual(meta["authorization_endpoint"], "http://localhost:3000/oauth/authorize")
+		# loopback http is fine even when DialogBrain itself is https
+		self._discover("https://api.dialogbrain.test", authorization_endpoint="http://127.0.0.1:3000/oauth/authorize")
+
 	def test_register_client_posts_redirect_and_name(self):
 		m = mock_requests(post=MagicMock(return_value=resp(201, {"client_id": "cid-1"})))
 		with patch("dialogbrain.setup.oauth.requests", m):

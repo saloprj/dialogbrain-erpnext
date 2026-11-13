@@ -72,7 +72,43 @@ def discover(base_url: str) -> dict:
 			raise DialogBrainError(f"DialogBrain OAuth metadata is missing {field}")
 	if "S256" not in (meta.get("code_challenge_methods_supported") or []):
 		raise DialogBrainError("DialogBrain OAuth server does not support PKCE S256")
+	_check_endpoints(base_url, meta)
 	return meta
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url) -> "tuple | None":
+	"""``(scheme, host, port)`` of an http(s) URL with a host, lowercased; else None."""
+	if not isinstance(url, str):
+		return None
+	try:
+		parts = urlparse(url.strip())
+		scheme = parts.scheme.lower()
+		host = (parts.hostname or "").lower()
+		port = parts.port
+	except ValueError:
+		return None
+	if scheme not in _DEFAULT_PORTS or not host:
+		return None
+	return scheme, host, port or _DEFAULT_PORTS[scheme]
+
+
+def _check_endpoints(base_url: str, meta: dict) -> None:
+	"""The browser is sent to ``authorization_endpoint``; the code, verifier and key go to
+	``token_endpoint`` / ``registration_endpoint``. Refuse metadata that points elsewhere."""
+	base = _origin(base_url)
+	if not base:
+		raise DialogBrainError("DialogBrain base URL must be an http(s) address")
+	auth = _origin(meta["authorization_endpoint"])
+	if not auth:
+		raise DialogBrainError("DialogBrain OAuth metadata has an invalid authorization_endpoint")
+	if auth[0] != "https" and base[0] != "http" and auth[1] not in LOOPBACK_HOSTS:
+		raise DialogBrainError("DialogBrain OAuth authorization_endpoint must use https")
+	for field in ("token_endpoint", "registration_endpoint"):
+		if _origin(meta[field]) != base:
+			raise DialogBrainError(f"DialogBrain OAuth {field} is not on the DialogBrain base URL")
 
 
 def register_client(registration_endpoint: str, redirect_uri: str, client_name: str) -> str:

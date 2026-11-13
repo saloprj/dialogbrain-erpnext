@@ -96,7 +96,16 @@ const dialogbrain_settings = {
 			freeze_message: __("Talking to DialogBrain…"),
 			callback: (r) => {
 				const url = (r.message || {}).authorize_url;
-				if (url) window.location.href = url;
+				if (!url) return;
+				if (/^https?:\/\//i.test(url)) {
+					window.location.href = url;
+				} else {
+					frappe.msgprint({
+						message: __("DialogBrain returned an invalid sign-in address."),
+						indicator: "red",
+						title: __("Connect with DialogBrain failed"),
+					});
+				}
 			},
 		});
 	},
