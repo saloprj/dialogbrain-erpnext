@@ -609,6 +609,10 @@ class TestBackfillReconcile(DialogBrainTestCase):
 			("public", 301, True),
 			("private", 30, False),
 			("private", 61, True),
+			# the scheduler ticks every 60 s and the previous pass started a moment after
+			# its tick: the next tick sees ~59.x s and must not skip a whole minute (live e2e)
+			("private", 58, True),
+			("public", 296, True),
 		]
 		for mode, seconds, expected in cases:
 			self._settings(network_mode=mode, last_reconcile_at=now_datetime() - timedelta(seconds=seconds))

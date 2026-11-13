@@ -65,6 +65,9 @@ RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
 RECONCILE_JOB_ID = "dialogbrain_reconcile"
 PROCESS_JOB = "dialogbrain.sync.processor.process_delivery"
 INTERVALS = {"public": 300, "private": 60}
+# The cursor is a pass's start, a moment after the tick that enqueued it; without slack the
+# next 60 s tick sees 59.x s and every other minute is skipped.
+TICK_SLACK = 5
 PROBE_LIMIT = 10
 STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
@@ -104,7 +107,7 @@ def tick() -> None:
 		set_setting("backfill_status", "error: interrupted (worker stopped), run Re-sync"[:STATUS_LENGTH])
 	interval = INTERVALS.get(settings.network_mode or "public", INTERVALS["public"])
 	last = settings.last_reconcile_at
-	if last and (now_datetime() - get_datetime(last)).total_seconds() < interval:
+	if last and (now_datetime() - get_datetime(last)).total_seconds() < interval - TICK_SLACK:
 		return
 	frappe.enqueue(RECONCILE_JOB, queue="long", timeout=3600, job_id=RECONCILE_JOB_ID, deduplicate=True)
 

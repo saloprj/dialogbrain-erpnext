@@ -23,6 +23,9 @@ if ! sudo docker exec "$B" test -d /home/frappe/frappe-bench/sites/test.localhos
     --install-app erpnext --mariadb-user-host-login-scope=%
 fi
 bench --site test.localhost set-config allow_tests true
+# Frappe v16 ticks the scheduler every 4 minutes by default; DialogBrain's reconcile
+# (every minute in private mode) needs a 60 s tick.
+bench set-config -g scheduler_tick_interval 60
 
 # 5. install app + migrate
 for site in test.localhost frontend; do
