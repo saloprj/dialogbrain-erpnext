@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
+# DEV ONLY — do not use in production.
 # Idempotent dev install. Run from /home/denys/projects/erpnext.
 set -euo pipefail
+# containers that run Python and need the editable install
 SERVICES="backend queue-short queue-long scheduler websocket"
+# frontend too, so the D2/D3 mounts (built bundles, nginx template) apply on a fresh setup
+UP_SERVICES="$SERVICES frontend"
+DB_NETWORK=dialogbrain_dialogbrain-network
 B=erpnext-backend-1
 bench() { sudo docker exec -w /home/frappe/frappe-bench "$B" bench "$@"; }
 
-# 1. named services only, never a bare `up`
-sudo docker compose -p erpnext -f pwd.yml -f dialogbrain_erpnext/dev/compose.dialogbrain.yml up -d $SERVICES
+# 0. the dev DialogBrain stack's network (D1) must exist: compose declares it external
+if ! sudo docker network inspect "$DB_NETWORK" >/dev/null 2>&1; then
+  echo "ERROR: docker network '$DB_NETWORK' not found." >&2
+  echo "Start the dev DialogBrain stack first (it creates that network), then re-run this script." >&2
+  exit 1
+fi
+
+# 1. named services only, never a bare `up`; --no-deps so db / redis are never recreated
+sudo docker compose -p erpnext -f pwd.yml -f dialogbrain_erpnext/dev/compose.dialogbrain.yml \
+  up -d --no-deps $UP_SERVICES
 
 # 2. editable install in every container
 for s in $SERVICES; do

@@ -1,3 +1,4 @@
+# DEV ONLY — do not use in production.
 # Override: mounts the dialogbrain app into the bench containers.
 # Run from /home/denys/projects/erpnext (paths relative to pwd.yml).
 services:

@@ -1,3 +1,5 @@
+# DEV ONLY — do not use in production. frappe_docker's template minus the forced
+# /socket.io Origin header (see dev/compose.dialogbrain.yml, D3).
 upstream backend-server {
 	server ${BACKEND} fail_timeout=0;
 }
