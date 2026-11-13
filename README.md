@@ -13,18 +13,30 @@ Open **DialogBrain Settings** (`/app/dialogbrain-settings`). There are two ways 
 
 1. **Connect with DialogBrain (OAuth, recommended).** Press the button, approve access on
    DialogBrain, and you return to Settings already connected. No key to copy. Requirements:
+   - OAuth also uses the **Base Url** field, which sits in the "Connect with API key"
+     section. It defaults to `https://api.dialogbrain.com`; for another DialogBrain (for
+     example `https://api.dialogbrain.ru`) change it there and save before pressing the
+     button.
    - The site must be reachable over `https`. A plain `http` site works only on
      `localhost` / `127.0.0.1`; DialogBrain refuses other `http` redirect addresses, and
      the button then tells you to use an API key instead.
    - Behind a reverse proxy, either set `host_name` (with the `https://` scheme) in
      `site_config.json` or forward `X-Forwarded-Proto`. Otherwise the site looks like
-     `http` and OAuth refuses.
+     `http` and OAuth refuses. Set `host_name` (including the port, e.g.
+     `http://localhost:8080`) also when the proxy drops a non-standard port from the
+     `Host` header; otherwise the redirect address DialogBrain sends you back to is wrong.
+   - On DialogBrain's consent page, turn on **Lock the key to this workspace** so the key
+     ERPNext receives cannot be used in your other workspaces.
+   - A site that is already connected can reconnect only to the same workspace. To move
+     to another workspace, Disconnect first.
 2. **Connect with API key.** Expand the "Connect with API key" section, paste the base URL
    and a DialogBrain API key, save and press **Connect with API key**. Use this for
    `http` sites on a non-loopback host.
 
-**Revoking access.** Disconnect only stops syncing on the ERPNext side. To revoke the key,
-go to DialogBrain, Settings, Developer, and delete the key named `ERPNext — <host> MCP`.
+**Revoking access.** Disconnect only stops syncing on the ERPNext side. To revoke access,
+delete the keys named `ERPNext — <host> MCP` in DialogBrain → Settings → Developer. Each
+reconnect creates a new key with that name; while the site is connected, the newest one
+is in use.
 
 ## Known limitations
 

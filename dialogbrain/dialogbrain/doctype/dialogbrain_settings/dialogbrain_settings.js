@@ -61,7 +61,7 @@ const dialogbrain_settings = {
 					() => this.call(frm, "disconnect", {}, () =>
 						frappe.show_alert({
 							message: __(
-								"Disconnected. You can revoke the key \"ERPNext — {0} MCP\" in DialogBrain → Settings → Developer.",
+								"Disconnected. To revoke access, delete the keys named \"ERPNext — {0} MCP\" in DialogBrain → Settings → Developer (each reconnect created a new one).",
 								[frappe.utils.escape_html(window.location.hostname)]
 							),
 							indicator: "orange",
