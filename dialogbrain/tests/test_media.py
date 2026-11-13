@@ -199,3 +199,22 @@ class TestMedia(DialogBrainTestCase):
 		from frappe.utils.error import log_error_snapshot
 		log_error_snapshot(exc)
 		self.assertEqual(frappe.db.count("Error Log"), before)
+
+	def test_content_type_is_the_normalised_mime(self):
+		frappe.set_user(self.agent_a)
+		cases = (
+			("image/png\r\nX-Evil: 1", "application/octet-stream", "attachment"),
+			("image/png\nSet-Cookie: a=b", "application/octet-stream", "attachment"),
+			("IMAGE/PNG; charset=x", "image/png", "inline"),
+			(" application/pdf ", "application/pdf", "attachment"),
+			("not a mime", "application/octet-stream", "attachment"),
+		)
+		for i, (mime, ctype, kind) in enumerate(cases):
+			fid = str(80 + i)
+			msg = _att_msg(self.conv_a, fid, mime=mime, filename="x.bin")
+			with patch(CLIENT, _client(file_id=int(fid))), patch(REQUESTS_GET, return_value=_upstream()):
+				resp = media.get(msg, fid)
+			self.assertEqual(resp.headers["Content-Type"], ctype, repr(mime))
+			self.assertTrue(resp.headers["Content-Disposition"].startswith(kind), repr(mime))
+			self.assertNotIn("X-Evil", resp.headers)
+			self.assertNotIn("Set-Cookie", resp.headers)

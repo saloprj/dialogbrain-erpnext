@@ -16,9 +16,11 @@ frappe state. The upstream ``requests`` response stays open until the generator 
 and is closed in the generator's ``finally``.
 """
 
+import re
 from urllib.parse import quote
 
 import requests
+
 import frappe
 from frappe import _
 from werkzeug.wrappers import Response
@@ -38,6 +40,16 @@ INLINE_MIMES = frozenset(
 		"video/mp4", "video/webm", "video/ogg", "video/quicktime",
 	)
 )
+
+
+_MIME_RE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
+
+
+def _normalize_mime(value):
+	"""``type/subtype`` lower-cased without parameters; anything malformed (spaces, CR/LF,
+	no subtype) becomes ``application/octet-stream``."""
+	mime = str(value or "").split(";", 1)[0].strip().lower()
+	return mime if _MIME_RE.match(mime) else "application/octet-stream"
 
 
 class MediaTooLarge(frappe.ValidationError):
@@ -122,11 +134,11 @@ def get(message, file_id):
 		upstream.close()
 		raise
 
-	mime = att.mime_type or upstream.headers.get("Content-Type") or "application/octet-stream"
-	normalized = mime.split(";", 1)[0].strip().lower()
+	normalized = _normalize_mime(att.mime_type or upstream.headers.get("Content-Type"))
 	kind = "inline" if normalized in INLINE_MIMES else "attachment"
 	headers = {
-		"Content-Type": mime,
+		# never the raw value: it comes from the channel and may carry CR/LF or parameters
+		"Content-Type": normalized,
 		"Cache-Control": "private, max-age=300",
 		"Content-Disposition": _disposition(kind, att.filename),
 		"X-Content-Type-Options": "nosniff",
