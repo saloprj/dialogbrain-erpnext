@@ -3,6 +3,7 @@ import json
 import frappe
 from frappe.utils import now_datetime
 
+from dialogbrain.sync.processor import delivery_job_id
 from dialogbrain.sync.signature import verify_signature
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -70,6 +71,8 @@ def receive():
 		PROCESSOR,
 		queue="short",
 		enqueue_after_commit=True,
+		job_id=delivery_job_id(log.name),
+		deduplicate=True,
 		log_name=log.name,
 	)
 	return {"ok": True}

@@ -6,7 +6,7 @@ Change detection (ruling R5)
 last_message_ts DESC`` without exposing ``is_pinned`` (DialogBrain
 ``threads/list_threads.py``, ``workspace/handlers/thread_search_handler.py``). A pinned,
 unchanged thread can therefore precede changed ones, so the pass never stops early: every
-thread with activity in the window (``since`` = day of ``last_reconcile_at`` - 1 day, UTC)
+thread with activity in the window (``since`` = UTC day of ``last_reconcile_at`` - 1 day)
 is checked with one ``messages.read_history {thread_id, limit: PROBE_LIMIT}`` probe. A
 thread needs a sync when
 
@@ -15,7 +15,18 @@ thread needs a sync when
   followed by a stored one (a manager's reply sent from ERPNext in private mode, a webhook
   that arrived after an earlier one was lost), which the timestamp alone cannot see.
 
-Unknown conversations are synced from ``since`` without a probe.
+Unknown conversations are synced from ``since`` without a probe. ``since`` is never older
+than ``backfill_days`` (a long outage does not page the whole history).
+
+Cursor and failing threads (ruling R13)
+---------------------------------------
+``last_reconcile_at`` advances when the global steps succeed (webhook check, every
+``search.threads`` page). A thread that fails (probe, read, upsert) is rolled back and
+recorded in ``reconcile_failures`` (thread key -> ``{count, date_from, error, last_at,
+entry}``); each pass first retries recorded threads from their ``date_from``, whether or not
+they are still in the window. Success clears the entry; after 5 consecutive failures the
+thread is skipped (kept and shown in ``reconcile_status``) until a manual Re-sync
+(:func:`dialogbrain.sync.backfill.enqueue_backfill`) clears the map.
 
 Webhook health (public mode): DialogBrain lists only active subscriptions. When ours is
 missing it is re-activated and the pass re-reads every thread of the window from
@@ -47,6 +58,7 @@ from dialogbrain.sync.backfill import (
 	utc_day,
 )
 from dialogbrain.sync.notify import publish
+from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
 from dialogbrain.sync.upsert import _s, find_conversation, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
@@ -54,9 +66,10 @@ RECONCILE_JOB_ID = "dialogbrain_reconcile"
 PROCESS_JOB = "dialogbrain.sync.processor.process_delivery"
 INTERVALS = {"public": 300, "private": 60}
 PROBE_LIMIT = 10
-MAX_ATTEMPTS = 5
 STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
+MAX_THREAD_FAILURES = 5
+STATUS_TEXT_LENGTH = 1000
 UNCONFIRMED_ERROR = "Not confirmed by DialogBrain — check the chat before resending"
 SETTINGS_FIELDS = (
 	"connected",
@@ -114,7 +127,7 @@ def retry_webhook_logs() -> None:
 		frappe.enqueue(
 			PROCESS_JOB,
 			queue="short",
-			job_id=f"dialogbrain_delivery_{name}",
+			job_id=delivery_job_id(name),
 			deduplicate=True,
 			log_name=name,
 		)
@@ -134,36 +147,135 @@ def sync_thread(thread_id: str, date_from: str, *, entry: "dict | None" = None, 
 	return created
 
 
+class Pass:
+	"""State of one reconcile pass."""
+
+	def __init__(self, client, since, deep, failures):
+		self.client = client
+		self.since = since
+		self.deep = deep
+		self.failures = failures  # thread key -> {count, date_from, error, last_at, entry}
+		self.synced = {}  # conversation -> earliest UTC day read in this pass
+		self.handled = set()  # thread keys already dealt with in this pass
+
+	def skipped(self, key) -> bool:
+		return (self.failures.get(key) or {}).get("count", 0) >= MAX_THREAD_FAILURES
+
+	def import_(self, key, date_from, entry):
+		"""import_thread inside a savepoint; failures are recorded, never raised."""
+		save_point = "dialogbrain_reconcile"
+		frappe.db.savepoint(save_point)
+		try:
+			conversation, _ = import_thread(self.client, key, date_from, entry=entry, silent=False)
+		except Exception as exc:  # noqa: BLE001 - recorded per thread (R13)
+			frappe.db.rollback(save_point=save_point)
+			frappe.log_error(title=f"DialogBrain reconcile: thread {key}")
+			self.fail(key, date_from, entry, exc)
+			return None
+		finally:
+			commit()
+		self.failures.pop(key, None)
+		self.synced[conversation] = min(date_from, self.synced.get(conversation, date_from))
+		return conversation
+
+	def fail(self, key, date_from, entry, exc):
+		record = self.failures.get(key) or {}
+		previous = record.get("date_from")
+		self.failures[key] = {
+			"count": int(record.get("count") or 0) + 1,
+			"date_from": min(previous, date_from) if previous else date_from,
+			"error": error_text(exc)[:300],
+			"last_at": str(now_datetime()),
+			"entry": _identity(entry),
+		}
+
+
+def _identity(entry):
+	"""The fields of a thread entry needed to re-import it outside the search window."""
+	entry = entry or {}
+	keep = ("id", "thread_id", "channel_ref", "channel_account_id", "channel", "title", "kind")
+	return {k: entry.get(k) for k in keep if entry.get(k) is not None}
+
+
+def _load_failures(value) -> dict:
+	try:
+		failures = frappe.parse_json(value) if value else {}
+	except Exception:  # noqa: BLE001 - a corrupt value must not stop reconcile
+		failures = {}
+	return failures if isinstance(failures, dict) else {}
+
+
+def _status_text(failures) -> str:
+	if not failures:
+		return "OK"
+	active = {k: r for k, r in failures.items() if (r.get("count") or 0) < MAX_THREAD_FAILURES}
+	skipped = {k: r for k, r in failures.items() if k not in active}
+	parts = []
+	if active:
+		parts.append(
+			f"{len(active)} thread(s) failing, retried every pass: "
+			+ "; ".join(f"{k} ({r.get('count')}x: {(r.get('error') or '')[:80]})" for k, r in active.items())
+		)
+	if skipped:
+		parts.append(
+			f"{len(skipped)} thread(s) skipped after {MAX_THREAD_FAILURES} failures, run Re-sync to retry: "
+			+ "; ".join(f"{k} ({(r.get('error') or '')[:80]})" for k, r in skipped.items())
+		)
+	return " | ".join(parts)[:STATUS_TEXT_LENGTH]
+
+
 def reconcile() -> None:
-	settings = _settings()
+	"""One pass. The cursor (``last_reconcile_at``) advances when the global steps succeed
+	(webhook check, every ``search.threads`` page); a failing thread is recorded in
+	``reconcile_failures`` and retried from its own date on later passes (R13)."""
+	settings = frappe.db.get_value(
+		SETTINGS, SETTINGS, [*SETTINGS_FIELDS, "backfill_days", "reconcile_failures"], as_dict=True
+	) or frappe._dict()
 	if not settings.connected or _backfill_active(settings.backfill_status):
 		return
 	start = now_datetime()
 	last = get_datetime(settings.last_reconcile_at) if settings.last_reconcile_at else start
-	since = utc_day(last - timedelta(days=1))
+	floor = utc_day(start - timedelta(days=int(settings.backfill_days or 30)))
+	since = max(utc_day(last - timedelta(days=1)), floor)
 	client = DialogBrainClient.from_settings()
-	ok = True
+	global_ok = True
 
 	deep = False
 	if (settings.network_mode or "public") == "public" and settings.webhook_id:
 		try:
 			deep = _ensure_webhook_active(client, settings.webhook_id)
 		except Exception as exc:  # noqa: BLE001 - recorded; the cursor stays so nothing is skipped
-			ok = False
+			global_ok = False
 			set_setting("webhook_status", f"check failed {start}: {error_text(exc)}"[:500])
 			frappe.log_error(title="DialogBrain reconcile: webhook check")
 		commit()
 
-	synced = {}  # conversation -> earliest UTC day read in this pass
+	run = Pass(client, since, deep, _load_failures(settings.reconcile_failures))
+
+	# 1. threads that failed before: retried from their own date, inside the window or not
+	for key, record in list(run.failures.items()):
+		run.handled.add(key)
+		if not run.skipped(key):
+			run.import_(key, record.get("date_from") or since, record.get("entry"))
+
+	# 2. every thread with activity in the window
 	try:
 		for entry, _total in iter_threads(client, since):
-			ok = _reconcile_thread(client, entry, since, deep, synced) and ok
+			key = _s(entry.get("id")) or _s(entry.get("thread_id"))
+			if not key or key in run.handled:
+				continue
+			run.handled.add(key)
+			_reconcile_thread(run, key, entry)
 	except Exception:  # noqa: BLE001 - search failed: retry next pass from the same cursor
-		ok = False
+		global_ok = False
 		frappe.log_error(title="DialogBrain reconcile: search.threads")
 
-	ok = _resolve_unconfirmed(client, synced) and ok
-	if ok:
+	# 3. unconfirmed replies (R11)
+	_resolve_unconfirmed(run)
+
+	set_setting("reconcile_failures", frappe.as_json(run.failures) if run.failures else None)
+	set_setting("reconcile_status", _status_text(run.failures))
+	if global_ok:
 		set_setting("last_reconcile_at", start)
 	commit()
 
@@ -205,34 +317,25 @@ def _probe(client, thread_id, conversation, since) -> "str | None":
 	return min(days) if days else None
 
 
-def _reconcile_thread(client, entry, since, deep, synced) -> bool:
-	thread_id = _s(entry.get("id")) or _s(entry.get("thread_id"))
-	save_point = "dialogbrain_reconcile"
-	frappe.db.savepoint(save_point)
-	try:
-		conversation = find_conversation(
-			thread_id, _s(entry.get("channel_ref")), _s(entry.get("channel_account_id"))
-		)
-		date_from = since
-		if conversation and not deep:
-			date_from = _probe(client, thread_id, conversation, since)
-			if date_from is None:
-				return True
-		conversation, _ = import_thread(client, thread_id, date_from, entry=entry, silent=False)
-		synced[conversation] = min(date_from, synced.get(conversation, date_from))
-		return True
-	except Exception:  # noqa: BLE001 - one thread must not stop the pass; cursor stays
-		frappe.db.rollback(save_point=save_point)
-		frappe.log_error(title=f"DialogBrain reconcile: thread {thread_id}")
-		return False
-	finally:
-		commit()
+def _reconcile_thread(run, key, entry):
+	conversation = find_conversation(key, _s(entry.get("channel_ref")), _s(entry.get("channel_account_id")))
+	date_from = run.since
+	if conversation and not run.deep:
+		try:
+			date_from = _probe(run.client, key, conversation, run.since)
+		except Exception as exc:  # noqa: BLE001 - recorded per thread (R13)
+			frappe.log_error(title=f"DialogBrain reconcile: probe {key}")
+			run.fail(key, run.since, entry, exc)
+			return
+		if date_from is None:
+			return
+	run.import_(key, date_from, entry)
 
 
 # --- unconfirmed replies (R11) ----------------------------------------------------
 
 
-def _resolve_unconfirmed(client, synced) -> bool:
+def _resolve_unconfirmed(run):
 	cutoff = now_datetime() - UNCONFIRMED_AFTER
 	rows = frappe.db.sql(
 		"""
@@ -243,36 +346,20 @@ def _resolve_unconfirmed(client, synced) -> bool:
 		""",
 		cutoff,
 	)
-	ok = True
 	for conversation, oldest in rows:
 		day = utc_day(oldest)
-		if conversation not in synced or synced[conversation] > day:
+		if conversation not in run.synced or run.synced[conversation] > day:
 			conv = frappe.db.get_value(
 				"DB Conversation", conversation, ["thread_id", "thread_ref", "channel"], as_dict=True
 			)
 			key = conv and (conv.thread_id or conv.thread_ref)
-			if not key:
+			if not key or run.skipped(key):
 				continue
-			save_point = "dialogbrain_unconfirmed"
-			frappe.db.savepoint(save_point)
-			try:
-				import_thread(
-					client,
-					key,
-					day,
-					entry={"id": conv.thread_id, "channel_ref": conv.thread_ref, "channel_account_id": conv.channel},
-					silent=False,
-				)
-			except Exception:  # noqa: BLE001 - not confirmed either way: leave it unknown
-				frappe.db.rollback(save_point=save_point)
-				frappe.log_error(title=f"DialogBrain reconcile: unconfirmed replies of {conversation}")
-				ok = False
-				commit()
-				continue
-			synced[conversation] = day
+			entry = {"id": conv.thread_id, "channel_ref": conv.thread_ref, "channel_account_id": conv.channel}
+			if not run.import_(key, day, entry):
+				continue  # not confirmed either way: leave it unknown
 		_fail_unconfirmed(conversation, cutoff)
 		commit()
-	return ok
 
 
 def _fail_unconfirmed(conversation, cutoff):

@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 19:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -18,6 +18,8 @@
   "last_reconcile_at",
   "backfill_days",
   "backfill_status",
+  "reconcile_status",
+  "reconcile_failures",
   "default_company",
   "connected"
  ],
@@ -90,6 +92,19 @@
    "fieldtype": "Data",
    "label": "Backfill Status",
    "read_only": 1
+  },
+  {
+   "fieldname": "reconcile_status",
+   "fieldtype": "Small Text",
+   "label": "Reconcile Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reconcile_failures",
+   "fieldtype": "Long Text",
+   "label": "Reconcile Failures",
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "default_company",

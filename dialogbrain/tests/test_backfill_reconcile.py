@@ -371,7 +371,27 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		self._run(reconcile, fake)
 		self.assertTrue(frappe.db.exists("DB Message", {"db_id": "2"}))
 
-	def test_reconcile_cursor_not_advanced_on_error(self):
+	def test_reconcile_cursor_not_advanced_on_global_error(self):
+		"""search.threads or the webhook check failing keeps the cursor (R13)."""
+		from dialogbrain.sync.reconcile import reconcile
+
+		before = get_datetime(self._get("last_reconcile_at"))
+		fake = MagicMock()
+		fake.list_webhooks.return_value = [{"id": 9, "active": True}]
+		fake.execute.side_effect = DialogBrainError("DialogBrain HTTP 500")
+		self._run(reconcile, fake)
+		self.assertEqual(get_datetime(self._get("last_reconcile_at")), before)
+
+		webhook_down = FakeDialogBrain([], {})
+		webhook_down.list_webhooks = MagicMock(side_effect=DialogBrainError("HTTP 502"))
+		self._run(reconcile, webhook_down)
+		self.assertEqual(get_datetime(self._get("last_reconcile_at")), before)
+		self.assertIn("check failed", self._get("webhook_status"))
+
+	def _failures(self):
+		return frappe.parse_json(self._get("reconcile_failures") or "{}")
+
+	def test_failing_thread_does_not_block_cursor_and_is_retried(self):
 		from dialogbrain.sync.reconcile import reconcile
 
 		before = get_datetime(self._get("last_reconcile_at"))
@@ -381,13 +401,51 @@ class TestBackfillReconcile(DialogBrainTestCase):
 			fail_history={"1001"},
 		)
 		self._run(reconcile, fake)
-		self.assertEqual(get_datetime(self._get("last_reconcile_at")), before)
-		self.assertTrue(frappe.db.exists("DB Message", {"db_id": "2"}))  # other threads still synced
+		self.assertGreater(get_datetime(self._get("last_reconcile_at")), before)  # R13
+		self.assertTrue(frappe.db.exists("DB Message", {"db_id": "2"}))
+		record = self._failures()["1001"]
+		since = fake.tool_calls("search.threads")[0]["since"]
+		self.assertEqual((record["count"], record["date_from"]), (1, since))
+		self.assertIn("read_history failed", record["error"])
+		self.assertIn("1001", self._get("reconcile_status"))
 
-		fake.fail_history = set()
+		# next pass: the thread is no longer in the search window but is retried from its date
+		fake.threads, fake.fail_history, fake.calls = [], set(), []
 		self._run(reconcile, fake)
-		self.assertGreater(get_datetime(self._get("last_reconcile_at")), before)
+		self.assertEqual([p.get("date_from") for p in fake.history_calls("1001")], [since])
 		self.assertTrue(frappe.db.exists("DB Message", {"db_id": "1"}))
+		self.assertEqual(self._failures(), {})
+		self.assertEqual(self._get("reconcile_status"), "OK")
+		self.assertEqual(frappe.db.get_value("DB Conversation", self._conv("1001"), "thread_ref"), "telegram:100100")
+
+	def test_thread_skipped_after_5_failures_until_resync(self):
+		from dialogbrain.sync.backfill import enqueue_backfill
+		from dialogbrain.sync.reconcile import reconcile
+
+		fake = FakeDialogBrain([_entry("1001")], {"1001": [_hmsg(1, self.now - timedelta(minutes=3), "x")]}, fail_history={"1001"})
+		for _ in range(5):
+			self._run(reconcile, fake)
+		self.assertEqual(self._failures()["1001"]["count"], 5)
+		fake.calls = []
+		self._run(reconcile, fake)
+		self.assertEqual(fake.history_calls("1001"), [])  # skipped, even though it is in the window
+		self.assertEqual(self._failures()["1001"]["count"], 5)
+		status = self._get("reconcile_status")
+		self.assertIn("1001", status)
+		self.assertIn("skipped", status)
+
+		with patch("frappe.enqueue"):
+			enqueue_backfill()  # manual Re-sync
+		self.assertEqual(self._failures(), {})
+		self.assertFalse(self._get("reconcile_status"))
+
+	def test_since_clamped_to_backfill_days(self):
+		from dialogbrain.sync.reconcile import reconcile
+
+		self._settings(last_reconcile_at=self.now - timedelta(days=60), backfill_days=30)
+		fake = FakeDialogBrain([], {})
+		self._run(reconcile, fake)
+		self.assertEqual(fake.tool_calls("search.threads")[0]["since"], _utc_date(self.now - timedelta(days=30)))
 
 	def test_reconcile_after_long_outage_uses_older_since(self):
 		from dialogbrain.sync.reconcile import reconcile
@@ -504,6 +562,8 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		fake = FakeDialogBrain([_entry("1001")], {"1001": quiet}, fail_history={"1001"})
 		self._run(reconcile, fake)
 		self.assertEqual(frappe.db.get_value("DB Message", lost, "delivery_status"), "unknown")
+		record = self._failures()["1001"]
+		self.assertEqual(record["date_from"], _utc_date(self.now - timedelta(minutes=20)))
 
 	# --- tick ---------------------------------------------------------------
 

@@ -27,19 +27,46 @@ from dialogbrain.sync.upsert import (
 MAX_ERROR_LENGTH = 4000
 
 
-def process_delivery(log_name: str) -> None:
-	"""Background job: process one DB Webhook Log row.
+MAX_ATTEMPTS = 5
+PROCESSABLE = ("queued", "failed")
 
-	``attempts += 1``; success -> ``processed``; any error -> partial writes of this
-	delivery are rolled back and the row is marked ``failed`` with the error (retried by
-	the scheduler). Never raises, so the job itself does not fail.
+
+def delivery_job_id(log_name: str) -> str:
+	"""One RQ job id per delivery: the receiver and the retry dedupe on it."""
+	return f"dialogbrain_delivery_{log_name}"
+
+
+def _commit():
+	"""Commit (skipped under tests, which rely on rollback for isolation)."""
+	if not frappe.flags.in_test:
+		frappe.db.commit()
+
+
+def process_delivery(log_name: str) -> None:
+	"""Background job: process one DB Webhook Log row, at most once.
+
+	1. Lock the row; only ``queued``/``failed`` rows with ``attempts < 5`` proceed.
+	   ``attempts += 1`` is committed BEFORE processing, so a killed job still counts
+	   (the retry gives up after 5) and is never retried forever.
+	2. Re-lock the row for the whole processing; a concurrent job blocks here and then
+	   sees ``processed`` and returns.
+	3. Success -> ``processed``; any error -> the delivery's partial writes are rolled back
+	   and the row is ``failed`` with the error (retried by the scheduler). Never raises.
 	"""
 	log = frappe.db.get_value(
-		"DB Webhook Log", log_name, ["name", "event", "payload", "status", "attempts"], as_dict=True
+		"DB Webhook Log", log_name, ["name", "status", "attempts"], as_dict=True, for_update=True
 	)
-	if not log or log.status == "processed":
+	if not log or log.status not in PROCESSABLE or (log.attempts or 0) >= MAX_ATTEMPTS:
 		return
 	attempts = (log.attempts or 0) + 1
+	frappe.db.set_value("DB Webhook Log", log_name, "attempts", attempts, update_modified=False)
+	_commit()
+
+	log = frappe.db.get_value(
+		"DB Webhook Log", log_name, ["name", "event", "payload", "status"], as_dict=True, for_update=True
+	)
+	if not log or log.status not in PROCESSABLE:
+		return
 	save_point = "dialogbrain_delivery"
 	frappe.db.savepoint(save_point)
 	try:
@@ -53,15 +80,12 @@ def process_delivery(log_name: str) -> None:
 		frappe.db.set_value(
 			"DB Webhook Log",
 			log_name,
-			{"status": "failed", "attempts": attempts, "error": frappe.get_traceback()[-MAX_ERROR_LENGTH:]},
+			{"status": "failed", "error": frappe.get_traceback()[-MAX_ERROR_LENGTH:]},
 			update_modified=False,
 		)
 		return
 	frappe.db.set_value(
-		"DB Webhook Log",
-		log_name,
-		{"status": "processed", "attempts": attempts, "error": None},
-		update_modified=False,
+		"DB Webhook Log", log_name, {"status": "processed", "error": None}, update_modified=False
 	)
 
 

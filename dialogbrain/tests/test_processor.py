@@ -678,6 +678,77 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual((row.status, row.attempts), ("processed", 1))
 		self.assertTrue(_msg("9000001"))
 
+	def test_process_delivery_twice_processes_once(self):
+		from dialogbrain.sync import processor
+
+		log = self._log(INBOUND)
+		processor.process_delivery(log_name=log)
+		conv = _msg("9000001").conversation
+		notified = len(_logs(conv))
+		with patch.object(processor, "process_event") as process_event:
+			processor.process_delivery(log_name=log)  # e.g. the webhook job and a retry job
+		process_event.assert_not_called()
+		self.assertEqual(len(_logs(conv)), notified)
+		row = frappe.db.get_value("DB Webhook Log", log, ["status", "attempts"], as_dict=True)
+		self.assertEqual((row.status, row.attempts), ("processed", 1))
+
+	def test_process_delivery_commits_attempt_before_processing(self):
+		from dialogbrain.sync import processor
+
+		log = self._log(INBOUND)
+		order = []
+
+		def commit():
+			order.append(("commit", frappe.db.get_value("DB Webhook Log", log, "attempts")))
+
+		with patch.object(processor, "_commit", side_effect=commit), patch.object(
+			processor, "process_event", side_effect=lambda *a: order.append(("process", None))
+		):
+			processor.process_delivery(log_name=log)
+		self.assertEqual(order, [("commit", 1), ("process", None)])
+
+	def test_killed_job_retried_until_attempt_cap(self):
+		"""A worker killed mid-processing leaves the row queued with the attempt already
+		counted; the retry gives up after 5 attempts."""
+		from dialogbrain.sync import processor
+		from dialogbrain.sync.reconcile import retry_webhook_logs
+
+		class Killed(BaseException):
+			pass
+
+		log = self._log(INBOUND)
+		frappe.db.set_value("DB Webhook Log", log, "received_at", frappe.utils.now_datetime() - timedelta(minutes=30))
+		runs = 0
+		for _ in range(10):
+			with patch("frappe.enqueue") as enqueue:
+				retry_webhook_logs()
+			if not enqueue.called:
+				break
+			self.assertEqual(enqueue.call_args.kwargs["log_name"], log)
+			with patch.object(processor, "process_event", side_effect=Killed), self.assertRaises(Killed):
+				processor.process_delivery(log_name=log)
+			runs += 1
+		self.assertEqual(runs, 5)
+		row = frappe.db.get_value("DB Webhook Log", log, ["status", "attempts"], as_dict=True)
+		self.assertEqual((row.status, row.attempts), ("queued", 5))
+		with patch.object(processor, "process_event") as process_event:
+			processor.process_delivery(log_name=log)  # a stale job past the cap does nothing
+		process_event.assert_not_called()
+
+	def test_processed_delivery_never_reprocessed(self):
+		from dialogbrain.sync import processor
+		from dialogbrain.sync.reconcile import retry_webhook_logs
+
+		log = self._log(INBOUND)
+		processor.process_delivery(log_name=log)
+		frappe.db.set_value("DB Webhook Log", log, "received_at", frappe.utils.now_datetime() - timedelta(hours=1))
+		with patch("frappe.enqueue") as enqueue:
+			retry_webhook_logs()
+		enqueue.assert_not_called()
+		with patch.object(processor, "process_event") as process_event:
+			processor.process_delivery(log_name=log)
+		process_event.assert_not_called()
+
 	def test_process_delivery_failure_marks_failed(self):
 		from dialogbrain.sync import processor
 

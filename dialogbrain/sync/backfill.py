@@ -196,7 +196,11 @@ def import_thread(client, thread_id: str, date_from: str, *, entry=None, silent=
 
 
 def enqueue_backfill() -> None:
+	"""Start (or restart: the manual Re-sync) the backfill. Also clears reconcile's
+	failing-thread map, so threads skipped after 5 failures are tried again."""
 	set_setting("backfill_status", "queued")
+	set_setting("reconcile_failures", None)
+	set_setting("reconcile_status", None)
 	frappe.enqueue(
 		BACKFILL_JOB,
 		queue="long",

@@ -83,6 +83,9 @@ class TestReceive(DialogBrainTestCase):
 		self.assertEqual(enq.call_args.kwargs["log_name"], row.name)
 		self.assertEqual(enq.call_args.kwargs["queue"], "short")
 		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
+		# same job id as the scheduler's retry, so one delivery is never queued twice
+		self.assertEqual(enq.call_args.kwargs["job_id"], f"dialogbrain_delivery_{row.name}")
+		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 
 	def test_receive_rejects_bad_signature(self):
 		with patch("frappe.enqueue") as enq:
