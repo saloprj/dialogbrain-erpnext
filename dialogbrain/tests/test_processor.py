@@ -123,6 +123,27 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertFalse(conv.phone)
 		self.assertEqual(_msg("9000002").author_type, "customer")
 
+	def test_long_thread_title_and_contact_fields_fit(self):
+		"""Seen live: an email-group title of 200+ characters failed the backfill."""
+		from dialogbrain.sync.processor import process_event
+
+		data = copy.deepcopy(load_fixture(GROUP)["data"])
+		data["thread"]["title"] = "Re: Invitation " + "x" * 300
+		process_event("message.received", data)
+		conv = frappe.get_doc("DB Conversation", _conv_by_thread("1002"))
+		self.assertEqual(len(conv.title), 140)
+		self.assertTrue(conv.title.startswith("Re: Invitation xx"))
+
+		from dialogbrain.sync.upsert import upsert_conversation
+
+		upsert_conversation(
+			{"thread_id": "1002", "title": "y" * 500, "avatar_url": "https://a.example/" + "z" * 300},
+			conv.channel,
+		)
+		conv.reload()
+		self.assertEqual(len(conv.title), 140)
+		self.assertFalse(conv.avatar_url)  # a cut URL is useless: dropped
+
 	def test_echo_thread_without_db_id_uses_internal_id(self):
 		# messages.send echoes carry thread.thread_id "livechat:<internal id>", no db_id
 		_process(OUTGOING)

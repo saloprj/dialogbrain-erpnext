@@ -174,6 +174,18 @@ def find_conversation(internal=None, ref=None, channel=None):
 	return None
 
 
+DATA_LENGTH = 140  # Frappe Data column
+TRUNCATABLE = ("title", "contact_name")
+
+
+def _fit(field, value):
+	"""Display names are cut to the Data length; an over-long id/URL/email is dropped
+	(a cut one would be wrong). DialogBrain titles of email groups can exceed 140."""
+	if value is None or len(value) <= DATA_LENGTH:
+		return value
+	return value[:DATA_LENGTH] if field in TRUNCATABLE else None
+
+
 def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	"""Create or update a DB Conversation from a DialogBrain thread dict.
 
@@ -187,6 +199,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	values = {"title": _s(thread.get("title"))}
 	for field in CONTACT_FIELDS:
 		values[field] = _s(thread.get(field))
+	values = {k: _fit(k, v) for k, v in values.items() if v}
 	values = {k: v for k, v in values.items() if v}
 
 	name = find_conversation(internal, ref, channel)
