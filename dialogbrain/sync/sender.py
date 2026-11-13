@@ -15,6 +15,9 @@ Never send twice
   ``db_id``): an echo that completed the row during the send is never overwritten.
 * Only ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error, or
   nothing was sent) can be retried, via :func:`retry_reply`.
+* A row still ``pending`` after 2 minutes lost its job before the claim (queue restart,
+  enqueue failure, worker death): the scheduler tick re-enqueues it
+  (:func:`requeue_stale_replies`); the claim keeps that safe.
 
 Echo reconciliation (agrees with ``dialogbrain.sync.upsert``)
 ------------------------------------------------------------
@@ -27,6 +30,7 @@ arriving after the response finds the row by ``db_id``.
 
 import json
 import mimetypes
+from datetime import timedelta
 
 import frappe
 from frappe import _
@@ -43,7 +47,11 @@ from dialogbrain.sync.upsert import (
 )
 
 DELIVER_JOB = "dialogbrain.sync.sender.deliver"
-AMBIGUOUS_HTTP_STATUSES = (502, 504)  # the gateway gave up; the send may have happened
+# The send may have happened: the gateway gave up (502/504), or DialogBrain failed after
+# the channel accepted the message (500).
+AMBIGUOUS_HTTP_STATUSES = (500, 502, 504)
+# A pending reply whose deliver job has not claimed it by then is re-enqueued (F3).
+STALE_PENDING_AFTER = timedelta(minutes=2)
 MAX_ERROR_LENGTH = 1000
 
 
@@ -88,8 +96,44 @@ def _auto_assign(conversation, user):
 	)
 
 
-def _enqueue(message_name):
-	frappe.enqueue(DELIVER_JOB, queue="short", enqueue_after_commit=True, message_name=message_name)
+def deliver_job_id(message_name: str) -> str:
+	"""One RQ job id per reply: the send, a retry and the stale sweep dedupe on it."""
+	return f"dialogbrain_deliver_{message_name}"
+
+
+def _enqueue(message_name, after_commit=True):
+	# at_front: a manager's reply must not wait behind a burst of webhook deliveries,
+	# which share the ``short`` queue.
+	frappe.enqueue(
+		DELIVER_JOB,
+		queue="short",
+		at_front=True,
+		job_id=deliver_job_id(message_name),
+		deduplicate=True,
+		enqueue_after_commit=after_commit,
+		message_name=message_name,
+	)
+
+
+def requeue_stale_replies() -> None:
+	"""Re-enqueue replies still ``pending`` after :data:`STALE_PENDING_AFTER` (called by
+	the scheduler tick).
+
+	``pending`` means no deliver job has claimed the row yet: its job was lost (queue
+	flushed or restarted, enqueue failed after the commit, the worker died before the
+	claim). Re-running ``deliver`` is safe: the atomic claim sends a row at most once, and
+	the job id dedupes against a job that is still queued.
+	"""
+	cutoff = now_datetime() - STALE_PENDING_AFTER
+	names = frappe.db.sql(
+		"""select name from `tabDB Message`
+		where delivery_status = 'pending' and direction = 'out' and modified < %s
+		order by modified limit 200""",
+		(cutoff,),
+		pluck=True,
+	)
+	for name in names:
+		_enqueue(name, after_commit=False)
 
 
 def create_reply(conversation, text, client_ref, file_urls=None, user=None) -> dict:

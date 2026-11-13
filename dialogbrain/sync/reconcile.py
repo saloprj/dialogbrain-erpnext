@@ -59,6 +59,7 @@ from dialogbrain.sync.backfill import (
 )
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
+from dialogbrain.sync.sender import requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
@@ -95,12 +96,14 @@ def _backfill_active(status) -> bool:
 
 
 def tick() -> None:
-	"""Every minute: retry deliveries and enqueue reconcile when due. Cheap by design: one
-	settings read, one indexed log query, at most one redis lookup."""
+	"""Every minute: retry deliveries, re-enqueue stale pending replies, enqueue reconcile
+	when due. Cheap by design: one settings read, two indexed queries, a redis lookup per
+	re-enqueued job."""
 	settings = _settings()
 	if not settings.connected:
 		return
 	retry_webhook_logs()
+	requeue_stale_replies()
 	if _backfill_active(settings.backfill_status):
 		if is_job_enqueued(BACKFILL_JOB_ID):
 			return  # reconcile would re-notify what backfill is loading silently

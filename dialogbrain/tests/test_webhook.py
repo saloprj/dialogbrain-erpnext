@@ -89,6 +89,18 @@ class TestReceive(DialogBrainTestCase):
 		self.assertEqual(enq.call_args.kwargs["job_id"], f"dialogbrain_delivery_{row.name}")
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 
+	def test_receive_routes_skip_push_history_to_long_queue(self):
+		"""F7: DialogBrain re-emitting fetched history (``skip_push``) can be thousands of
+		deliveries; they go to ``long`` so replies and live messages on ``short`` don't wait."""
+		body = json.loads(self.body)
+		body["data"]["skip_push"] = True
+		raw = json.dumps(body).encode()
+		with patch("frappe.enqueue") as enq:
+			self._post(body=raw)
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.kwargs["queue"], "long")
+		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+
 	def test_receive_rejects_bad_signature(self):
 		with patch("frappe.enqueue") as enq:
 			self._post(signature="sha256=" + "0" * 64)

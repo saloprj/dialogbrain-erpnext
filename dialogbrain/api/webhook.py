@@ -67,9 +67,12 @@ def receive():
 		frappe.db.rollback()
 		return {"ok": True, "duplicate": True}
 
+	# DialogBrain re-emitting fetched channel history (``skip_push``) can be thousands of
+	# deliveries: keep them off ``short``, where live messages and replies are processed.
+	data = body.get("data") if isinstance(body.get("data"), dict) else {}
 	frappe.enqueue(
 		PROCESSOR,
-		queue="short",
+		queue="long" if data.get("skip_push") is True else "short",
 		enqueue_after_commit=True,
 		job_id=delivery_job_id(log.name),
 		deduplicate=True,

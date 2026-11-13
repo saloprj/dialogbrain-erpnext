@@ -385,6 +385,76 @@ class TestSend(DialogBrainTestCase):
 		self._deliver(name, client)
 		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
 
+	def test_deliver_http_500_marks_unknown(self):
+		"""F8: a 500 can come after DialogBrain sent the message: not retryable."""
+		name = self._send()["name"]
+		client = _mock_client(
+			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("HTTP 500", status=500))
+		)
+		self._deliver(name, client)
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+		from dialogbrain.api.inbox import retry
+
+		with self.assertRaises(frappe.ValidationError):
+			retry(name)
+
+	def test_deliver_enqueued_at_front_with_job_id(self):
+		"""F7: a manager's reply jumps the webhook backlog on ``short``; F3: one job per
+		row (the stale-pending sweep re-enqueues with the same id)."""
+		name = self._send()["name"]
+		self.enqueue.assert_called_once()
+		kwargs = self.enqueue.call_args.kwargs
+		self.assertEqual(self.enqueue.call_args.args[0], "dialogbrain.sync.sender.deliver")
+		self.assertEqual(kwargs["queue"], "short")
+		self.assertTrue(kwargs["at_front"])
+		self.assertEqual(kwargs["job_id"], f"dialogbrain_deliver_{name}")
+		self.assertTrue(kwargs["deduplicate"])
+		self.assertEqual(kwargs["message_name"], name)
+
+	def test_stale_pending_reply_is_requeued(self):
+		"""F3: a reply whose deliver job never ran (queue flushed, worker died before the
+		claim) is re-enqueued by the tick; fresh pending, claimed and inbound rows are not."""
+		from frappe.utils import add_to_date, now_datetime
+
+		from dialogbrain.sync.sender import requeue_stale_replies
+
+		stale = self._send(client_ref="stale")["name"]
+		fresh = self._send(client_ref="fresh")["name"]
+		claimed = self._send(client_ref="claimed")["name"]
+		frappe.db.set_value("DB Message", claimed, "delivery_status", "unknown")
+		old = add_to_date(now_datetime(), minutes=-5)
+		frappe.db.sql(
+			"update `tabDB Message` set modified = %s where name in %s", (old, (stale, claimed))
+		)
+		inbound = frappe.get_doc(
+			{"doctype": "DB Message", "conversation": self.conv, "direction": "in", "db_id": "in-1", "text": "x"}
+		).insert(ignore_permissions=True)
+		frappe.db.sql(
+			"update `tabDB Message` set delivery_status = 'pending', modified = %s where name = %s",
+			(old, inbound.name),
+		)
+		with patch("frappe.enqueue") as enqueue:
+			requeue_stale_replies()
+		self.assertEqual([c.kwargs["message_name"] for c in enqueue.call_args_list], [stale])
+		self.assertEqual(enqueue.call_args.kwargs["job_id"], f"dialogbrain_deliver_{stale}")
+		self.assertTrue(enqueue.call_args.kwargs["deduplicate"])
+		# the re-run is safe: deliver's atomic claim sends a row at most once
+		client = _mock_client(execute=lambda *a, **k: SEND)
+		self._deliver(stale, client)
+		self._deliver(stale, client)
+		self.assertEqual(client.execute.call_count, 1)
+		self.assertEqual(frappe.db.get_value("DB Message", stale, "delivery_status"), "sent")
+		self.assertEqual(frappe.db.get_value("DB Message", fresh, "delivery_status"), "pending")
+
+	def test_tick_requeues_stale_replies(self):
+		from dialogbrain.sync import reconcile
+
+		with patch.object(reconcile, "_settings", return_value=frappe._dict(connected=1, network_mode="public")), patch(
+			"dialogbrain.sync.reconcile.requeue_stale_replies"
+		) as sweep, patch("frappe.enqueue"):
+			reconcile.tick()
+		sweep.assert_called_once()
+
 	def test_deliver_error_marks_failed(self):
 		name = self._send()["name"]
 		client = _mock_client(

@@ -22,3 +22,5 @@ class DBMessage(Document):
 
 def on_doctype_update():
 	frappe.db.add_index("DB Message", ["conversation", "sent_at"], "conversation_sent_at_index")
+	# the scheduler's stale-pending sweep (dialogbrain.sync.sender.requeue_stale_replies)
+	frappe.db.add_index("DB Message", ["delivery_status", "modified"], "delivery_status_modified_index")
