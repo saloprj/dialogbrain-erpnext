@@ -2,17 +2,27 @@
 # Run from /home/denys/projects/erpnext (paths relative to pwd.yml).
 services:
   backend:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-short:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-long:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   scheduler:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   websocket:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
