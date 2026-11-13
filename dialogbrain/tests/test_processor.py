@@ -144,6 +144,26 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(len(conv.title), 140)
 		self.assertFalse(conv.avatar_url)  # a cut URL is useless: dropped
 
+	def test_conversation_race_relooks_up_with_locking_read(self):
+		"""Seen live: ``message.received`` and ``conversation.started`` for a new chat are
+		processed concurrently; the loser's duplicate insert must find the winner's row.
+		A plain read in the loser's (REPEATABLE READ) snapshot cannot see it, so the
+		re-lookup is a locking read, which reads the latest committed row."""
+		from dialogbrain.sync import upsert
+
+		calls = []
+
+		def find(internal=None, ref=None, channel=None, for_update=False):
+			calls.append(for_update)
+			return "WINNER" if for_update else None
+
+		with patch.object(upsert, "find_conversation", side_effect=find), patch.object(
+			upsert, "_insert", return_value=False
+		), patch.object(frappe.db, "get_value", return_value="8455139"):
+			name, created = upsert.upsert_conversation({"thread_id": "8455139"}, "201")
+		self.assertEqual((name, created), ("WINNER", False))
+		self.assertEqual(calls, [False, True])
+
 	def test_echo_thread_without_db_id_uses_internal_id(self):
 		# messages.send echoes carry thread.thread_id "livechat:<internal id>", no db_id
 		_process(OUTGOING)

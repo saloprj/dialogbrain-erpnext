@@ -168,20 +168,28 @@ def thread_keys(thread: dict):
 	return internal, ref
 
 
-def find_conversation(internal=None, ref=None, channel=None):
+def find_conversation(internal=None, ref=None, channel=None, for_update=False):
 	"""Find a conversation by internal id, else by ``(channel, thread_ref)``.
 
 	Without ``channel`` a ref matches only when exactly one conversation has it.
+	``for_update``: a locking read, which sees rows committed after this transaction's
+	snapshot (needed after losing an insert race).
 	"""
 	internal, ref = _s(internal), _s(ref)
 	if internal:
-		name = frappe.db.get_value("DB Conversation", {"thread_id": internal})
+		name = frappe.db.get_value("DB Conversation", {"thread_id": internal}, for_update=for_update)
 		if name:
 			return name
 	if ref:
 		if channel:
-			return frappe.db.get_value("DB Conversation", {"channel": channel, "thread_ref": ref})
-		names = frappe.get_all("DB Conversation", filters={"thread_ref": ref}, pluck="name", limit=2)
+			return frappe.db.get_value(
+				"DB Conversation", {"channel": channel, "thread_ref": ref}, for_update=for_update
+			)
+		names = frappe.db.sql_list(
+			"select name from `tabDB Conversation` where thread_ref = %s limit 2"
+			+ (" for update" if for_update else ""),
+			(ref,),
+		)
 		if len(names) == 1:
 			return names[0]
 	return None
@@ -231,8 +239,8 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 		if _insert(doc):
 			link_party(doc.name)
 			return doc.name, True
-		# another worker created it meanwhile
-		name = find_conversation(internal, ref, channel)
+		# another worker created it meanwhile (committed after our snapshot: locking read)
+		name = find_conversation(internal, ref, channel, for_update=True)
 		if not name:
 			raise frappe.DuplicateEntryError("DB Conversation", internal or ref)
 		# the winner may not know the internal id yet
