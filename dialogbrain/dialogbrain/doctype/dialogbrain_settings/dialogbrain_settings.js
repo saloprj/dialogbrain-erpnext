@@ -77,6 +77,19 @@ const dialogbrain_settings = {
 	},
 
 	oauth_start(frm) {
+		// start() reads the saved settings (base URL): save edits first.
+		this.save_first(frm, () => this.oauth_start_call());
+	},
+
+	save_first(frm, run) {
+		if (frm.is_dirty()) {
+			frm.save().then(run);
+		} else {
+			run();
+		}
+	},
+
+	oauth_start_call() {
 		frappe.call({
 			method: "dialogbrain.setup.oauth.start",
 			freeze: true,
@@ -144,11 +157,7 @@ const dialogbrain_settings = {
 				},
 			});
 		// Connect reads the saved settings (key, mode, site URL): save edits first.
-		if (frm.is_dirty()) {
-			frm.save().then(run);
-		} else {
-			run();
-		}
+		this.save_first(frm, run);
 	},
 
 	render_intro(frm) {
