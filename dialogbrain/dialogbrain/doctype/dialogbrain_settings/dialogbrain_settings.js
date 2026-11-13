@@ -26,6 +26,7 @@ const dialogbrain_settings = {
 					]),
 					indicator: "green",
 				});
+				this.show_warning(res.warning);
 			})
 		, connected ? group : null);
 
@@ -61,6 +62,12 @@ const dialogbrain_settings = {
 		this.render_health(frm);
 	},
 
+	show_warning(text) {
+		if (text) {
+			frappe.msgprint({ message: frappe.utils.escape_html(text), indicator: "orange", title: __("Scheduler") });
+		}
+	},
+
 	call(frm, method, args, after) {
 		const run = () =>
 			frappe.call({
@@ -84,7 +91,11 @@ const dialogbrain_settings = {
 	render_intro(frm) {
 		frm.set_intro("");
 		if (frm.doc.network_mode === "private") {
-			frm.set_intro(DB_PRIVATE_WARNING, "orange");
+			// R15: the scheduler tick check (server side, sent with the form)
+			const tick_warning = (frm.doc.__onload || {}).scheduler_warning;
+			const lines = [DB_PRIVATE_WARNING];
+			if (tick_warning) lines.push(frappe.utils.escape_html(tick_warning));
+			frm.set_intro(lines.join("<br><br>"), "orange");
 		} else if (!frm.doc.connected) {
 			frm.set_intro(__("Not connected. Fill in the base URL, API key and public site URL, then press Connect."), "blue");
 		}

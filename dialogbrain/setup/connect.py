@@ -56,6 +56,36 @@ STATUS_LENGTH = 500
 PRIVATE_STATUS = "private mode: no webhook (reconcile polls every minute)"
 
 
+# --- scheduler tick (R15) -----------------------------------------------------------
+
+
+def scheduler_tick() -> int:
+	"""Seconds between scheduler ticks: ``scheduler_tick_interval`` from the site/common
+	config, else the Frappe default (240 s on v16, 60 s on v15)."""
+	from frappe.utils import cint
+
+	configured = cint(frappe.conf.get("scheduler_tick_interval"))
+	if configured:
+		return configured
+	try:
+		from frappe.utils.scheduler import DEFAULT_SCHEDULER_TICK
+	except ImportError:  # Frappe v15 has no constant: the tick is 60 s
+		return 60
+	return int(DEFAULT_SCHEDULER_TICK)
+
+
+def scheduler_warning(mode: str) -> "str | None":
+	"""Private mode polls DialogBrain every minute, which needs a 60 s scheduler tick. The
+	app does not edit site config; it names the command for the admin."""
+	tick = scheduler_tick()
+	if mode != "private" or tick <= 60:
+		return None
+	return _(
+		"The scheduler runs every {0} s, so private mode picks up new messages only every {0} s"
+		" instead of every minute. Run: {1}"
+	).format(tick, f"bench --site {frappe.local.site} set-config scheduler_tick_interval 60")
+
+
 # --- helpers --------------------------------------------------------------------
 
 
@@ -157,7 +187,12 @@ def connect() -> dict:
 	doc.last_reconcile_at = now_datetime()
 	_server_save(doc)
 	enqueue_backfill()
-	return {"workspace": workspace.get("name"), "channels": len(channels), "network_mode": mode}
+	return {
+		"workspace": workspace.get("name"),
+		"channels": len(channels),
+		"network_mode": mode,
+		"warning": scheduler_warning(mode),
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -194,7 +229,7 @@ def resync() -> None:
 
 
 @frappe.whitelist(methods=["POST"])
-def set_network_mode(mode: str) -> None:
+def set_network_mode(mode: str) -> dict:
 	"""``private``: delete the webhook (reconcile polls every minute); ``public``: create it.
 	The webhook work happens in ``DialogBrainSettings.validate`` so a plain form save of
 	``network_mode`` behaves the same."""
@@ -202,14 +237,16 @@ def set_network_mode(mode: str) -> None:
 	if mode not in MODES:
 		frappe.throw(_("Network mode must be one of: {0}").format(", ".join(MODES)))
 	doc = frappe.get_single(SETTINGS)
+	result = {"network_mode": mode, "warning": scheduler_warning(mode)}
 	if doc.network_mode == mode and (mode == "private" or doc.webhook_id or not doc.connected):
-		return
+		return result
 	if doc.network_mode == mode:  # public but the webhook is missing: recreate it
 		configure_webhook(doc, mode)
 		_server_save(doc)
-		return
+		return result
 	doc.network_mode = mode
 	doc.save(ignore_permissions=True)
+	return result
 
 
 def _failed(delivery) -> bool:

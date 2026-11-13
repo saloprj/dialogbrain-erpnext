@@ -3,6 +3,12 @@ from frappe.model.document import Document
 
 
 class DialogBrainSettings(Document):
+	def onload(self):
+		from dialogbrain.setup.connect import scheduler_warning
+
+		# shown by the form whenever network_mode is (or is switched to) private
+		self.set_onload("scheduler_warning", scheduler_warning("private"))
+
 	def validate(self):
 		if self.flags.dialogbrain_server_write:
 			return

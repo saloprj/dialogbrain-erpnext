@@ -121,7 +121,9 @@ class TestConnect(DialogBrainTestCase):
 	def test_connect_happy_path_public(self):
 		client, result, enqueue = self._connect()
 
-		self.assertEqual(result, {"workspace": "Test User", "channels": 8, "network_mode": "public"})
+		self.assertEqual(
+			result, {"workspace": "Test User", "channels": 8, "network_mode": "public", "warning": None}
+		)
 		client.create_webhook.assert_called_once_with(HOOK_URL, EVENTS)
 		self.assertEqual(self._get("webhook_id"), "41")
 		secret = frappe.get_single(SETTINGS).get_password("webhook_secret")
@@ -373,3 +375,75 @@ class TestConnect(DialogBrainTestCase):
 		doc.backfill_days = 14
 		doc.save()  # no TimestampMismatchError
 		self.assertEqual(self._get("backfill_days"), 14)
+
+
+class TestSchedulerTickWarning(DialogBrainTestCase):
+	"""R15: private mode polls every minute only with a 60 s scheduler tick. The app does not
+	edit site config; it tells the admin the exact command."""
+
+	def setUp(self):
+		TestConnect.setUp(self)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _call(self, fn, client, *args):
+		return TestConnect._call(self, fn, client, *args)
+
+	def _get(self, field):
+		return frappe.db.get_single_value(SETTINGS, field)
+
+	def _tick(self, value):
+		conf = dict(frappe.local.conf)
+		conf.pop("scheduler_tick_interval", None)
+		if value is not None:
+			conf["scheduler_tick_interval"] = value
+		return patch.object(frappe.local, "conf", frappe._dict(conf))
+
+	def test_effective_tick_default_follows_frappe(self):
+		from dialogbrain.setup.connect import scheduler_tick
+
+		try:
+			from frappe.utils.scheduler import DEFAULT_SCHEDULER_TICK as expected
+		except ImportError:  # Frappe v15: the tick defaults to 60 s
+			expected = 60
+		with self._tick(None):
+			self.assertEqual(scheduler_tick(), expected)
+		with self._tick("90"):
+			self.assertEqual(scheduler_tick(), 90)
+
+	def test_warning_only_for_private_with_slow_tick(self):
+		from dialogbrain.setup.connect import scheduler_warning
+
+		with self._tick(240):
+			text = scheduler_warning("private")
+			self.assertIn(f"bench --site {frappe.local.site} set-config scheduler_tick_interval 60", text)
+			self.assertIsNone(scheduler_warning("public"))
+		with self._tick(60):
+			self.assertIsNone(scheduler_warning("private"))
+
+	def test_connect_and_set_network_mode_return_the_warning(self):
+		frappe.db.set_single_value(SETTINGS, "network_mode", "private")
+		client = _fake_client()
+		with self._tick(240):
+			result, _ = self._call("connect", client)
+			self.assertIn("scheduler_tick_interval 60", result["warning"])
+			result, _ = self._call("set_network_mode", client, "public")
+			self.assertIsNone(result["warning"])
+			result, _ = self._call("set_network_mode", client, "private")
+			self.assertIn("scheduler_tick_interval 60", result["warning"])
+		with self._tick(60):
+			result, _ = self._call("set_network_mode", client, "public")
+			self.assertIsNone(result["warning"])
+
+	def test_settings_form_gets_the_warning_on_load(self):
+		from dialogbrain.setup.connect import scheduler_warning
+
+		with self._tick(240):
+			doc = frappe.get_single(SETTINGS)
+			doc.run_method("onload")
+			self.assertEqual(doc.get_onload().get("scheduler_warning"), scheduler_warning("private"))
+		with self._tick(60):
+			doc = frappe.get_single(SETTINGS)
+			doc.run_method("onload")
+			self.assertFalse(doc.get_onload().get("scheduler_warning"))
