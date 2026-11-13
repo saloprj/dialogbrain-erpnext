@@ -16,19 +16,26 @@ const dialogbrain_settings = {
 		const connected = !!frm.doc.connected;
 		const group = __("DialogBrain");
 
-		frm.add_custom_button(connected ? __("Reconnect") : __("Connect"), () =>
-			this.call(frm, "connect", {}, (r) => {
-				const res = r.message || {};
-				frappe.show_alert({
-					message: __("Connected to {0}: {1} channels, history import queued", [
-						res.workspace,
-						res.channels,
-					]),
-					indicator: "green",
-				});
-				this.show_warning(res.warning);
-			})
-		, connected ? group : null);
+		const on_connected = (r) => {
+			const res = r.message || {};
+			this.show_connected(res);
+		};
+
+		if (connected) {
+			frm.add_custom_button(__("Reconnect"), () => this.call(frm, "connect", {}, on_connected), group);
+			frm.add_custom_button(__("Reconnect with DialogBrain"), () => this.oauth_start(frm), group);
+		} else {
+			frm.add_custom_button(__("Connect with DialogBrain"), () => this.oauth_start(frm));
+			frm.change_custom_button_type(__("Connect with DialogBrain"), null, "primary");
+			frm.add_custom_button(__("Connect with API key"), () => {
+				if (!frm.doc.api_key) {
+					frm.fields_dict.api_key_section.collapse(false);
+					frm.fields_dict.api_key.$input && frm.fields_dict.api_key.$input.focus();
+					return;
+				}
+				this.call(frm, "connect", {}, on_connected);
+			});
+		}
 
 		if (connected) {
 			frm.add_custom_button(__("Re-sync"), () =>
@@ -52,7 +59,13 @@ const dialogbrain_settings = {
 				frappe.confirm(
 					__("Stop syncing with DialogBrain? Mirrored conversations stay in ERPNext."),
 					() => this.call(frm, "disconnect", {}, () =>
-						frappe.show_alert({ message: __("Disconnected"), indicator: "orange" })
+						frappe.show_alert({
+							message: __(
+								"Disconnected. You can revoke the key \"ERPNext — {0} MCP\" in DialogBrain → Settings → Developer.",
+								[frappe.utils.escape_html(window.location.hostname)]
+							),
+							indicator: "orange",
+						}, 15)
 					)
 				)
 			, group);
@@ -60,6 +73,56 @@ const dialogbrain_settings = {
 
 		this.render_intro(frm);
 		this.render_health(frm);
+		this.show_oauth_result(frm);
+	},
+
+	oauth_start(frm) {
+		frappe.call({
+			method: "dialogbrain.setup.oauth.start",
+			freeze: true,
+			freeze_message: __("Talking to DialogBrain…"),
+			callback: (r) => {
+				const url = (r.message || {}).authorize_url;
+				if (url) window.location.href = url;
+			},
+		});
+	},
+
+	show_connected(res) {
+		frappe.show_alert({
+			message: __("Connected to {0}: {1} channels, history import queued", [
+				frappe.utils.escape_html(String(res.workspace)),
+				frappe.utils.escape_html(String(res.channels)),
+			]),
+			indicator: "green",
+		});
+		this.show_warning(res.warning);
+	},
+
+	show_oauth_result(frm) {
+		const onload = frm.doc.__onload || {};
+		const res = onload.oauth_result;
+		if (!res) return;
+		delete onload.oauth_result; // shown once
+		if (res.ok) {
+			this.show_connected(res);
+			if (res.public_site_url_filled) {
+				frappe.msgprint({
+					message: __(
+						"Webhook address set to {0} — change it if DialogBrain can't reach this address",
+						[frappe.utils.escape_html(String(res.public_site_url_filled === true ? frm.doc.public_site_url || "" : res.public_site_url_filled))]
+					),
+					indicator: "blue",
+					title: __("DialogBrain"),
+				});
+			}
+		} else {
+			frappe.msgprint({
+				message: frappe.utils.escape_html(res.message || ""),
+				indicator: "red",
+				title: __("Connect with DialogBrain failed"),
+			});
+		}
 	},
 
 	show_warning(text) {
@@ -97,7 +160,7 @@ const dialogbrain_settings = {
 			if (tick_warning) lines.push(frappe.utils.escape_html(tick_warning));
 			frm.set_intro(lines.join("<br><br>"), "orange");
 		} else if (!frm.doc.connected) {
-			frm.set_intro(__("Not connected. Fill in the base URL, API key and public site URL, then press Connect."), "blue");
+			frm.set_intro(__("Not connected. Press Connect with DialogBrain, or open Connect with API key and paste a key."), "blue");
 		}
 	},
 
