@@ -1,0 +1,108 @@
+{
+  "success": true,
+  "data": {
+    "goal": "threads",
+    "mode": "list",
+    "threads": [
+      {
+        "id": "1001",
+        "thread_id": "1001",
+        "title": "Alice Example",
+        "channel": "telegram",
+        "kind": "dm",
+        "channel_account_id": "155",
+        "channel_ref": "telegram:100000001",
+        "channel_msg_ref": null,
+        "match_reason": null,
+        "match_preview": null,
+        "match_timestamp": null,
+        "last_message_preview": "Hi, can you send the offer? (fake text)",
+        "unread_count": 2,
+        "needs_reply": true,
+        "last_message_is_outgoing": false,
+        "last_sender": "Alice Example",
+        "unread_on_platform": null,
+        "account": {
+          "id": 155,
+          "channel": "telegram",
+          "name": "Test Account",
+          "phone": "10000000",
+          "email": null,
+          "workspace_id": 128
+        },
+        "has_real_outgoing": true
+      },
+      {
+        "id": "8451249",
+        "thread_id": "8451249",
+        "title": "Simulated chat c91803a9",
+        "channel": "livechat",
+        "kind": "livechat",
+        "channel_account_id": "201",
+        "channel_ref": "livechat:a07f9d4a-7e2c-4626-b785-13ba088dd210:sim_c91803a9acfe",
+        "channel_msg_ref": null,
+        "match_reason": null,
+        "match_preview": null,
+        "match_timestamp": null,
+        "last_message_preview": "Hello, this is a fake test visitor asking about pricing.",
+        "unread_count": 0,
+        "needs_reply": null,
+        "last_message_is_outgoing": false,
+        "last_sender": "MCP Simulation",
+        "unread_on_platform": null,
+        "account": {
+          "id": 201,
+          "channel": "livechat",
+          "name": "Voice Test Widget",
+          "phone": null,
+          "email": null,
+          "workspace_id": 128
+        },
+        "has_real_outgoing": false
+      },
+      {
+        "id": "1002",
+        "thread_id": "1002",
+        "title": "Example Group",
+        "channel": "telegram",
+        "kind": "group",
+        "channel_account_id": "155",
+        "channel_ref": "telegram:-1000000000002",
+        "channel_msg_ref": null,
+        "match_reason": null,
+        "match_preview": null,
+        "match_timestamp": null,
+        "last_message_preview": "Fake group message",
+        "unread_count": 17,
+        "needs_reply": null,
+        "last_message_is_outgoing": false,
+        "last_sender": "Bob Example",
+        "unread_on_platform": null,
+        "account": {
+          "id": 155,
+          "channel": "telegram",
+          "name": "Test Account",
+          "phone": "10000000",
+          "email": null,
+          "workspace_id": 128
+        },
+        "has_real_outgoing": true
+      }
+    ],
+    "count": 3,
+    "total_count": 124,
+    "offset": 0,
+    "has_more": true,
+    "needs_clarification": false,
+    "clarification_options": []
+  },
+  "error": null,
+  "effects_applied": [],
+  "metadata": {
+    "thread_count": 5,
+    "total_count": 124,
+    "filters_applied": false,
+    "execution_time_ms": 1288
+  },
+  "timestamp": "2026-11-13T12:06:10.404674"
+}
