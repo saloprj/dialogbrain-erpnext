@@ -23,7 +23,10 @@ frappe.pages["dialogbrain-inbox"].on_page_show = function (wrapper) {
 	if (!state || !state.mounted || !frappe.dialogbrain.selectConversation) return;
 	// the URL is the source of truth: ?conversation=<name> selects it, no param clears it
 	const conversation = frappe.utils.get_query_params().conversation || null;
-	frappe.dialogbrain.selectConversation(conversation, { updateUrl: false });
+	Promise.resolve(frappe.dialogbrain.selectConversation(conversation, { updateUrl: false })).then(() => {
+		// back on the inbox: what arrived while another desk page was shown is read now
+		if (frappe.dialogbrain.markSelectedReadIfUnread) frappe.dialogbrain.markSelectedReadIfUnread();
+	});
 };
 
 // Menu toggle for the new-message sound (stored per browser in localStorage, see the desk bundle).

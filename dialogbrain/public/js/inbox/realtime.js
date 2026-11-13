@@ -4,8 +4,10 @@
 //
 //   dialogbrain:conversation      -> that list row + counters; the open one: header (+ card
 //                                    when its party/contact changed, notes on a notes change)
-//   dialogbrain:message / _updated -> open conversation: fetch by name and merge (an
-//                                    optimistic row is replaced by client_ref); else the row
+//   dialogbrain:message / _updated -> the list row; the open conversation also fetches by
+//                                    name and merges (an optimistic row is replaced by
+//                                    client_ref). An inbound one is marked read only while
+//                                    the inbox route is current, visible and focused.
 //   dialogbrain:message_removed   -> drop the row (and remember the name for a while so an
 //                                    in-flight fetch cannot bring it back); the list row
 //   dialogbrain:draft             -> drafts of the open conversation
@@ -25,6 +27,8 @@ import {
 	loadDrafts,
 	loadCounters,
 	patchRow,
+	inboxActive,
+	markSelectedReadIfUnread,
 } from "./store.js";
 
 const DEBOUNCE_MS = 300;
@@ -44,7 +48,6 @@ function debounced(key, fn) {
 }
 
 const isOpen = (conv) => !!conv && conv === store.selected;
-const pageVisible = () => document.visibilityState === "visible";
 
 // --- list rows: one batch across conversations --------------------------------------
 
@@ -80,7 +83,9 @@ async function flush(conv) {
 	if (!p || !isOpen(conv)) return;
 	if (p.messages.size) await refreshMessages(conv, Array.from(p.messages));
 	if (p.open && isOpen(conv)) await refreshOpen(conv, p.notes);
-	if (p.markRead && isOpen(conv) && pageVisible()) {
+	// read only while the manager is actually looking at the inbox (route + visible + focus);
+	// otherwise it stays unread and on_page_show / window focus marks it read
+	if (p.markRead && isOpen(conv) && inboxActive()) {
 		try {
 			patchRow(await api.markRead(conv));
 		} catch (e) {
@@ -157,8 +162,14 @@ const HANDLERS = {
 /** Subscribe; returns the unsubscribe function (call it when the page is destroyed). */
 export function subscribe() {
 	for (const [event, fn] of Object.entries(HANDLERS)) frappe.realtime.on(event, fn);
+	const onFocus = () => markSelectedReadIfUnread();
+	const onVisibility = () => document.visibilityState === "visible" && markSelectedReadIfUnread();
+	window.addEventListener("focus", onFocus);
+	document.addEventListener("visibilitychange", onVisibility);
 	return function unsubscribe() {
 		for (const [event, fn] of Object.entries(HANDLERS)) frappe.realtime.off(event, fn);
+		window.removeEventListener("focus", onFocus);
+		document.removeEventListener("visibilitychange", onVisibility);
 		for (const t of timers.values()) clearTimeout(t.timer);
 		timers.clear();
 		pending.clear();

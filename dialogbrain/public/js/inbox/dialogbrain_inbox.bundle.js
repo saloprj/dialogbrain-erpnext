@@ -1,6 +1,6 @@
 import { createApp } from "vue";
 import App from "./App.vue";
-import { select } from "./store.js";
+import { select, markSelectedReadIfUnread } from "./store.js";
 
 frappe.provide("frappe.dialogbrain");
 
@@ -11,3 +11,4 @@ frappe.dialogbrain.mountInbox = function (el, opts = {}) {
 	return app;
 };
 frappe.dialogbrain.selectConversation = select;
+frappe.dialogbrain.markSelectedReadIfUnread = markSelectedReadIfUnread;

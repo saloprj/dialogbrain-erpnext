@@ -200,6 +200,46 @@ export async function select(name, { updateUrl = true } = {}) {
 		.catch(() => {});
 }
 
+/** The manager is looking at the inbox: its route is the current desk route (the page and
+ * the Vue app persist across routes, e.g. after opening a Sales Order from the card), the
+ * tab is visible and the window has focus. Only then is a new inbound message "read". */
+export function inboxActive() {
+	let route = [];
+	try {
+		route = frappe.get_route() || [];
+	} catch (e) {
+		// no router yet
+	}
+	return (
+		route[0] === "dialogbrain-inbox" &&
+		document.visibilityState === "visible" &&
+		document.hasFocus()
+	);
+}
+
+let markingRead = null;
+
+/** On page show / window focus: mark the open conversation read if it has unread. */
+export async function markSelectedReadIfUnread() {
+	const name = store.selected;
+	if (!name || !inboxActive() || markingRead === name) return;
+	const row = store.rows.find((r) => r.name === name);
+	const unread = Math.max(
+		(row && row.unread_count) || 0,
+		(store.conversation && store.conversation.name === name && store.conversation.unread_count) || 0,
+	);
+	if (unread <= 0) return;
+	markingRead = name;
+	try {
+		patchRow(await api.markRead(name));
+		loadCounters();
+	} catch (e) {
+		// shown by Frappe
+	} finally {
+		markingRead = null;
+	}
+}
+
 export async function refreshConversation() {
 	const name = store.selected;
 	if (!name) return;
