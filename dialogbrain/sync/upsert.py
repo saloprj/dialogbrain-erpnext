@@ -87,6 +87,19 @@ def _preview(value):
 	return plain_text(value)[:PREVIEW_LENGTH]
 
 
+def rollback_to(save_point: str) -> None:
+	"""Roll back to ``save_point``; if the database already ended the transaction (a
+	deadlock or lock-wait timeout rolls back everything, savepoints included), roll back
+	the rest so the caller can go on with a clean transaction."""
+	try:
+		frappe.db.rollback(save_point=save_point)
+	except Exception:  # noqa: BLE001 - "SAVEPOINT ... does not exist"
+		frappe.db.rollback()
+
+
+RETRYABLE_DB_ERRORS = (frappe.QueryDeadlockError, frappe.QueryTimeoutError)
+
+
 def _insert(doc):
 	"""Insert; on a duplicate key return False and leave the transaction usable."""
 	save_point = "dialogbrain_ins_" + frappe.generate_hash(length=8)

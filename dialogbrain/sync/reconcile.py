@@ -59,7 +59,7 @@ from dialogbrain.sync.backfill import (
 )
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
-from dialogbrain.sync.upsert import _s, find_conversation, to_system_datetime
+from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
 RECONCILE_JOB_ID = "dialogbrain_reconcile"
@@ -168,7 +168,7 @@ class Pass:
 		try:
 			conversation, _ = import_thread(self.client, key, date_from, entry=entry, silent=False)
 		except Exception as exc:  # noqa: BLE001 - recorded per thread (R13)
-			frappe.db.rollback(save_point=save_point)
+			rollback_to(save_point)
 			frappe.log_error(title=f"DialogBrain reconcile: thread {key}")
 			self.fail(key, date_from, entry, exc)
 			return None

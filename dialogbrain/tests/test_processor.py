@@ -799,6 +799,25 @@ class TestProcessor(DialogBrainTestCase):
 		row = frappe.db.get_value("DB Webhook Log", log, ["status", "attempts"], as_dict=True)
 		self.assertEqual((row.status, row.attempts), ("processed", 2))
 
+	def test_process_delivery_deadlock_marks_failed(self):
+		"""A deadlock ends the whole transaction, so the savepoint is gone: the delivery is
+		still marked failed (retried) instead of the job crashing with the row queued."""
+		from dialogbrain.sync import processor
+
+		log = self._log(INBOUND)
+
+		def rollback(*args, save_point=None, **kwargs):
+			if save_point:
+				raise Exception("(1305, 'SAVEPOINT dialogbrain_delivery does not exist')")
+
+		with patch.object(processor, "process_event", side_effect=frappe.QueryDeadlockError("Deadlock")), patch.object(
+			frappe.db, "rollback", side_effect=rollback
+		):
+			processor.process_delivery(log_name=log)
+		row = frappe.db.get_value("DB Webhook Log", log, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("Deadlock", row.error)
+
 	def test_process_delivery_failure_rolls_back_partial_writes(self):
 		from dialogbrain.sync import processor
 

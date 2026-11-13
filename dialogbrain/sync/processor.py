@@ -17,6 +17,7 @@ from dialogbrain.sync.upsert import (
 	_s,
 	apply_message_counters,
 	find_conversation,
+	rollback_to,
 	thread_keys,
 	to_system_datetime,
 	upsert_channel,
@@ -76,11 +77,12 @@ def process_delivery(log_name: str) -> None:
 		body = body or {}
 		process_event(body.get("event") or log.event, body.get("data") or {})
 	except Exception:  # noqa: BLE001 - any failure marks the delivery failed for retry
-		frappe.db.rollback(save_point=save_point)
+		error = frappe.get_traceback()[-MAX_ERROR_LENGTH:]
+		rollback_to(save_point)
 		frappe.db.set_value(
 			"DB Webhook Log",
 			log_name,
-			{"status": "failed", "error": frappe.get_traceback()[-MAX_ERROR_LENGTH:]},
+			{"status": "failed", "error": error},
 			update_modified=False,
 		)
 		return

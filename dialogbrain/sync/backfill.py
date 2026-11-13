@@ -22,10 +22,12 @@ from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
 from dialogbrain.client import DialogBrainClient
 from dialogbrain.sync.upsert import (
+	RETRYABLE_DB_ERRORS,
 	_s,
 	_same_text,
 	apply_message_counters,
 	find_conversation,
+	rollback_to,
 	to_system_datetime,
 	upsert_channel,
 	upsert_conversation,
@@ -226,17 +228,23 @@ def run_backfill() -> None:
 		for entry, total in iter_threads(client, since):
 			thread_id = _s(entry.get("id")) or _s(entry.get("thread_id"))
 			save_point = "dialogbrain_backfill"
-			frappe.db.savepoint(save_point)
-			try:
-				known = find_conversation(thread_id, _s(entry.get("channel_ref")), _s(entry.get("channel_account_id")))
-				conversation, _ = import_thread(client, thread_id, since, entry=entry, silent=True)
-				if not known:
-					_seed_unread(conversation, entry)
-			except Exception as exc:  # noqa: BLE001 - one bad thread must not stop the load
-				frappe.db.rollback(save_point=save_point)
-				failures += 1
-				last_error = error_text(exc)
-				frappe.log_error(title=f"DialogBrain backfill: thread {thread_id}")
+			for attempt in (1, 2):  # a deadlock with the webhook processor: retry once
+				frappe.db.savepoint(save_point)
+				try:
+					known = find_conversation(
+						thread_id, _s(entry.get("channel_ref")), _s(entry.get("channel_account_id"))
+					)
+					conversation, _ = import_thread(client, thread_id, since, entry=entry, silent=True)
+					if not known:
+						_seed_unread(conversation, entry)
+					break
+				except Exception as exc:  # noqa: BLE001 - one bad thread must not stop the load
+					rollback_to(save_point)
+					if attempt == 1 and isinstance(exc, RETRYABLE_DB_ERRORS):
+						continue
+					failures += 1
+					last_error = error_text(exc)
+					frappe.log_error(title=f"DialogBrain backfill: thread {thread_id}")
 			done += 1
 			set_setting("backfill_status", f"running {done}/{total if total is not None else '?'}")
 			commit()

@@ -279,6 +279,35 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		self.assertEqual(last.last_message_preview, "a4")
 		self.assertEqual(self._get("backfill_status"), "done")
 
+	def test_backfill_survives_deadlock_that_ended_the_transaction(self):
+		"""Seen live: a deadlock with the webhook processor rolled back the whole
+		transaction, so ``rollback to savepoint`` itself failed and aborted the backfill.
+		The thread is retried once; the backfill goes on."""
+		from dialogbrain.sync import backfill
+
+		fake = self._backfill_fake()
+		real_import = backfill.import_thread
+		calls = []
+
+		def flaky(client, thread_id, *args, **kwargs):
+			calls.append(thread_id)
+			if calls.count(thread_id) == 1 and thread_id == "1001":
+				raise frappe.QueryDeadlockError("Deadlock found")
+			return real_import(client, thread_id, *args, **kwargs)
+
+		def rollback(*args, save_point=None, **kwargs):
+			if save_point:
+				raise Exception("(1305, 'SAVEPOINT dialogbrain_backfill does not exist')")
+			# a full rollback here would undo the test's own fixtures: nothing to undo
+
+		with patch.object(backfill, "import_thread", side_effect=flaky), patch.object(
+			frappe.db, "rollback", side_effect=rollback
+		):
+			self._run(backfill.run_backfill, fake)
+		self.assertEqual(calls.count("1001"), 2)
+		self.assertTrue(self._conv("1001"))
+		self.assertEqual(self._get("backfill_status"), "done")
+
 	def test_backfill_is_silent(self):
 		from dialogbrain.sync.backfill import run_backfill
 
