@@ -134,8 +134,9 @@ function onMessage(d) {
 
 function onMessageUpdated(d) {
 	if (!d || !d.conversation || !d.message) return;
+	// the row too: an edit of the last message changes the list preview
+	queueRow(d.conversation);
 	if (isOpen(d.conversation)) queueOpen(d.conversation, { message: d.message });
-	else queueRow(d.conversation);
 }
 
 function onMessageRemoved(d) {
