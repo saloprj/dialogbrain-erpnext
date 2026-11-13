@@ -26,3 +26,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  frontend:
+    volumes:
+      # D2: built bundles reach nginx directly (backend's assets/dialogbrain is a symlink
+      # into the app, which the frontend container does not have).
+      - ./dialogbrain_erpnext/dialogbrain/public:/home/frappe/frappe-bench/sites/assets/dialogbrain:ro
+      # D3: the stock template forces `Origin: <scheme>://${FRAPPE_SITE_NAME_HEADER}` on
+      # /socket.io while Host stays $host, so Frappe realtime rejects every connection
+      # with "Invalid origin". Same template without that line.
+      - ./dialogbrain_erpnext/dev/nginx/frappe.conf.template:/templates/nginx/frappe.conf.template:ro
