@@ -149,7 +149,9 @@ def link_party(conversation):
 
 
 def _check_write(conversation):
-	# Task 6 replaces this with assert_can_access.
+	from dialogbrain.permissions import assert_can_access
+
+	assert_can_access(conversation)
 	doc = frappe.get_doc("DB Conversation", conversation)
 	frappe.has_permission("DB Conversation", "write", doc=doc, throw=True)
 	return doc
