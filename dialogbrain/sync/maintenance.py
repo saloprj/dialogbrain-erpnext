@@ -16,3 +16,11 @@ def cleanup_webhook_log() -> None:
 		where received_at < %(cutoff)s or (received_at is null and creation < %(cutoff)s)""",
 		{"cutoff": cutoff},
 	)
+
+
+AGENT_CALL_LOG_RETENTION = timedelta(days=30)
+
+
+def cleanup_agent_call_log() -> None:
+	"""Delete DB Agent Call Log rows created more than 30 days ago."""
+	frappe.db.delete("DB Agent Call Log", {"creation": ["<", now_datetime() - AGENT_CALL_LOG_RETENTION]})

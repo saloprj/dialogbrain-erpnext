@@ -803,4 +803,10 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		from dialogbrain import hooks
 
 		self.assertEqual(hooks.scheduler_events["cron"]["* * * * *"], ["dialogbrain.sync.reconcile.tick"])
-		self.assertEqual(hooks.scheduler_events["daily"], ["dialogbrain.sync.maintenance.cleanup_webhook_log"])
+		self.assertEqual(
+			hooks.scheduler_events["daily"],
+			[
+				"dialogbrain.sync.maintenance.cleanup_webhook_log",
+				"dialogbrain.sync.maintenance.cleanup_agent_call_log",
+			],
+		)

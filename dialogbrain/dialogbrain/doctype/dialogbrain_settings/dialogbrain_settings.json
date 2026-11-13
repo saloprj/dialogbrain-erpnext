@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 23:00:00.000000",
+ "modified": "2026-11-14 00:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -26,7 +26,13 @@
   "reconcile_status",
   "reconcile_failures",
   "default_company",
-  "connected"
+  "connected",
+  "agent_section",
+  "allow_agent_writes",
+  "erpnext_agent_user",
+  "integration_id",
+  "agent_capabilities",
+  "thread_context_secret"
  ],
  "fields": [
   {
@@ -151,6 +157,44 @@
    "fieldname": "connected",
    "fieldtype": "Check",
    "label": "Connected",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_section",
+   "fieldtype": "Section Break",
+   "label": "AI Agent Tools",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "allow_agent_writes",
+   "fieldtype": "Check",
+   "label": "Allow Agent Writes",
+   "default": "0",
+   "description": "Let the DialogBrain AI agent create Leads and draft Sales Orders. Off: the write tools are refused by ERPNext."
+  },
+  {
+   "fieldname": "erpnext_agent_user",
+   "fieldtype": "Link",
+   "label": "ERPNext Agent User",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "integration_id",
+   "fieldtype": "Data",
+   "label": "Integration Id",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_capabilities",
+   "fieldtype": "Small Text",
+   "label": "Agent Capabilities",
+   "read_only": 1
+  },
+  {
+   "fieldname": "thread_context_secret",
+   "fieldtype": "Password",
+   "label": "Thread Context Secret",
    "read_only": 1
   }
  ],

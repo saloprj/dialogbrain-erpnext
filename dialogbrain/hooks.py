@@ -27,7 +27,10 @@ has_permission = {
 
 scheduler_events = {
 	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
-	"daily": ["dialogbrain.sync.maintenance.cleanup_webhook_log"],
+	"daily": [
+		"dialogbrain.sync.maintenance.cleanup_webhook_log",
+		"dialogbrain.sync.maintenance.cleanup_agent_call_log",
+	],
 }
 
 # Desk-wide: "Chats" unread badge, new-message sound, Customer / Lead "Chats" section.

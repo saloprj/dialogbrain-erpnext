@@ -52,6 +52,11 @@ SERVER_FIELDS = (
 	"oauth_client_id",
 	"oauth_redirect_uri",
 	"oauth_base_url",
+	# agent tools (Plan 3); allow_agent_writes is the admin's switch, not server-managed
+	"erpnext_agent_user",
+	"integration_id",
+	"thread_context_secret",
+	"agent_capabilities",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
