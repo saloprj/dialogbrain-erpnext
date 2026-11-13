@@ -264,6 +264,9 @@ def get_full_draft(draft: str) -> dict:
 		frappe.throw(_("Could not load the full draft text from DialogBrain. Try again later."))
 	if (data.get("status") or "pending") != "pending":
 		return _gone(row)
+	# Defence in depth (the draft id is workspace-scoped and comes from our own row): the
+	# check is skipped when the conversation knows only its thread_ref (no internal id to
+	# compare) or DialogBrain returns no thread_id.
 	thread = frappe.db.get_value("DB Conversation", row.conversation, "thread_id")
 	if thread and data.get("thread_id") is not None and str(data.get("thread_id")) != str(thread):
 		frappe.log_error(

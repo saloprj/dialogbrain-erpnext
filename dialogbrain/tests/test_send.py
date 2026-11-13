@@ -39,10 +39,18 @@ def _process_echo(**message_overrides):
 	process_event(ECHO["event"], data)
 
 
-def _mock_client(execute=None, upload_file=None):
+def _mock_client(execute=None, upload_file=None, echo=True):
+	"""``echo``: like DialogBrain with Part A1, the client reports the request_id it got
+	back (``last_request_id``); False = an older DialogBrain that ignores it."""
 	client = MagicMock()
+	client.last_request_id = None
 	if execute is not None:
-		client.execute.side_effect = execute
+
+		def run(*a, **k):
+			client.last_request_id = k.get("request_id") if echo else None
+			return execute(*a, **k)
+
+		client.execute.side_effect = run
 	if upload_file is not None:
 		client.upload_file.side_effect = upload_file
 	return client
@@ -707,16 +715,111 @@ class TestSend(DialogBrainTestCase):
 		client.execute.assert_not_called()
 		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
 
-	def test_failed_retry_starts_a_fresh_attempt(self):
-		self._caps(request_id=True)
-		name = self._send()["name"]
-		client = _mock_client(
-			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("thread not found", code="NOT_FOUND"))
+	def _offer_file(self):
+		return frappe.get_doc(
+			{"doctype": "File", "file_name": "offer.txt", "content": b"offer", "is_private": 0}
+		).insert(ignore_permissions=True).file_url
+
+	def _failing_client(self, upload_file=None):
+		return _mock_client(
+			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("thread not found", code="NOT_FOUND")),
+			upload_file=upload_file,
 		)
-		self._deliver(name, client)
+
+	def test_failed_retry_inside_window_resends_identical_params_and_request_id(self):
+		"""Fix round 1: a failed row (e.g. the R11 sweep's "not confirmed") may have been
+		sent after all; only the identical params hit DialogBrain's cache entry."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-f", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._failing_client(upload_file=lambda *a, **k: 4242))
 		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
 		self._retry(name)
+		self.assertEqual(self._send_state(name)["request_id"], "cref-f")
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-f",
+		)
+
+	def test_failed_retry_outside_window_rebuilds_params_with_a_new_request_id(self):
+		"""Past 23 h DialogBrain may have dropped the entry: the attempt is rebuilt (fresh
+		upload) under a NEW request_id, so a surviving old entry can never stand in for a
+		message whose params changed."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-old", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._failing_client(upload_file=lambda *a, **k: 4242))
+		self._age_attempt(name, first=timedelta(hours=24))
+		self._retry(name)
 		self.assertIsNone(self._send_state(name))
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_called_once()
+		args, kwargs = client.execute.call_args
+		self.assertEqual(args[1]["attachments"], [9999])
+		self.assertNotEqual(kwargs["request_id"], "cref-old")
+		self.assertTrue(kwargs["request_id"].startswith("cref-old"))
+
+	def test_failed_retry_without_capability_is_plan_1(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._failing_client())
+		self._caps(request_id=False)
+		self._retry(name)
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		self.assertEqual(client.execute.call_args.kwargs, {})
+
+	def test_ignored_request_id_clears_the_capability(self):
+		"""DialogBrain did not echo the request_id (e.g. rolled back): it does not dedupe,
+		so the capability is cleared and the row is never retried as unknown."""
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self._caps(request_id=True, agent_pause=True)
+		name = self._send()["name"]
+		with patch("frappe.log_error"):
+			self._deliver(name, _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), echo=False))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "sent")
+		self.assertTrue(self._send_state(name)["request_id_ignored"])
+		self.assertFalse(has_capability("request_id"))
+		self.assertTrue(has_capability("agent_pause"))
+		other = self._send(client_ref="cref-next")["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(other, client)
+		self.assertEqual(client.execute.call_args.kwargs, {})
+
+	def test_ignored_request_id_on_a_failure_is_not_reused(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		with patch("frappe.log_error"):
+			self._deliver(name, _mock_client(
+				execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("bad", code="x")), echo=False
+			))
+		self._caps(request_id=True)  # even if it comes back
+		self._retry(name)
+		self.assertIsNone(self._send_state(name))
+
+	def test_ambiguous_outcome_class_is_recorded(self):
+		self._caps(request_id=True)
+		cases = (
+			(DialogBrainTimeout("read timeout"), "timeout"),
+			(DialogBrainError("HTTP 504", status=504), "http_504"),
+			(DialogBrainError("HTTP 502", status=502), "http_502"),
+			(DialogBrainError("HTTP 500", status=500), "http_500"),
+			(RuntimeError("boom"), "crash"),
+		)
+		for i, (exc, outcome) in enumerate(cases):
+			name = self._send(client_ref=f"cref-o{i}")["name"]
+
+			def raise_(*a, _exc=exc, **k):
+				raise _exc
+
+			with patch("frappe.log_error"):
+				self._deliver(name, _mock_client(execute=raise_))
+			self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+			self.assertEqual(self._send_state(name)["outcome"], outcome)
 
 	def test_messages_say_when_unknown_can_be_retried(self):
 		from dialogbrain.api.conversations import get_messages

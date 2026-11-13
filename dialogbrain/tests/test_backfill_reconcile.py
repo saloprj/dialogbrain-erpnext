@@ -675,6 +675,26 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		# the quiet thread was read back to the date of the unconfirmed reply
 		self.assertTrue(any(p.get("date_from") for p in fake.history_calls("1001")))
 
+	def test_sweep_leaves_a_just_retried_reply_alone(self):
+		"""B4 fix round 1: a retried reply keeps its old sent_at; its last attempt (raw.send)
+		is what counts, so the sweep does not fail it while the retry may be in flight."""
+		import json
+
+		from dialogbrain.sync.reconcile import reconcile
+
+		quiet = [_hmsg(1, self.now - timedelta(days=5), "old")]
+		conv = self._store("1001", quiet)
+		retried = self._reply(conv, "Did this arrive?", 30)
+		old = self._reply(conv, "Old attempt", 30)
+		for name, attempt in ((retried, self.now - timedelta(minutes=1)), (old, self.now - timedelta(minutes=20))):
+			raw = {"send": {"request_id": name, "params": {}, "attempt_at": str(attempt),
+							"first_attempt_at": str(self.now - timedelta(minutes=30))}}
+			frappe.db.set_value("DB Message", name, "raw", json.dumps(raw))
+		fake = FakeDialogBrain([_entry("1001")], {"1001": quiet})
+		self._run(reconcile, fake)
+		self.assertEqual(frappe.db.get_value("DB Message", retried, "delivery_status"), "unknown")
+		self.assertEqual(frappe.db.get_value("DB Message", old, "delivery_status"), "failed")
+
 	def test_unconfirmed_reply_kept_when_sync_fails(self):
 		from dialogbrain.sync.reconcile import reconcile
 

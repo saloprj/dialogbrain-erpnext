@@ -723,3 +723,41 @@ class TestInboxApi(DialogBrainTestCase):
 		frappe.set_user(self.agent_a)
 		perms = api.get_conversation(self.a_open_mine)["permissions"]
 		self.assertEqual((perms["agent_pause"], perms["full_drafts"]), (True, False))
+
+	def test_agent_status_uses_a_short_timeout_and_a_10s_cache(self):
+		self._caps(agent_pause=True)
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+		frappe.set_user(self.agent_a)
+		state = {"paused": True, "paused_by": "operator", "paused_at": "2026-11-14T10:00:00+00:00"}
+		client, _, first = self._agent_call(api.agent_status, self.a_open_mine, result=state)
+		self.assertEqual(client.timeout, 5)
+		client2, _, second = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client2.execute.assert_not_called()
+		self.assertEqual(second, first)
+		# a take-over / give-back clears it
+		self._agent_call(api.give_back, self.a_open_mine, result={"paused": False})
+		client3, _, third = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client3.execute.assert_called_once()
+		self.assertFalse(third["paused"])
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+
+	def test_agent_status_errors_are_not_cached(self):
+		from dialogbrain.client import DialogBrainError
+
+		self._caps(agent_pause=True)
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+		frappe.set_user(self.agent_a)
+		self._agent_call(api.agent_status, self.a_open_mine, error=DialogBrainError("down"))
+		client, _, out = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client.execute.assert_called_once()
+		self.assertFalse(out["paused"])
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+
+	def test_agent_status_without_thread_is_an_error_result(self):
+		self._caps(agent_pause=True)
+		frappe.db.set_value("DB Conversation", self.a_open_mine, {"thread_id": None, "thread_ref": None})
+		frappe.set_user(self.agent_a)
+		client, _, out = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": True})
+		client.execute.assert_not_called()
+		self.assertTrue(out["supported"])
+		self.assertTrue(out["error"])

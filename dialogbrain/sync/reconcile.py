@@ -35,8 +35,9 @@ would hide them from the probe). A subscription deleted at DialogBrain (activate
 is forgotten (id/secret cleared, status "missing … run Reconnect") without failing the
 pass, so the cursor keeps moving; reconcile then polls until the admin reconnects.
 
-Unconfirmed replies (ruling R11): outgoing rows still ``unknown`` without ``db_id`` and older
-than 10 minutes are resolved by reading their thread from the reply's day (echo matching
+Unconfirmed replies (ruling R11): outgoing rows still ``unknown`` without ``db_id``, older
+than 10 minutes and whose last send attempt (``raw.send.attempt_at``, Plan 3 B4) is not
+under 10 minutes old, are resolved by reading their thread from the reply's day (echo matching
 completes a reply that did arrive); whatever is still unknown after that successful read is
 marked ``failed`` (conditional write) so the manager can check the chat and resend.
 """
@@ -62,7 +63,7 @@ from dialogbrain.sync.backfill import (
 )
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
-from dialogbrain.sync.sender import requeue_stale_replies
+from dialogbrain.sync.sender import last_attempt_at, requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
@@ -369,18 +370,40 @@ def _reconcile_thread(run, key, entry):
 # --- unconfirmed replies (R11) ----------------------------------------------------
 
 
+def _attempt_recent(raw, cutoff) -> bool:
+	"""B4: a retried reply keeps its old ``sent_at``; its last attempt (``raw.send``) may
+	still be in flight. Unreadable timestamps count as old."""
+	at = last_attempt_at(raw)
+	if not at:
+		return False
+	try:
+		return get_datetime(at) >= cutoff
+	except Exception:  # noqa: BLE001
+		return False
+
+
+def _unconfirmed(cutoff, conversation=None):
+	"""``unknown`` replies without ``db_id``, sent before ``cutoff`` and whose last
+	attempt is not recent: ``[(name, conversation, sent_at)]``."""
+	cond = " and conversation = %(conversation)s" if conversation else ""
+	rows = frappe.db.sql(
+		f"""
+		select name, conversation, sent_at, raw from `tabDB Message`
+		where direction = 'out' and delivery_status = 'unknown' and ifnull(db_id, '') = ''
+		  and sent_at < %(cutoff)s{cond}
+		""",
+		{"cutoff": cutoff, "conversation": conversation},
+	)
+	return [(n, c, t) for n, c, t, raw in rows if not _attempt_recent(raw, cutoff)]
+
+
 def _resolve_unconfirmed(run):
 	cutoff = now_datetime() - UNCONFIRMED_AFTER
-	rows = frappe.db.sql(
-		"""
-		select conversation, min(sent_at) from `tabDB Message`
-		where direction = 'out' and delivery_status = 'unknown' and ifnull(db_id, '') = ''
-		  and sent_at < %s
-		group by conversation
-		""",
-		cutoff,
-	)
-	for conversation, oldest in rows:
+	oldest_by_conv = {}
+	for _name, conversation, sent_at in _unconfirmed(cutoff):
+		if conversation not in oldest_by_conv or sent_at < oldest_by_conv[conversation]:
+			oldest_by_conv[conversation] = sent_at
+	for conversation, oldest in oldest_by_conv.items():
 		day = utc_day(oldest)
 		if conversation not in run.synced or run.synced[conversation] > day:
 			conv = frappe.db.get_value(
@@ -397,17 +420,7 @@ def _resolve_unconfirmed(run):
 
 
 def _fail_unconfirmed(conversation, cutoff):
-	names = frappe.get_all(
-		"DB Message",
-		filters={
-			"conversation": conversation,
-			"direction": "out",
-			"delivery_status": "unknown",
-			"db_id": ["is", "not set"],
-			"sent_at": ["<", cutoff],
-		},
-		pluck="name",
-	)
+	names = [name for name, _conv, _sent in _unconfirmed(cutoff, conversation)]
 	for name in names:
 		row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id"], as_dict=True, for_update=True)
 		if not row or row.delivery_status != "unknown" or row.db_id:

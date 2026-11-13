@@ -344,6 +344,19 @@ def has_capability(name: str) -> bool:
 	return isinstance(caps, dict) and caps.get(name) is True
 
 
+def clear_capability(name: str) -> None:
+	"""Turn one capability off until the next Connect (e.g. DialogBrain stopped echoing
+	``request_id``)."""
+	try:
+		caps = json.loads(frappe.db.get_single_value(SETTINGS, "agent_capabilities") or "{}")
+	except (TypeError, ValueError):
+		caps = {}
+	if not isinstance(caps, dict) or caps.get(name) is False:
+		return
+	caps[name] = False
+	frappe.db.set_single_value(SETTINGS, "agent_capabilities", json.dumps(caps, sort_keys=True))
+
+
 def capabilities(client, tools=None) -> dict:
 	"""``{request_id, thread_context, agent_pause, full_drafts}`` booleans."""
 	if tools is None:
