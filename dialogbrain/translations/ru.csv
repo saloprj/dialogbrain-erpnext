@@ -36,6 +36,7 @@ Agents could not be read from DialogBrain: {0},Не удалось прочит�
 All,Все,DialogBrain
 Allow Agent Writes,Разрешить запись агенту,
 Allowed Users,Разрешённые пользователи,
+Another agent trigger also answers this channel: Off here does not stop it,Этот канал обслуживает ещё один триггер агента: «Выключено» здесь его не останавливает,
 Answered,С ответом,
 Anyone,Любой,
 Api Key,Ключ API,

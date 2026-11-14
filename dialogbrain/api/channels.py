@@ -9,7 +9,6 @@ import re
 
 import frappe
 from frappe import _
-from frappe.utils import now_datetime
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.permissions import is_manager
@@ -101,19 +100,8 @@ def choose_agent(channel: str, trigger_id: str) -> dict:
 	chosen = next((c for c in found if c["exclusive"] and c["trigger_id"] == str(trigger_id)), None)
 	if not chosen:
 		frappe.throw(_("This agent trigger can not be chosen for this channel"))
-	frappe.db.set_value(
-		CHANNEL,
-		doc.name,
-		{
-			"agent_id": chosen["agent_id"],
-			"agent_name": chosen["agent_name"],
-			"agent_trigger_id": chosen["trigger_id"],
-			"agent_mode": chosen["mode"],
-			"agent_mode_status": "",
-			"agent_mode_synced_at": now_datetime(),
-		},
-		update_modified=False,
-	)
+	doc.agent_trigger_id = chosen["trigger_id"]  # bind it; the status says if another trigger answers too
+	agent_modes.store_decision(doc, found)
 	return _payload(doc.name, found)
 
 
@@ -144,9 +132,10 @@ def set_agent_mode(channel: str, mode: str) -> dict:
 	except DialogBrainError as exc:
 		frappe.log_error(title="DialogBrain agents.trigger_update failed", message=frappe.get_traceback())
 		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_reason(exc)))
-	frappe.db.set_value(
-		CHANNEL, doc.name, {"agent_mode": mode, "agent_mode_synced_at": now_datetime()}, update_modified=False
-	)
+	for c in found:
+		if c["trigger_id"] == bound:
+			c["mode"] = mode
+	agent_modes.store_decision(doc, found)  # the new mode, and the warning if another trigger answers
 	return _payload(doc.name, found)
 
 

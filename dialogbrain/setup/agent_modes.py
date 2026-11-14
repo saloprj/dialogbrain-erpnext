@@ -13,16 +13,38 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 
 CHANNEL = "DB Channel"
+SETTINGS = "DialogBrain Settings"
 TRIGGER_TYPE = "incoming_message"
-BOUND = ("agent_id", "agent_name", "agent_trigger_id")
 
 
 def _ids(trigger: dict) -> list:
 	conditions = trigger.get("conditions") or {}
 	return [str(i) for i in (conditions.get("channel_account_ids") or [])]
+
+
+def _types(trigger: dict) -> list:
+	conditions = trigger.get("conditions") or {}
+	types = conditions.get("channel_types") or []
+	return [str(t) for t in types] if isinstance(types, list) else []
+
+
+def _serves_type(types: list, channel_type) -> bool:
+	"""Whether a trigger limited to ``types`` (empty: no limit) can answer a channel of
+	``channel_type``. When unsure (unknown channel type, a related type such as
+	``telegram`` / ``telegram_bot``) it counts as serving: a false warning is harmless, a
+	missing one makes "Off" look like off when it is not."""
+	if not types or not channel_type:
+		return True
+	ct = str(channel_type)
+	return any(t == ct or ct.startswith(t + "_") or t.startswith(ct + "_") for t in types)
+
+
+def _another():
+	return _("Another agent trigger also answers this channel: Off here does not stop it")
 
 
 def mode_of(trigger: dict, agent: dict) -> str:
@@ -43,45 +65,70 @@ def candidates(client) -> dict:
 
 
 def _read(client) -> tuple:
-	"""``(candidates, failed_agent_ids)``. An ``agents.get`` that fails (a 5xx, an agent
-	deleted since the list) skips that agent only; ``permission_denied`` and a failing
-	``agents.list`` raise: nothing can be read."""
+	"""``(by_account, failed_agent_ids, general)``.
+
+	``by_account``: candidates of triggers that list channel account ids. ``general``:
+	``(channel_types, candidate)`` for each ENABLED trigger without channel ids (a catch-all,
+	or one limited only by ``channel_types``): it answers every channel of those types, is
+	never exclusive and never bound. An ``agents.get`` that fails (a 5xx, an agent deleted
+	since the list) or answers without a ``triggers`` list skips that agent only;
+	``permission_denied``, a failing ``agents.list`` and an ``agents.list`` answer that is not
+	``{"agents": [...]}`` raise: nothing can be read, nothing is rewritten."""
 	found = {}
 	failed = set()
-	for listed in (client.execute("agents.list", {}) or {}).get("agents") or []:
-		if listed.get("is_template") or listed.get("status") != "active":
+	general = []
+	answer = client.execute("agents.list", {})
+	if not isinstance(answer, dict) or not isinstance(answer.get("agents"), list):
+		raise DialogBrainError("unexpected answer to agents.list")
+	for listed in answer["agents"]:
+		if not isinstance(listed, dict) or listed.get("is_template") or listed.get("status") != "active":
 			continue
 		try:
-			agent = client.execute("agents.get", {"agent_id": listed.get("id")}) or {}
+			agent = client.execute("agents.get", {"agent_id": listed.get("id")})
 		except DialogBrainError as exc:
 			if exc.error_type == "permission_denied":
 				raise
 			failed.add(str(listed.get("id")))
 			continue
-		for trigger in agent.get("triggers") or []:
-			if trigger.get("trigger_type") != TRIGGER_TYPE:
+		if not isinstance(agent, dict) or not isinstance(agent.get("triggers"), list):
+			failed.add(str(listed.get("id")))
+			continue
+		for trigger in agent["triggers"]:
+			if not isinstance(trigger, dict) or trigger.get("trigger_type") != TRIGGER_TYPE:
 				continue
 			ids = _ids(trigger)
+
+			def candidate(exclusive, trigger=trigger):
+				return {
+					"agent_id": str(listed.get("id")),
+					"agent_name": listed.get("name") or agent.get("name"),
+					"trigger_id": str(trigger.get("id")),
+					"mode": mode_of(trigger, agent),
+					"exclusive": exclusive,
+				}
+
+			if not ids:
+				if trigger.get("enabled"):
+					general.append((_types(trigger), candidate(False)))
+				continue
 			for account_id in ids:
-				found.setdefault(account_id, []).append(
-					{
-						"agent_id": str(listed.get("id")),
-						"agent_name": listed.get("name") or agent.get("name"),
-						"trigger_id": str(trigger.get("id")),
-						"mode": mode_of(trigger, agent),
-						"exclusive": len(ids) == 1,
-					}
-				)
-	return found, failed
+				found.setdefault(account_id, []).append(candidate(len(ids) == 1))
+	return found, failed, general
+
+
+def _for_channel(found: dict, general: list, channel) -> list:
+	"""Every candidate that answers ``channel``: its own triggers, then the catch-alls."""
+	own = list(found.get(str(channel.account_id), []))
+	return own + [dict(c) for types, c in general if _serves_type(types, channel.get("channel_type"))]
 
 
 def read_channel(client, channel) -> tuple:
 	"""Live read for one channel: ``(found, unreadable)``. ``unreadable`` is True when the
 	agent the channel is bound to could not be read in this call (a 5xx, a deletion in
 	between): the caller must then write nothing for the channel, as ``sync`` does."""
-	found, failed = _read(client)
+	found, failed, general = _read(client)
 	unreadable = bool(channel.agent_id) and str(channel.agent_id) in failed
-	return found.get(str(channel.account_id), []), unreadable
+	return _for_channel(found, general, channel), unreadable
 
 
 def store_decision(channel, found: list) -> None:
@@ -111,12 +158,15 @@ def _decide(channel, found: list) -> dict:
 	if chosen is None and len(exclusive) == 1:
 		chosen = exclusive[0]
 	if chosen:
+		# another enabled trigger (exclusive, shared or catch-all) answers this channel too:
+		# switching the bound one is real, but "Off" here does not silence the channel
+		others = [c for c in found if c["trigger_id"] != chosen["trigger_id"] and c["mode"] != "off"]
 		return {
 			"agent_id": chosen["agent_id"],
 			"agent_name": chosen["agent_name"],
 			"agent_trigger_id": chosen["trigger_id"],
 			"agent_mode": chosen["mode"],
-			"agent_mode_status": "",
+			"agent_mode_status": _another() if others else "",
 		}
 	if exclusive:
 		status = _("Several agents answer this channel: choose one")
@@ -134,7 +184,7 @@ def sync(client=None) -> dict:
 	``agent_mode_status`` (bindings and modes stay as they are) and the error is raised."""
 	client = client or DialogBrainClient.from_settings()
 	try:
-		found, failed = _read(client)
+		found, failed, general = _read(client)
 	except DialogBrainError as exc:
 		frappe.db.sql(
 			"update `tabDB Channel` set agent_mode_status = %s", (_failure_text(exc)[:500],)
@@ -143,15 +193,16 @@ def sync(client=None) -> dict:
 	counts = {"linked": 0, "ambiguous": 0, "none": 0}
 	now = now_datetime()
 	channels = frappe.get_all(
-		CHANNEL, fields=["name", "account_id", "agent_id", "agent_trigger_id", "agent_mode"], limit_page_length=0
+		CHANNEL, fields=["name", "account_id", "channel_type", "agent_id", "agent_trigger_id"], limit_page_length=0
 	)
 	for channel in channels:
 		if channel.agent_id and str(channel.agent_id) in failed:
 			continue  # its agent could not be read this run: leave it as stored
-		values = _decide(channel, found.get(str(channel.account_id), []))
+		serving = _for_channel(found, general, channel)
+		values = _decide(channel, serving)
 		if values["agent_trigger_id"]:
 			counts["linked"] += 1
-		elif found.get(str(channel.account_id)):
+		elif serving:
 			counts["ambiguous"] += 1
 		else:
 			counts["none"] += 1
@@ -161,8 +212,10 @@ def sync(client=None) -> dict:
 
 
 def hourly() -> None:
-	"""Scheduler entry: a mode changed in DialogBrain shows up within the hour. A site
-	that is not connected raises in ``from_settings``: that is just another error here."""
+	"""Scheduler entry: a mode changed in DialogBrain shows up within the hour. A site that
+	is not connected is skipped (read typed: on v15 a Single's ``"0"`` is a truthy string)."""
+	if not compat.single_values(SETTINGS, ["connected"]).connected:
+		return
 	try:
 		sync()
 	except Exception:

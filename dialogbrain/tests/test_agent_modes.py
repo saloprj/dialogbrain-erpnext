@@ -14,6 +14,7 @@ from dialogbrain.tests.utils import DialogBrainTestCase
 SEVERAL = "Several agents answer this channel: choose one"
 SHARED = "The agent trigger also serves other channels: change it in DialogBrain"
 NOBODY = "No agent answers this channel in DialogBrain"
+ANOTHER = "Another agent trigger also answers this channel: Off here does not stop it"
 DENIED = "The DialogBrain key may not read agents: connect with a member, admin or owner key"
 
 
@@ -52,7 +53,8 @@ def _agents():
 			"triggers": [
 				_trigger(4, [104], "draft"),
 				_trigger(6, ["105", "106"], "auto"),
-				_trigger(7, None, "auto", conditions={}),
+				# filtered by channel type only, for a type no test channel has (they are telegram)
+				_trigger(7, None, "auto", conditions={"channel_types": ["email"]}),
 				_trigger(9, ["110"], "auto", kind="schedule"),
 			],
 		},
@@ -80,6 +82,8 @@ class FakeAgents:
 		self.calls = []
 		self.error = None
 		self.get_errors = {}
+		self.get_answers = {}
+		self.list_answer = None
 		self.fail = {}
 
 	def execute(self, tool, params):
@@ -88,6 +92,10 @@ class FakeAgents:
 			raise self.error
 		if tool == "agents.get" and params["agent_id"] in self.get_errors:
 			raise self.get_errors[params["agent_id"]]
+		if tool == "agents.get" and params["agent_id"] in self.get_answers:
+			return copy.deepcopy(self.get_answers[params["agent_id"]])
+		if tool == "agents.list" and self.list_answer is not None:
+			return copy.deepcopy(self.list_answer[0])
 		if tool == "agents.list":
 			rows = [
 				{
@@ -124,6 +132,12 @@ class _Base(DialogBrainTestCase):
 				{"doctype": "DB Channel", "account_id": str(n), "channel_type": "telegram", "title": f"Ch {n}"}
 			).insert(ignore_permissions=True)
 		self.fake = FakeAgents()
+
+	def catch_all(self, conditions=None, enabled=True, tid=30):
+		"""An incoming-message trigger of agent 11 without channel ids: it serves every channel."""
+		self.fake.agents[11]["triggers"].append(
+			_trigger(tid, None, "auto", enabled=enabled, conditions=conditions or {})
+		)
 
 	def row(self, account_id):
 		return frappe.db.get_value(
@@ -172,7 +186,8 @@ class TestAgentModes(_Base):
 		agent_modes.sync(self.fake)
 		row = self.row("104")
 		self.assertEqual((row.agent_trigger_id, row.agent_id, row.agent_mode), ("4", "11", "copilot"))
-		self.assertFalse(row.agent_mode_status)
+		# trigger 5 (agent 10) is enabled on 104 too: switching 4 off would not silence the channel
+		self.assertEqual(row.agent_mode_status, ANOTHER)
 
 	def test_a_bound_trigger_survives_and_its_mode_is_refreshed(self):
 		agent_modes.sync(self.fake)
@@ -266,6 +281,7 @@ class TestAgentModes(_Base):
 		self.assertEqual(self.row("102").agent_trigger_id, "2")
 
 	def test_hourly_swallows_errors_and_skips_a_disconnected_site(self):
+		frappe.db.set_single_value("DialogBrain Settings", "connected", 1)
 		with patch("dialogbrain.setup.agent_modes.DialogBrainClient.from_settings") as mk:
 			mk.side_effect = DialogBrainError("DialogBrain Settings: base URL and API key are required")
 			agent_modes.hourly()  # no raise
@@ -273,9 +289,115 @@ class TestAgentModes(_Base):
 			mk.return_value = self.fake
 			agent_modes.hourly()
 		self.assertEqual(self.row("102").agent_mode, "autopilot")
+		before = {n: self.row(n) for n in range(101, 111)}
 		self.fake.error = RuntimeError("boom")
-		with patch("dialogbrain.setup.agent_modes.DialogBrainClient.from_settings", return_value=self.fake):
+		with patch("dialogbrain.setup.agent_modes.DialogBrainClient.from_settings", return_value=self.fake), patch(
+			"dialogbrain.setup.agent_modes.frappe.log_error"
+		) as log:
 			agent_modes.hourly()  # no raise
+		log.assert_called_once()
+		self.assertEqual({n: self.row(n) for n in range(101, 111)}, before)
+
+	def test_hourly_does_nothing_on_a_site_that_is_not_connected(self):
+		before = {n: self.row(n) for n in range(101, 111)}
+		for stored in (0, "0", None):
+			frappe.db.set_single_value("DialogBrain Settings", "connected", stored)
+			with patch(
+				"dialogbrain.setup.agent_modes.DialogBrainClient.from_settings", return_value=self.fake
+			) as mk, patch("dialogbrain.setup.agent_modes.frappe.log_error") as log:
+				agent_modes.hourly()
+			mk.assert_not_called()
+			log.assert_not_called()
+		self.assertEqual(self.fake.calls, [])
+		self.assertEqual({n: self.row(n) for n in range(101, 111)}, before)
+
+	# --- I1: Off must mean off -----------------------------------------------------
+
+	def test_a_channel_only_a_catch_all_answers_is_shown_and_not_bound(self):
+		self.catch_all()
+		agent_modes.sync(self.fake)
+		row = self.row("107")
+		self.assertEqual((row.agent_mode, row.agent_mode_status), ("", SHARED))
+		self.assertFalse(row.agent_trigger_id or row.agent_id or row.agent_name)
+
+	def test_a_catch_all_filtered_by_this_channel_type_serves_it(self):
+		self.catch_all({"channel_types": ["telegram"]})
+		agent_modes.sync(self.fake)
+		self.assertEqual(self.row("107").agent_mode_status, SHARED)
+		self.assertEqual(self.row("101").agent_mode_status, ANOTHER)
+
+	def test_a_catch_all_for_another_channel_type_does_not_serve_it(self):
+		self.catch_all({"channel_types": ["whatsapp"]})
+		agent_modes.sync(self.fake)
+		self.assertEqual(self.row("107").agent_mode_status, NOBODY)
+		self.assertFalse(self.row("101").agent_mode_status)
+
+	def test_a_catch_all_serves_a_channel_of_unknown_type(self):
+		self.catch_all({"channel_types": ["whatsapp"]})
+		frappe.db.set_value("DB Channel", "107", "channel_type", "")
+		agent_modes.sync(self.fake)
+		self.assertEqual(self.row("107").agent_mode_status, SHARED)
+
+	def test_a_bound_exclusive_trigger_and_an_enabled_catch_all_warn(self):
+		self.catch_all()
+		agent_modes.sync(self.fake)
+		row = self.row("101")
+		self.assertEqual((row.agent_trigger_id, row.agent_id, row.agent_mode), ("1", "10", "copilot"))
+		self.assertEqual(row.agent_mode_status, ANOTHER)
+
+	def test_a_bound_exclusive_trigger_and_a_second_enabled_exclusive_warn(self):
+		frappe.db.set_value("DB Channel", "104", {"agent_id": "10", "agent_name": "Sales", "agent_trigger_id": "5"})
+		agent_modes.sync(self.fake)
+		row = self.row("104")
+		self.assertEqual((row.agent_trigger_id, row.agent_mode, row.agent_mode_status), ("5", "autopilot", ANOTHER))
+
+	def test_a_bound_exclusive_trigger_and_an_enabled_shared_trigger_warn(self):
+		self.fake.agents[11]["triggers"][1]["conditions"]["channel_account_ids"] = ["105", "106", "101"]
+		agent_modes.sync(self.fake)
+		row = self.row("101")
+		self.assertEqual((row.agent_trigger_id, row.agent_mode_status), ("1", ANOTHER))
+
+	def test_a_disabled_other_trigger_does_not_warn(self):
+		self.catch_all(enabled=False)
+		self.fake.agents[10]["triggers"][3]["enabled"] = False  # trigger 5 on 104
+		self.fake.agents[11]["triggers"][1]["enabled"] = False  # shared trigger 6
+		self.fake.agents[11]["triggers"][1]["conditions"]["channel_account_ids"] = ["105", "101"]
+		frappe.db.set_value("DB Channel", "104", {"agent_id": "11", "agent_name": "Support", "agent_trigger_id": "4"})
+		agent_modes.sync(self.fake)
+		for account_id, trigger in (("101", "1"), ("104", "4")):
+			row = self.row(account_id)
+			self.assertEqual(row.agent_trigger_id, trigger)
+			self.assertFalse(row.agent_mode_status)
+		self.assertEqual(self.row("107").agent_mode_status, NOBODY)
+
+	# --- I4: an unexpected answer rewrites nothing ---------------------------------
+
+	def test_an_unexpected_agents_list_answer_rewrites_nothing(self):
+		agent_modes.sync(self.fake)
+		before = {n: (self.row(n).agent_trigger_id, self.row(n).agent_mode) for n in range(101, 111)}
+		for answer in (None, {}, {"items": []}, {"agents": None}, {"agents": {"1": {}}}, []):
+			self.fake.list_answer = (answer,)
+			with self.assertRaises(DialogBrainError):
+				agent_modes.sync(self.fake)
+			after = {n: (self.row(n).agent_trigger_id, self.row(n).agent_mode) for n in range(101, 111)}
+			self.assertEqual(after, before, answer)
+			self.assertIn("unexpected answer", self.row("101").agent_mode_status)
+
+	def test_an_empty_agents_list_is_a_real_answer(self):
+		agent_modes.sync(self.fake)
+		self.fake.list_answer = ({"agents": []},)
+		agent_modes.sync(self.fake)
+		row = self.row("101")
+		self.assertEqual((row.agent_mode, row.agent_mode_status), ("", NOBODY))
+		self.assertFalse(row.agent_trigger_id)
+
+	def test_an_agents_get_answer_without_triggers_leaves_its_channels(self):
+		agent_modes.sync(self.fake)
+		stored = {n: self.row(n) for n in ("101", "102", "103")}
+		for answer in (None, {}, {"id": 10, "name": "Sales", "triggers": None}, {"id": 10, "triggers": "x"}):
+			self.fake.get_answers[10] = answer
+			agent_modes.sync(self.fake)
+			self.assertEqual({n: self.row(n) for n in ("101", "102", "103")}, stored, answer)
 
 
 class _FailingList(FakeDialogBrain):
@@ -467,7 +589,34 @@ class TestChangeMode(_Base):
 		)
 		row = self.row("104")
 		self.assertEqual((row.agent_trigger_id, row.agent_id, row.agent_mode), ("5", "10", "autopilot"))
-		self.assertFalse(row.agent_mode_status)
+		# trigger 4 (Support) is still enabled on 104: the binding warns about it
+		self.assertEqual(row.agent_mode_status, ANOTHER)
+		self.assertEqual(result["status"], ANOTHER)
+
+	def test_a_bound_trigger_is_switched_when_another_trigger_also_answers(self):
+		from dialogbrain.api import channels
+
+		self.catch_all()
+		result = channels.set_agent_mode("101", "off")
+		self.assertEqual(self.updates(), [("agents.trigger_update", {"trigger_id": 1, "agent_id": 10, "enabled": False})])
+		row = self.row("101")
+		self.assertEqual((row.agent_trigger_id, row.agent_mode, row.agent_mode_status), ("1", "off", ANOTHER))
+		self.assertEqual((result["mode"], result["status"]), ("off", ANOTHER))
+		self.assertEqual([c["trigger_id"] for c in result["choices"]], ["1"])
+
+	def test_a_catch_all_can_not_be_chosen_or_switched(self):
+		from dialogbrain.api import channels
+
+		self.catch_all()
+		channels.agent_options("107")
+		before = self.row("107")
+		self.assertEqual((before.agent_mode_status, before.agent_trigger_id), (SHARED, None))
+		with self.assertRaises(frappe.ValidationError):
+			channels.choose_agent("107", "30")
+		with self.assertRaises(frappe.ValidationError):
+			channels.set_agent_mode("107", "off")
+		self.assertEqual(self.updates(), [])
+		self.assertEqual(self.row("107"), before)
 
 	def test_agent_options_reads_live_and_refresh_returns_counts(self):
 		from dialogbrain.api import channels
