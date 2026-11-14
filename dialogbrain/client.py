@@ -120,9 +120,14 @@ class DialogBrainClient:
 		if request_id is not None:
 			body["request_id"] = request_id
 		self.last_request_id = None
+		# True once a response body was read (success or tool error): only then does a
+		# missing request_id echo mean DialogBrain ignored it. A connection error, timeout
+		# or HTTP error status leaves it False.
+		self.last_response_parsed = False
 		payload = self._json(self._request("POST", f"/api/tools/{tool_id}/execute", json=body))
 		if not isinstance(payload, dict):
 			raise DialogBrainError("Unexpected DialogBrain response shape")
+		self.last_response_parsed = True
 		echoed = payload.get("request_id")
 		self.last_request_id = echoed if isinstance(echoed, str) else None
 		if payload.get("requires_approval"):

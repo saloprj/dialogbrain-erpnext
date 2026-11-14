@@ -63,7 +63,7 @@ from dialogbrain.sync.backfill import (
 )
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
-from dialogbrain.sync.sender import last_attempt_at, requeue_stale_replies
+from dialogbrain.sync.sender import UNCONFIRMED_ERROR, last_attempt_at, requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
@@ -78,7 +78,6 @@ STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
 MAX_THREAD_FAILURES = 5
 STATUS_TEXT_LENGTH = 1000
-UNCONFIRMED_ERROR = "Not confirmed by DialogBrain — check the chat before resending"
 WEBHOOK_MISSING_STATUS = "missing: the DialogBrain webhook was deleted — run Reconnect"
 SETTINGS_FIELDS = (
 	"connected",
@@ -422,8 +421,12 @@ def _resolve_unconfirmed(run):
 def _fail_unconfirmed(conversation, cutoff):
 	names = [name for name, _conv, _sent in _unconfirmed(cutoff, conversation)]
 	for name in names:
-		row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id"], as_dict=True, for_update=True)
+		row = frappe.db.get_value(
+			"DB Message", name, ["delivery_status", "db_id", "raw"], as_dict=True, for_update=True
+		)
 		if not row or row.delivery_status != "unknown" or row.db_id:
 			continue  # the history read (echo matching) completed it meanwhile
+		if _attempt_recent(row.raw, cutoff):
+			continue  # claimed again (a retry) since it was selected: re-checked under the lock
 		frappe.db.set_value("DB Message", name, {"delivery_status": "failed", "error": UNCONFIRMED_ERROR})
 		publish(conversation, "message_updated", {"message": name})

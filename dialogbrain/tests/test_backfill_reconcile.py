@@ -695,6 +695,21 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		self.assertEqual(frappe.db.get_value("DB Message", retried, "delivery_status"), "unknown")
 		self.assertEqual(frappe.db.get_value("DB Message", old, "delivery_status"), "failed")
 
+	def test_fail_unconfirmed_rechecks_the_attempt_under_the_lock(self):
+		"""B4 fix round 2: a row selected as unconfirmed but claimed again before the lock
+		(fresh claimed_at) is left alone."""
+		import json
+
+		from dialogbrain.sync import reconcile as rec
+
+		conv = self._store("1001", [_hmsg(1, self.now - timedelta(days=5), "old")])
+		name = self._reply(conv, "Retried", 30)
+		frappe.db.set_value("DB Message", name, "raw", json.dumps({"claimed_at": str(self.now)}))
+		cutoff = self.now - timedelta(minutes=10)
+		with patch.object(rec, "_unconfirmed", return_value=[(name, conv, self.now - timedelta(minutes=30))]):
+			rec._fail_unconfirmed(conv, cutoff)
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+
 	def test_unconfirmed_reply_kept_when_sync_fails(self):
 		from dialogbrain.sync.reconcile import reconcile
 
