@@ -128,7 +128,6 @@ class TestReceive(DialogBrainTestCase):
 		enq.assert_not_called()
 
 	def test_receive_keeps_recent_skip_push_rows(self):
-		"""A call marker is a system event with ``skip_push`` and a current ``sent_at``."""
 		body = json.loads(self.body)
 		body["data"]["skip_push"] = True
 		body["data"]["message"]["sent_at"] = (now_datetime() - timedelta(hours=1)).isoformat()
@@ -136,6 +135,21 @@ class TestReceive(DialogBrainTestCase):
 			res = self._post(body=json.dumps(body).encode())
 		self.assertEqual(res, {"ok": True})
 		self.assertEqual(self._rows(), 1)
+
+	def test_receive_keeps_system_events_on_the_live_lane(self):
+		"""A call marker carries ``skip_push`` too (nobody wrote to us) but it is live: it
+		must not wait behind a backfill backlog on ``long``."""
+		body = json.loads(self.body)
+		body["data"]["skip_push"] = True
+		body["data"]["message"]["is_system_event"] = True
+		body["data"]["message"]["sent_at"] = (now_datetime() - timedelta(minutes=1)).isoformat()
+		frappe.db.after_commit.reset()
+		with patch("frappe.enqueue") as enq:
+			self._post(body=json.dumps(body).encode())
+			frappe.db.after_commit.run()
+		row = frappe.get_doc("DB Webhook Log", {"delivery_id": self.delivery_id})
+		self.assertEqual(row.lane, "short")
+		self.assertEqual(enq.call_args.kwargs["lane"], "short")
 
 	def test_receive_keeps_skip_push_rows_without_a_parsable_date(self):
 		body = json.loads(self.body)
@@ -148,12 +162,35 @@ class TestReceive(DialogBrainTestCase):
 
 	def test_kick_drain_survives_an_overloaded_queue(self):
 		"""The row is stored and committed; frappe.QueueOverloaded must not turn into a 503
-		(DialogBrain would retry 5 times). The drain catches the row later."""
+		(DialogBrain would retry 5 times). The drain catches the row later. One Error Log
+		per lane per window, not one per delivery of a burst."""
+		frappe.cache.delete_value("dialogbrain_drain_kick_error_short")
 		with patch("frappe.enqueue", side_effect=frappe.QueueOverloaded("full")), patch(
 			"frappe.log_error"
 		) as log_error:
 			webhook.kick_drain("short")  # does not raise
+			webhook.kick_drain("short")
+			webhook.kick_drain("short")
 		log_error.assert_called_once()
+		frappe.cache.delete_value("dialogbrain_drain_kick_error_short")
+
+	def test_kick_drain_skips_enqueue_while_the_drain_is_queued_or_running(self):
+		"""frappe.enqueue's own dedupe logs an error line per skipped kick; a burst is
+		thousands of kicks, so the check is done here first."""
+		with patch("dialogbrain.sync.processor.is_job_enqueued", return_value=True), patch(
+			"frappe.enqueue"
+		) as enq:
+			webhook.kick_drain("long")
+		enq.assert_not_called()
+
+	def test_kick_drain_gives_the_job_a_long_timeout(self):
+		"""RQ's queue default (300 s on short) would fire inside process_event and be
+		swallowed as a failed delivery; the drain is bounded by max_batches instead."""
+		with patch("dialogbrain.sync.processor.is_job_enqueued", return_value=False), patch(
+			"frappe.enqueue"
+		) as enq:
+			webhook.kick_drain("short")
+		self.assertGreaterEqual(enq.call_args.kwargs["timeout"], 3600)
 
 	def test_receive_rejects_bad_signature(self):
 		with patch("frappe.enqueue") as enq:

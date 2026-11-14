@@ -95,6 +95,27 @@ class TestDrain(DialogBrainTestCase):
 			drain("short")
 		self.assertEqual((self._status(bad), self._status(good)), ("failed", "processed"))
 
+	def test_drain_survives_a_delivery_that_raises(self):
+		"""process_delivery's own guard does not cover its FOR UPDATE reads (a lock wait
+		escapes); one such row must not kill the whole lane's job."""
+		bad = _log("short", 3, marker="bad")
+		good = _log("short", 1, marker="good")
+		from dialogbrain.sync import processor
+
+		real = processor.process_delivery
+
+		def flaky(name):
+			if name == bad:
+				raise frappe.QueryTimeoutError("lock wait")
+			return real(name)
+
+		with patch.object(processor, "process_delivery", side_effect=flaky), patch(
+			"dialogbrain.sync.processor.process_event"
+		), patch("frappe.log_error") as log_error:
+			processor.drain("short", max_batches=1)
+		self.assertEqual((self._status(bad), self._status(good)), ("queued", "processed"))
+		log_error.assert_called_once()
+
 	def test_drain_stops_after_max_batches(self):
 		"""A bounded job: the RQ timeout never kills it mid-row; the next kick continues."""
 		for i in range(4):

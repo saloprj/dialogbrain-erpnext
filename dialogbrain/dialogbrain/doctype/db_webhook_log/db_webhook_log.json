@@ -40,7 +40,6 @@
    "search_index": 1
   },
   {
-   "default": "short",
    "fieldname": "lane",
    "fieldtype": "Select",
    "label": "Lane",

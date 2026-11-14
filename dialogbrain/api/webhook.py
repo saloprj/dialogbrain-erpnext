@@ -56,12 +56,14 @@ def receive():
 	# ``skip_push`` is DialogBrain's "nobody wrote to us just now": channel-sync's backfill
 	# re-emits every imported history row this way (thousands per run), and system events
 	# (call markers) carry it too. History older than our own backfill window is not
-	# mirrored at all; the rest goes to ``long`` so live messages on ``short`` never wait.
+	# mirrored at all; the rest of the backfill goes to ``long`` so live traffic on
+	# ``short`` never waits behind it. A system event is live and stays on ``short``.
 	data = body.get("data") if isinstance(body.get("data"), dict) else {}
-	silent = data.get("skip_push") is True
-	if silent and _is_old_history(data, settings):
+	message = data.get("message") if isinstance(data.get("message"), dict) else {}
+	backfill = data.get("skip_push") is True and message.get("is_system_event") is not True
+	if backfill and _is_old_history(data, settings):
 		return {"ok": True, "dropped": "history"}
-	lane = "long" if silent else "short"
+	lane = "long" if backfill else "short"
 
 	log = frappe.get_doc(
 		{

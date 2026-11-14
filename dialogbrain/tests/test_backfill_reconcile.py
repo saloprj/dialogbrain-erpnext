@@ -792,7 +792,7 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		from dialogbrain.sync.reconcile import retry_webhook_logs
 
 		failed = self._log("failed", 1, 3)
-		failed_4 = self._log("failed", 4, 30)
+		failed_4 = self._log("failed", 4, 30, lane="long")
 		exhausted = self._log("failed", 5, 3)
 		stuck = self._log("queued", 0, 11)
 		stuck_long = self._log("queued", 0, 12, lane="long")
@@ -808,6 +808,9 @@ class TestBackfillReconcile(DialogBrainTestCase):
 			self.assertEqual(call.args[0], "dialogbrain.sync.processor.process_delivery")
 			self.assertTrue(call.kwargs["deduplicate"])
 			self.assertIn(name, call.kwargs["job_id"])
+		# a failed backfill row is retried on its own lane, never ahead of live traffic
+		self.assertEqual(per_row[failed].kwargs["queue"], "short")
+		self.assertEqual(per_row[failed_4].kwargs["queue"], "long")
 		drains = [c for c in enqueue.call_args_list if c.args[0] == "dialogbrain.sync.processor.drain"]
 		self.assertEqual(sorted(c.kwargs["lane"] for c in drains), ["long", "short"])
 		for c in drains:

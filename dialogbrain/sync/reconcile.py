@@ -124,23 +124,23 @@ def retry_webhook_logs() -> None:
 	queued row is processed; a kick is deduplicated while a drain runs, so the kick here
 	also closes the race between a drain's last empty select and a row committed just
 	after it (that row waits a minute, not ten)."""
-	names = frappe.db.sql(
+	rows = frappe.db.sql(
 		"""
-		select name from `tabDB Webhook Log`
+		select name, ifnull(`lane`, 'short') as lane from `tabDB Webhook Log`
 		where status = 'failed' and ifnull(attempts, 0) < %(max)s
 		order by received_at
 		limit 500
 		""",
 		{"max": MAX_ATTEMPTS},
-		pluck=True,
+		as_dict=True,
 	)
-	for name in names:
+	for row in rows:
 		frappe.enqueue(
 			PROCESS_JOB,
-			queue="short",
-			job_id=delivery_job_id(name),
+			queue=row.lane,  # a failed backfill row never jumps ahead of live traffic
+			job_id=delivery_job_id(row.name),
 			deduplicate=True,
-			log_name=name,
+			log_name=row.name,
 		)
 	lanes = frappe.db.sql(
 		"""
