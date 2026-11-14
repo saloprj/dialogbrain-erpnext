@@ -56,6 +56,8 @@ unless deliver itself settled it after a definite outcome (``raw.last_outcome`` 
 ``answered`` / ``not_sent``): such a failure is rebuilt at once under a new round id, since
 re-sending params DialogBrain rejected can't help. Only a sweep-failed (or connection-error)
 row reuses its stored attempt.
+Without the ``request_id`` capability (an older DialogBrain) there is no stored attempt: a
+retry after a connection error that did reach DialogBrain sends the reply a second time.
 Failures are never cached and the cache can be lost: a retry after a real failure sends
 again, as it should, and in the rare case of a lost cache entry it may send twice. Echo
 matching stays the second line of defence.

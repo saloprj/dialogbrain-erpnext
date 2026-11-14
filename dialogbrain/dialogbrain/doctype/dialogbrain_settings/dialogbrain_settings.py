@@ -42,10 +42,18 @@ class DialogBrainSettings(Document):
 			try:
 				apply_denied_tools(self)
 			except (DialogBrainError, frappe.ValidationError) as exc:
+				turning_on = frappe.utils.cint(self.allow_agent_writes)
+				if turning_on:
+					# ON is stored only once DialogBrain lets its agents call the write
+					# tools (as agent_integration.set_agent_writes does). OFF is always
+					# stored: ERPNext itself then refuses the writes.
+					self.allow_agent_writes = 0
 				frappe.msgprint(
-					frappe._("DialogBrain agents were not updated ({0}). Press Reconnect to retry.").format(
-						str(exc)[:300]
-					),
+					(
+						frappe._("Agent writes stay off: DialogBrain agents were not updated ({0}). Press Reconnect to retry.")
+						if turning_on
+						else frappe._("DialogBrain agents were not updated ({0}). Press Reconnect to retry.")
+					).format(str(exc)[:300]),
 					indicator="orange",
 				)
 

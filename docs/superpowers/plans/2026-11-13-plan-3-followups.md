@@ -43,7 +43,30 @@ Ruling R15p3 (breaker adjudication, deviates from "no second fix wave"): both re
 - B4: minor (deferred → final fix wave): M1 treat 2xx-non-JSON and 408/499/520-524 as non-definite (keep dedupe); test no_response reuses stored attempt after settle; M3 _store_send_state writes raw from claim-time snapshot (merge instead).
 - Final: minor (deferred): widened echo window can attach sent_by to the wrong same-text row; README "only definitely failed can be retried" imprecise; before_uninstall runs real DialogBrain calls on --dry-run; non-dict JSON classified no_response; base_url change orphans conversations from agent identification (by design; README line / re-stamp tool).
 
+## Review of PR #5382 and of this branch (2026-11-14)
+- DialogBrain now treats a REST call as an automation unless it says `as_operator`; the client sends it for `messages.send`, `threads.set_agent_paused` and `integrations.set_thread_context` (`client.OPERATOR_TOOLS`).
+- A retry that arrives while the first call with its request_id still runs is answered `request_in_progress`: the sender keeps the reply `unknown` and retries with the same id.
+- Stamping a never-stamped conversation with the current instance drops a verified party link to `auto_unverified` (a person confirms it again).
+- A form save cannot store "Allow agent writes" ON when DialogBrain was not updated.
+- `get_item` searches `%` and `_` literally.
+- Not changed (decisions): `get_item` answers unidentified chats with stock quantities; the signed context has no nonce, so `create_draft_order` can be replayed within 300 s by someone holding a full captured request (make it idempotent per conversation + client ref, or cache signatures for the window); without the `request_id` capability a retry after a connection error may send twice.
+
+## B6 live check (2026-11-14, dev stand, workspace 128, gateway run from the PR branch)
+Passed:
+- Connect: capabilities all detected, 6 tools registered, status ok.
+- Fresh livechat thread, temporary agent: price and stock of LAPTOP-14 from ERPNext; unlinked visitor refused (`unlinked` in DB Agent Call Log, signature verified, conversation resolved); after a manual link to the customer, order SAL-ORD-2026-00001 and invoice ACC-SINV-2026-00001 returned.
+- Take over → `paused_by: operator`; give back → not paused. A manager reply went out with its request_id and paused the agent (automatic pause).
+Found and fixed by the check:
+- `integrations.set_thread_context` needs `as_operator` over REST (ERPNext reported it as "needs an admin key").
+- DialogBrain's `add_endpoints` dropped `send_thread_context` when it rebuilt the config, so no call was signed (ERPNext logged `no_headers`). Fixed in PR #5382.
+Not done:
+- Browser check of the inbox buttons (the Playwright browser was in use). The endpoints behind them were exercised.
+- `agents.simulate_inbound` answers a paused thread with a warning (`thread_paused_by_human`) rather than staying silent, so "the agent keeps quiet while paused" was checked by state, not by a real inbound message.
+Dev stand notes:
+- `host.docker.internal` resolves to 10.200.0.1 here and DialogBrain's SSRF guard refuses 10/8 even for trusted hosts, so the integration cannot be registered at that address. The check used a temporary network alias (`erpnext-dev` on `dialogbrain_dialogbrain-network`, added to `SSRF_ALLOW_HTTP_HOSTS` of the temporary gateway). `dev/` should offer this as the documented way.
+- Connect attaches the integration to every agent of the workspace (31 on the dev workspace).
+
 ## DialogBrain-side follow-ups (after PR #5382)
-- SET NX in-flight marker for client-supplied request_id (concurrent duplicates both run).
+- Trace attribution for REST automation calls (a key id that does not make the caller an operator).
 - /approve should return error_type; ref resolution in signed context should prefer t.workspace_id; rollback after failed resolve.
 - Consent/agents: contact_id in message events; group sender names; consent Cancel redirect (from Plans 1b/2).

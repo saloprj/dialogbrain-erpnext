@@ -234,6 +234,12 @@ class TestAgentApi(DialogBrainTestCase):
 		for query in ("AGT-LAPTOP", "14 inch", "business"):
 			self.assertEqual([i["item_code"] for i in agent_api.get_item(query)["items"]], ["AGT-LAPTOP-14"], query)
 
+	def test_get_item_searches_wildcards_literally(self):
+		"""``%`` or ``_`` typed in a chat is text, not a pattern that lists the catalogue."""
+		self._as_agent()
+		for query in ("%", "_", "AGT_LAPTOP", "%laptop%"):
+			self.assertEqual(agent_api.get_item(query)["items"], [], query)
+
 	def test_get_item_skips_disabled_and_non_sales_items(self):
 		_item("AGT-OLD", "Agent old gadget", disabled=1)
 		_price("AGT-OLD", 10)

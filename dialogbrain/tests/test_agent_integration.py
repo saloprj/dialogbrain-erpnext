@@ -931,6 +931,53 @@ class TestInstanceBinding(_AgentIntegrationCase):
 		upsert_conversation({"id": "5501", "thread_id": "telegram:1"}, channel)
 		self.assertEqual(frappe.db.get_value("DB Conversation", name, "dialogbrain_instance"), self._instance())
 
+	def test_stamping_an_unstamped_row_does_not_keep_its_verified_customer_link(self):
+		"""A row never stamped (the site was disconnected while the migration ran) may come
+		from another DialogBrain server, where this thread id was someone else's chat. The
+		first sync that stamps it must not leave the agent able to hand out that customer's
+		orders: the link drops to unverified until a person confirms it again."""
+		from dialogbrain.sync.upsert import upsert_channel, upsert_conversation
+
+		self._connect(FakeDialogBrain())
+		channel = upsert_channel("acc-inst-2", "telegram")
+		for i, (source, expected) in enumerate(
+			(("manual", "auto_unverified"), ("auto_verified", "auto_unverified"), ("auto_unverified", "auto_unverified"))
+		):
+			thread = {"id": f"56{i}1", "thread_id": f"telegram:9{i}"}
+			name, _ = upsert_conversation(thread, channel)
+			frappe.db.set_value("DB Conversation", name, {"dialogbrain_instance": None, "link_source": source})
+			upsert_conversation(thread, channel)
+			row = frappe.db.get_value("DB Conversation", name, ["dialogbrain_instance", "link_source"], as_dict=True)
+			self.assertEqual((row.dialogbrain_instance, row.link_source), (self._instance(), expected), source)
+		# a row that already carries this instance keeps its link
+		thread = {"id": "5699", "thread_id": "telegram:99"}
+		name, _ = upsert_conversation(thread, channel)
+		frappe.db.set_value("DB Conversation", name, "link_source", "manual")
+		upsert_conversation(thread, channel)
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "link_source"), "manual")
+
+	def test_form_save_does_not_store_writes_on_when_dialogbrain_was_not_updated(self):
+		"""The toggle endpoint stores ON only after DialogBrain is updated; a plain form
+		save must not be a way around it. OFF is always stored."""
+		from dialogbrain.setup import agent_integration as mod
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		fake.fail["agents.list"] = DialogBrainError("DialogBrain HTTP 503", status=503)
+		with patch.object(mod, "_client", return_value=fake), patch("frappe.msgprint") as said:
+			doc = frappe.get_single(SETTINGS)
+			doc.allow_agent_writes = 1
+			doc.save()
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+		self.assertIn("Agent writes stay off", said.call_args[0][0])
+
+		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 1)
+		with patch.object(mod, "_client", return_value=fake), patch("frappe.msgprint"):
+			doc = frappe.get_single(SETTINGS)
+			doc.allow_agent_writes = 0
+			doc.save()
+		self.assertEqual(self._get("allow_agent_writes"), 0)
+
 	def test_patch_fills_existing_rows_only_when_connected(self):
 		from dialogbrain.patches.v0_1 import set_conversation_instance as patch_mod
 		from dialogbrain.sync.upsert import upsert_channel

@@ -270,7 +270,10 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
 		return name, False
 
-	fields = {"thread_id", "thread_ref", "channel", "phone", "email", "dialogbrain_instance", *values.keys()}
+	fields = {
+		"thread_id", "thread_ref", "channel", "phone", "email", "dialogbrain_instance", "link_source",
+		*values.keys(),
+	}
 	current = frappe.db.get_value("DB Conversation", name, sorted(fields), as_dict=True)
 	for field, value in contact_keys_from_ref(ref or current.thread_ref).items():
 		if field not in values and not current.get(field):
@@ -279,6 +282,14 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
 	if not current.dialogbrain_instance and (instance := current_instance()):
 		updates["dialogbrain_instance"] = instance
+		# A row that was never stamped (a site disconnected while the migration ran) may
+		# come from another DialogBrain server or workspace, where this thread id was
+		# someone else's chat. Stamping it must not carry a verified customer link over:
+		# the agent would hand that customer's orders to whoever writes in this thread.
+		from dialogbrain.thread_context import VERIFIED_LINKS
+
+		if current.link_source in VERIFIED_LINKS:
+			updates["link_source"] = "auto_unverified"
 	if internal and current.thread_id != internal:
 		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)
 	new_ref = ref if ref and not current.thread_ref else None

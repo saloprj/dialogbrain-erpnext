@@ -258,7 +258,8 @@ def _get_item(ctx, query, limit):
 	limit = min(max(cint(limit) or DEFAULT_LIMIT, 1), MAX_LIMIT)
 	if not query:
 		return {"items": []}, 0
-	like = f"%{query}%"
+	# the text is searched literally: "%" or "_" from a chat must not list the catalogue
+	like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 	rows = frappe.get_all(
 		"Item",
 		filters={"disabled": 0, "is_sales_item": 1, "has_variants": 0},
