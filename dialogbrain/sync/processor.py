@@ -17,6 +17,7 @@ from dialogbrain.sync.upsert import (
 	_insert,
 	_s,
 	apply_message_counters,
+	display_value,
 	find_conversation,
 	rollback_to,
 	thread_keys,
@@ -249,7 +250,7 @@ def _on_contact_updated(data):
 	contact_id = _s(data.get("contact_id"))
 	if not contact_id:
 		return
-	display_name = _s(data.get("display_name"))
+	display_name = display_value(_s(data.get("display_name")))
 	for name in frappe.get_all("DB Conversation", {"db_contact_id": contact_id}, pluck="name"):
 		if display_name:
 			frappe.db.set_value("DB Conversation", name, "contact_name", display_name)

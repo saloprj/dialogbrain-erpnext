@@ -192,6 +192,17 @@ def _plain(value):
 	return _strip_tags(html_lib.unescape(_strip_tags(value or ""))).strip()
 
 
+def _message_body(raw):
+	"""``(html, text)`` of a stored message. Text is stored raw (a manager's reply exactly
+	as typed): only text with real HTML (element tags or comments) goes through the
+	sanitiser; anything else -- ``Write to Ivan <ivan@example.com> & co`` -- is plain text,
+	and its ``html`` is that text escaped, so the bubble shows every character."""
+	text = _plain(raw)
+	if _TAG_RE.search(raw) or _COMMENT_RE.search(raw):
+		return sanitize_message_html(raw), text
+	return html_lib.escape(text, quote=False), text
+
+
 def _row(r):
 	r = dict(r)
 	r.pop("_sort_key", None)
@@ -427,6 +438,7 @@ def _format_messages(rows):
 	out = []
 	for r in rows:
 		raw = r["text"] or ""
+		html, text = _message_body(raw)
 		out.append(
 			{
 				"name": r["name"],
@@ -435,8 +447,8 @@ def _format_messages(rows):
 				"author_type": r["author_type"],
 				"sent_by": r["sent_by"],
 				"sent_by_name": r["sent_by_name"],
-				"html": sanitize_message_html(raw),
-				"text": _plain(raw),
+				"html": html,
+				"text": text,
 				"sent_at": r["sent_at"],
 				"delivery_status": r["delivery_status"],
 				"error": r["error"] if r["delivery_status"] == "failed" else None,

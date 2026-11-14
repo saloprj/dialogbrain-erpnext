@@ -126,6 +126,20 @@ def _insert(doc):
 		return False
 
 
+# Display names from the channel (thread titles, a person's name, a handle) are written
+# with ``frappe.db.set_value``, which skips Frappe's XSS filter, and desk views (form,
+# list, report) inject Data values as HTML: store what ``doc.save`` would have stored.
+DISPLAY_FIELDS = ("title", "contact_name", "handle")
+
+
+def display_value(value):
+	if isinstance(value, str) and ("<" in value or ">" in value):
+		from frappe.utils.html_utils import sanitize_html
+
+		return sanitize_html(value)
+	return value
+
+
 # --- channel ----------------------------------------------------------------
 
 
@@ -138,6 +152,7 @@ def upsert_channel(account_id: str, channel_type: str, title: "str | None" = Non
 		updates = {}
 		if channel_type and current.channel_type != channel_type:
 			updates["channel_type"] = channel_type
+		title = display_value(title)
 		if title and current.title != title:
 			updates["title"] = title
 		if updates:
@@ -237,7 +252,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	values = {"title": _s(thread.get("title"))}
 	for field in CONTACT_FIELDS:
 		values[field] = _s(thread.get(field))
-	values = {k: _fit(k, v) for k, v in values.items() if v}
+	values = {k: _fit(k, display_value(v) if k in DISPLAY_FIELDS else v) for k, v in values.items() if v}
 	values = {k: v for k, v in values.items() if v}
 
 	name = find_conversation(internal, ref, channel)
