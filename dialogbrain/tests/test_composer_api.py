@@ -143,9 +143,23 @@ class TestComposerApi(DialogBrainTestCase):
 		self.assertEqual(text, f"Hi Alice Contact, {fn} from {company}")
 		frappe.set_user("Administrator")
 		frappe.db.set_value("DB Conversation", self.conv_a, {"party_type": "Customer", "party": customer.name})
+		frappe.get_doc("User", self.agent_a).add_roles("Sales User")  # may read the Customer
 		frappe.set_user(self.agent_a)
 		text = api.list_quick_replies(self.conv_a)[0]["text"]
 		self.assertEqual(text, f"Hi Zed Corp, {fn} from {company}")
+
+	def test_quick_reply_customer_name_needs_party_read(self):
+		"""Ruling R10 on the card applies to quick replies too: without read access to the
+		linked Customer the placeholder is the chat's own contact name."""
+		customer = frappe.get_doc(
+			{"doctype": "Customer", "customer_name": "Secret Corp", "customer_type": "Individual",
+			 "customer_group": frappe.db.get_value("Customer Group", {"is_group": 0})}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value("DB Conversation", self.conv_a, {"party_type": "Customer", "party": customer.name})
+		_reply(self.agent_a, title="Hi", text="Hi {customer_name}")
+		frappe.set_user(self.agent_a)
+		self.assertFalse(frappe.has_permission("Customer", "read", doc=customer.name))
+		self.assertEqual(api.list_quick_replies(self.conv_a)[0]["text"], "Hi Alice Contact")
 
 	def test_quick_reply_company_filter(self):
 		c1 = _company("Comp Main Co", "CMC")
@@ -273,8 +287,40 @@ class TestComposerApi(DialogBrainTestCase):
 		with patch(CLIENT) as cls:
 			for t in ("", "   \n"):
 				with self.assertRaises(frappe.ValidationError):
-					api.approve_draft(d, t)
+					api.approve_draft(d, t, edited=1)
+			with self.assertRaises(frappe.ValidationError):
+				api.approve_draft(d, "   \n")  # blank text is never "not given"
 			cls.from_settings.assert_not_called()
+
+	def test_approve_as_is_form_encoded_empty_text(self):
+		"""The browser form-encodes ``text: null`` as ``text=`` (jQuery.param): the
+		"Approve" button must approve the draft as is, not fail on "empty text"."""
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		client = MagicMock()
+		client.execute.return_value = {"status": "sent"}
+		with patch(CLIENT) as cls, patch(PUBLISH):
+			cls.from_settings.return_value = client
+			# exactly what frappe.handler.execute_cmd does with the request's form_dict
+			out = frappe.call(
+				"dialogbrain.api.composer.approve_draft",
+				**{"cmd": "dialogbrain.api.composer.approve_draft", "draft": d, "text": ""},
+			)
+		client.execute.assert_called_once_with("agents.approve_draft", {"draft_id": 101})
+		self.assertEqual(out["status"], "approved")
+
+	def test_approve_edited_and_emptied_refused_form_encoded(self):
+		d = _draft(self.conv_a)
+		frappe.set_user(self.agent_a)
+		with patch(CLIENT) as cls:
+			for t in ("", "   \n"):
+				with self.assertRaises(frappe.ValidationError):
+					frappe.call(
+						"dialogbrain.api.composer.approve_draft",
+						**{"cmd": "x", "draft": d, "text": t, "edited": "1"},
+					)
+			cls.from_settings.assert_not_called()
+		self.assertEqual(frappe.db.get_value("DB Draft", d, "status"), "pending")
 
 	def test_approved_not_sent_reports_safe_message(self):
 		d = _draft(self.conv_a)

@@ -29,6 +29,7 @@ import re
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 from dialogbrain.api.conversations import is_draft_truncated, require_capability
 from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
@@ -86,7 +87,13 @@ def delete_note(note: str) -> dict:
 
 
 def _party_name(conv):
+	"""The linked party's title, only for a user who may read that party (Ruling R10,
+	as on the customer card); otherwise None and the chat's contact name is used."""
 	if not (conv.party_type and conv.party):
+		return None
+	if not frappe.db.exists(conv.party_type, conv.party) or not frappe.has_permission(
+		conv.party_type, "read", doc=conv.party
+	):
 		return None
 	meta = frappe.get_meta(conv.party_type)
 	field = meta.title_field or "name"
@@ -203,11 +210,20 @@ def _gone(row):
 
 
 @frappe.whitelist(methods=["POST"])
-def approve_draft(draft: str, text: "str | None" = None) -> dict:
+def approve_draft(draft: str, text: "str | None" = None, edited: "str | int | None" = None) -> dict:
 	"""Returns ``{"status": approved|superseded|unknown, "sent", "message"}``. Terminal
-	DialogBrain outcomes are results, not exceptions, so the local status change commits."""
+	DialogBrain outcomes are results, not exceptions, so the local status change commits.
+
+	``text``: the manager's edited text. A form-encoded request cannot carry ``null``
+	(``text: null`` arrives as ``text=``), so an empty string means "not given" (approve
+	as is) -- unless ``edited`` is set: the inbox sends it with every edited approve, and
+	an edit the manager emptied is refused."""
 	row = _pending_draft(draft)
 	params = {"draft_id": _draft_param(row)}
+	if text == "" and not cint(edited):
+		text = None
+	if cint(edited) and text is None:
+		text = ""
 	if text is not None and not text.strip():
 		frappe.throw(_("Draft text is empty."))
 	if text is not None and text != (row.text or ""):

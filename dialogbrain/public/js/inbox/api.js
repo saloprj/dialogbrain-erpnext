@@ -42,7 +42,14 @@ export const api = {
 	addNote: (conversation, text) => call(COMP + "add_note", { conversation, text }, "POST"),
 	deleteNote: (note) => call(COMP + "delete_note", { note }, "POST"),
 	listQuickReplies: (conversation) => call(COMP + "list_quick_replies", { conversation }),
-	approveDraft: (draft, text = null) => call(COMP + "approve_draft", { draft, text }, "POST"),
+	// Approve as is: no ``text`` at all (form encoding would turn null into ""). An edited
+	// approve also sends ``edited`` so the server refuses an edit that was emptied.
+	approveDraft: (draft, text = null) =>
+		call(
+			COMP + "approve_draft",
+			text === null || text === undefined ? { draft } : { draft, text, edited: 1 },
+			"POST"
+		),
 	rejectDraft: (draft) => call(COMP + "reject_draft", { draft }, "POST"),
 	getFullDraft: (draft) => call(COMP + "get_full_draft", { draft }, "POST"),
 
