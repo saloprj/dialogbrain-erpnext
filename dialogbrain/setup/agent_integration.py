@@ -71,7 +71,7 @@ from frappe import _
 from frappe.utils import cint, now_datetime
 
 from dialogbrain.agent_api import MAX_ORDER_LINES
-from dialogbrain.client import DialogBrainError
+from dialogbrain.client import DialogBrainError, DialogBrainTimeout
 
 SETTINGS = "DialogBrain Settings"
 ROLE = "System Manager"
@@ -302,6 +302,10 @@ def _is_admin_refusal(exc: DialogBrainError) -> bool:
 	)
 
 
+class _AuthUnconfirmed(Exception):
+	"""``integrations.set_auth`` timed out twice: DialogBrain may or may not hold the new key."""
+
+
 class WriteToolsUnknown(frappe.ValidationError):
 	"""The DialogBrain names of the write tools are not known, so they can't be denied."""
 
@@ -447,9 +451,24 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 
 	key_in_dialogbrain = False
 	if iid and "integrations.set_auth" in tools:
+		set_auth = {"integration_id": iid, "auth": auth}
 		try:
-			client.execute("integrations.set_auth", {"integration_id": iid, "auth": auth})
+			try:
+				client.execute("integrations.set_auth", set_auth)
+			except DialogBrainTimeout:
+				# DialogBrain may have stored the new key: rolling back to the old one could
+				# leave it holding a key ERPNext no longer accepts. Ask once more (F7).
+				try:
+					client.execute("integrations.set_auth", set_auth)
+				except DialogBrainError as retry_exc:
+					if "not_found" in str(retry_exc) or retry_exc.status == 404:
+						raise
+					raise _AuthUnconfirmed() from None
 			key_in_dialogbrain = True
+		except _AuthUnconfirmed:
+			# Keep the NEW key locally: whichever DialogBrain holds, Reconnect fixes it.
+			problems.append(_("auth update not confirmed — press Reconnect"))
+			key_in_dialogbrain = "unconfirmed"
 		except DialogBrainError as exc:
 			if "not_found" in str(exc) or exc.status == 404:
 				iid = None  # deleted in DialogBrain: create a new one

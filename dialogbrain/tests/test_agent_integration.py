@@ -554,6 +554,49 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 		self.assertEqual(fake.methods(iid), GENERIC | CUSTOMER)
 		self.assertEqual(set(fake.attached), {(5, iid), (6, iid)})
 
+	def test_set_auth_timeout_twice_keeps_the_new_key_and_says_so(self):
+		"""Final wave F7: a timeout may have stored the new key in DialogBrain: rolling back
+		to the old one could break the tools. Retry once; still no answer -> keep the NEW
+		key locally and report it."""
+		from dialogbrain.client import DialogBrainTimeout
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		_key, old_secret = self._agent_secret()
+		fake.fail["integrations.set_auth"] = DialogBrainTimeout("DialogBrain request timed out")
+		fake.calls.clear()
+		self._connect(fake)
+		self.assertEqual(len(fake.called("integrations.set_auth")), 2)
+		_key, secret = self._agent_secret()
+		self.assertNotEqual(secret, old_secret)
+		status = self._get("agent_tools_status")
+		self.assertIn("auth update not confirmed — press Reconnect", status)
+		self.assertNotIn("previous key", status)
+		self.assertNotIn(secret, status)
+		self.assertEqual(self._caps()["status"], "problems")
+
+	def test_set_auth_timeout_then_success_is_fine(self):
+		from dialogbrain.client import DialogBrainTimeout
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		real, attempts = fake.execute, []
+
+		def execute(tool_id, params, **kw):
+			if tool_id == "integrations.set_auth":
+				attempts.append(1)
+				if len(attempts) == 1:
+					raise DialogBrainTimeout("DialogBrain request timed out")
+			return real(tool_id, params, **kw)
+
+		fake.execute = execute
+		self._connect(fake)
+		self.assertEqual(len(attempts), 2)
+		key, secret = self._agent_secret()
+		self.assertEqual(fake.integrations[iid]["auth"]["headers"]["Authorization"], f"token {key}:{secret}")
+		self.assertEqual(self._caps()["status"], "ok")
+
 	def test_add_endpoints_auth_failure_keeps_the_previous_key(self):
 		fake = FakeDialogBrain(tools=REQUIRED | (REGISTRATION - {"integrations.set_auth"}) | PART_A)
 		self._connect(fake)
