@@ -67,6 +67,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mariadb-client
           npm install -g yarn
+          # the runner's client insists on TLS; the service container offers none
+          printf '[client]\nskip-ssl\n' > ~/.my.cnf
 
       - name: Configure MariaDB
         run: |
@@ -94,6 +96,9 @@ jobs:
             --mariadb-user-host-login-scope='%'
           bench --site test.localhost install-app erpnext dialogbrain
           bench build --app dialogbrain
+          # v16 reads translations from compiled catalogs (a full `bench build` makes them);
+          # the translation tests compare ours with Frappe's and ERPNext's
+          if bench compile-po-to-mo --help >/dev/null 2>&1; then bench compile-po-to-mo; fi
         env:
           CI: "Yes"
 
