@@ -205,8 +205,12 @@ def _norm_base(url) -> str:
 
 
 @frappe.whitelist(methods=["POST"])
-def start() -> dict:
-	"""Begin "Connect with DialogBrain": returns the DialogBrain consent URL to open."""
+def start(confirm_same_server: "str | int | None" = None) -> dict:
+	"""Begin "Connect with DialogBrain": returns the DialogBrain consent URL to open.
+
+	``confirm_same_server``: asked by the form before the flow starts (a changed address
+	while mirrored chats exist, ``connect.check_instance_change``); carried in the state
+	to the callback's Connect."""
 	from dialogbrain.setup import connect as conn
 
 	compat.only_for(conn.ROLE)
@@ -252,6 +256,7 @@ def start() -> dict:
 		"client_id": client_id,
 		"token_endpoint": meta["token_endpoint"],
 		"issuer": issuer,
+		"confirm_same_server": frappe.utils.cint(confirm_same_server),
 	}
 	frappe.cache().set_value(_state_key(state), entry, expires_in_sec=STATE_TTL)
 	return {"authorize_url": authorize_url(meta["authorization_endpoint"], client_id, redirect_uri, state, challenge)}
@@ -311,6 +316,21 @@ def _workspace_switch(doc, key) -> "str | None":
 	return _("This site is connected to {0}. Disconnect first to switch to {1}.").format(current, new)
 
 
+def _other_instance(conn, doc, key, confirm) -> "str | None":
+	"""Refusal text when this key would mix another DialogBrain's chats into the site
+	(``connect._check_same_server``), checked before the key is stored. No DialogBrain call
+	when the site holds no mirrored chats."""
+	if not frappe.db.sql("select name from `tabDB Conversation` limit 1"):
+		return None
+	workspace = DialogBrainClient(doc.base_url, key).execute("workspace.current", {}) or {}
+	try:
+		conn._check_same_server(doc, str(workspace.get("id") or "") or None, confirm)
+	except frappe.ValidationError as exc:
+		frappe.clear_messages()
+		return str(exc)
+	return None
+
+
 def _restore_key(conn, old_key) -> None:
 	doc = frappe.get_single(conn.SETTINGS)
 	doc.api_key = old_key
@@ -357,6 +377,10 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 			switch = _workspace_switch(doc, key)
 			if switch:
 				return _refuse(user, switch)
+		confirm = bool(entry.get("confirm_same_server"))
+		refusal = _other_instance(conn, doc, key, confirm)
+		if refusal:
+			return _refuse(user, refusal)  # before the key is stored: nothing is written
 		doc.api_key = key
 		filled = {}
 		if (doc.network_mode or "public") == "public" and not doc.public_site_url:
@@ -368,7 +392,7 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 		frappe.local.flags.commit = True
 		frappe.db.savepoint("dialogbrain_oauth_connect")
 		try:
-			res = conn._connect(doc)
+			res = conn._connect(doc, confirm_same_server=confirm)
 		except Exception:
 			frappe.db.rollback(save_point="dialogbrain_oauth_connect")
 			if was_connected and old_key:

@@ -497,6 +497,58 @@ class TestOAuthFlow(DialogBrainTestCase):
 		conn.assert_called_once()
 		self.assertTrue(oauth.pop_result(self.admin)["ok"])
 
+	# --- review F2: another DialogBrain must not merge into the mirrored chats -----------
+
+	def _foreign_chat(self):
+		frappe.set_user("Administrator")
+		for dt in ("DB Message", "DB Conversation"):
+			frappe.db.delete(dt)
+		before = frappe.db.get_value(SETTINGS, SETTINGS, ["dialogbrain_instance", "workspace_id"], as_dict=True)
+
+		def restore():
+			frappe.db.delete("DB Conversation", {"thread_id": "f2-oauth"})
+			frappe.db.set_single_value(SETTINGS, dict(before))
+			frappe.clear_document_cache(SETTINGS, SETTINGS)
+
+		self.addCleanup(restore)
+		frappe.get_doc(
+			{"doctype": "DB Conversation", "thread_id": "f2-oauth", "dialogbrain_instance": "0123456789abcdef"}
+		).insert(ignore_permissions=True)
+		frappe.db.set_single_value(SETTINGS, {"dialogbrain_instance": "0123456789abcdef", "workspace_id": "128"})
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		frappe.set_user(self.admin)
+
+	def test_start_carries_the_same_server_confirmation(self):
+		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(
+			oauth, "discover", return_value=dict(META)
+		), patch.object(oauth, "register_client", return_value="cid-1"):
+			out = oauth.start(confirm_same_server="1")
+		self.assertEqual(self._entry(self._state(out))["confirm_same_server"], 1)
+		self.assertEqual(self._entry(self._state(self._start()[0]))["confirm_same_server"], 0)
+
+	def test_callback_refuses_another_instance_before_storing_the_key(self):
+		self._foreign_chat()
+		state = self._state(self._start()[0])
+		_, ex, conn = self._callback(**self._ok_params(state))
+		ex.assert_called_once()
+		conn.assert_not_called()
+		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), OLD_KEY)
+		self.assertFalse(self._get("connected"))
+		result = oauth.pop_result(self.admin)
+		self.assertFalse(result["ok"])
+		self.assertIn("cannot be mixed into this site", result["message"])
+
+	def test_callback_with_confirmation_connects_as_the_same_server(self):
+		self._foreign_chat()
+		with patch("frappe.utils.get_url", _fake_get_url()), patch.object(
+			oauth, "discover", return_value=dict(META)
+		), patch.object(oauth, "register_client", return_value="cid-1"):
+			state = self._state(oauth.start(confirm_same_server=1))
+		_, _, conn = self._callback(**self._ok_params(state))
+		conn.assert_called_once()
+		self.assertEqual(conn.call_args.kwargs, {"confirm_same_server": True})
+		self.assertTrue(oauth.pop_result(self.admin)["ok"])
+
 	def test_callback_iss_mismatch_refused(self):
 		state = self._state(self._start()[0])
 		_, ex, conn = self._callback(**self._ok_params(state, iss="https://evil.example.com"))

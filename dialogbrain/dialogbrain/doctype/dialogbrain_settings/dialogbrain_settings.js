@@ -25,8 +25,15 @@ const dialogbrain_settings = {
 			this.show_connected(res);
 		};
 
+		const connect_with_key = () =>
+			this.save_first(frm, () =>
+				this.with_same_server((confirm) =>
+					this.call(frm, "connect", { confirm_same_server: confirm }, on_connected)
+				)
+			);
+
 		if (connected) {
-			frm.add_custom_button(__("Reconnect"), () => this.call(frm, "connect", {}, on_connected), group);
+			frm.add_custom_button(__("Reconnect"), connect_with_key, group);
 			frm.add_custom_button(__("Reconnect with DialogBrain"), () => this.oauth_start(frm), group);
 		} else {
 			frm.add_custom_button(__("Connect with DialogBrain"), () => this.oauth_start(frm));
@@ -37,7 +44,7 @@ const dialogbrain_settings = {
 					frm.fields_dict.api_key.$input && frm.fields_dict.api_key.$input.focus();
 					return;
 				}
-				this.call(frm, "connect", {}, on_connected);
+				connect_with_key();
 			});
 		}
 
@@ -165,7 +172,35 @@ const dialogbrain_settings = {
 
 	oauth_start(frm) {
 		// start() reads the saved settings (base URL): save edits first.
-		this.save_first(frm, () => this.oauth_start_call());
+		this.save_first(frm, () => this.with_same_server((confirm) => this.oauth_start_call(confirm)));
+	},
+
+	// The saved address would bind the site to another DialogBrain instance while it holds
+	// mirrored chats: only the admin knows whether it is the same server and workspace at a
+	// new address. Yes -> Connect with confirm_same_server = 1; No -> the server's refusal.
+	with_same_server(run) {
+		frappe.call({
+			method: `${DB_CONNECT}.check_instance_change`,
+			callback: (r) => {
+				const res = r.message || {};
+				if (!res.ask) {
+					run(0);
+					return;
+				}
+				frappe.confirm(
+					__(
+						"The DialogBrain address changed and this site holds mirrored chats. Is it the same DialogBrain server and workspace, now at a new address?"
+					),
+					() => run(1),
+					() =>
+						frappe.msgprint({
+							message: frappe.utils.escape_html(res.refusal || ""),
+							indicator: "red",
+							title: __("Another DialogBrain"),
+						})
+				);
+			},
+		});
 	},
 
 	save_first(frm, run) {
@@ -176,9 +211,10 @@ const dialogbrain_settings = {
 		}
 	},
 
-	oauth_start_call() {
+	oauth_start_call(confirm) {
 		frappe.call({
 			method: "dialogbrain.setup.oauth.start",
+			args: { confirm_same_server: confirm ? 1 : 0 },
 			freeze: true,
 			freeze_message: __("Talking to DialogBrain…"),
 			callback: (r) => {

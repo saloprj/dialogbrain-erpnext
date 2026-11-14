@@ -956,6 +956,96 @@ class TestInstanceBinding(_AgentIntegrationCase):
 		upsert_conversation(thread, channel)
 		self.assertEqual(frappe.db.get_value("DB Conversation", name, "link_source"), "manual")
 
+	# --- review F2: another DialogBrain server must not merge into the old rows --------
+
+	def _old_chat(self):
+		"""Connect to the first server and mirror one linked chat; then Disconnect and
+		point Settings at another address (what the admin does to switch servers)."""
+		from dialogbrain.sync.upsert import upsert_channel, upsert_conversation
+		from dialogbrain.tests.test_party_card import _customer
+
+		self._connect(FakeDialogBrain())
+		channel = upsert_channel("acc-f2", "telegram")
+		conv, _ = upsert_conversation({"id": "7301", "thread_id": "telegram:7301", "title": "Old Ivan"}, channel)
+		frappe.db.set_value("DB Conversation", conv, {
+			"party_type": "Customer", "party": _customer("F2 Customer"), "link_source": "manual"})
+		frappe.db.set_single_value(SETTINGS, {"connected": 0, "base_url": "https://api.new.example.com"})
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		return conv
+
+	def test_another_server_with_mirrored_chats_is_refused_and_nothing_is_written(self):
+		from dialogbrain.setup import connect as mod
+
+		conv = self._old_chat()
+		before = frappe.db.get_value(SETTINGS, SETTINGS, ["dialogbrain_instance", "integration_id", "webhook_id"],
+									 as_dict=True)
+		self.assertTrue(mod.check_instance_change()["ask"])
+		fake = FakeDialogBrain()
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._connect(fake)
+		self.assertIn("cannot be mixed into this site", str(cm.exception))
+		self.assertEqual([t for t, _p in fake.calls], ["workspace.current"])
+		self.assertEqual(self._get("connected"), 0)
+		after = frappe.db.get_value(SETTINGS, SETTINGS, ["dialogbrain_instance", "integration_id", "webhook_id"],
+									as_dict=True)
+		self.assertEqual(after, before)
+		row = frappe.db.get_value("DB Conversation", conv, ["dialogbrain_instance", "link_source"], as_dict=True)
+		self.assertEqual((row.dialogbrain_instance, row.link_source), (self._instance(), "manual"))
+
+	def test_the_same_server_at_a_new_address_reconnects_when_confirmed(self):
+		from dialogbrain.setup import connect as mod
+
+		conv = self._old_chat()
+		with patch.object(mod, "DialogBrainClient", return_value=FakeDialogBrain()), patch("frappe.enqueue"):
+			mod.connect(confirm_same_server="1")
+		new = self._instance("https://api.new.example.com")
+		self.assertEqual(self._get("dialogbrain_instance"), new)
+		self.assertEqual(self._get("connected"), 1)
+		row = frappe.db.get_value("DB Conversation", conv, ["dialogbrain_instance", "link_source"], as_dict=True)
+		# re-stamped, so it keeps matching; a verified link waits for a person (R13)
+		self.assertEqual((row.dialogbrain_instance, row.link_source), (new, "auto_unverified"))
+		self.assertFalse(mod.check_instance_change()["ask"])
+
+	def test_confirmation_does_not_cover_another_workspace(self):
+		from dialogbrain.setup import connect as mod
+
+		self._old_chat()
+		fake = FakeDialogBrain()
+		fake.workspace = {"id": 999, "name": "Other WS"}
+		with patch.object(mod, "DialogBrainClient", return_value=fake), patch("frappe.enqueue"):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				mod.connect(confirm_same_server=1)
+		self.assertIn("cannot be mixed into this site", str(cm.exception))
+		self.assertEqual(self._get("connected"), 0)
+
+	def test_reconnecting_the_same_server_needs_no_confirmation(self):
+		from dialogbrain.setup import connect as mod
+
+		conv = self._old_chat()
+		frappe.db.set_single_value(SETTINGS, "base_url", "https://API.example.com/")  # same, other spelling
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		self.assertFalse(mod.check_instance_change()["ask"])
+		self._connect(FakeDialogBrain())
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "link_source"), "manual")
+
+	def test_contact_update_reaches_only_the_connected_instance(self):
+		from dialogbrain.sync.processor import process_event
+		from dialogbrain.sync.upsert import upsert_channel, upsert_conversation
+
+		self._connect(FakeDialogBrain())
+		channel = upsert_channel("acc-f2c", "telegram")
+		ours, _ = upsert_conversation({"id": "7401", "thread_id": "telegram:7401"}, channel)
+		theirs, _ = upsert_conversation({"id": "7402", "thread_id": "telegram:7402"}, channel)
+		unstamped, _ = upsert_conversation({"id": "7403", "thread_id": "telegram:7403"}, channel)
+		for name in (ours, theirs, unstamped):
+			frappe.db.set_value("DB Conversation", name, {"db_contact_id": "88", "contact_name": "Before"})
+		frappe.db.set_value("DB Conversation", theirs, "dialogbrain_instance", "0123456789abcdef")
+		frappe.db.set_value("DB Conversation", unstamped, "dialogbrain_instance", None)
+		process_event("contact.updated", {"contact_id": 88, "display_name": "After"})
+		names = dict(frappe.get_all("DB Conversation", filters={"db_contact_id": "88"},
+									fields=["name", "contact_name"], as_list=True))
+		self.assertEqual(names, {ours: "After", theirs: "Before", unstamped: "Before"})
+
 	def test_form_save_does_not_store_writes_on_when_dialogbrain_was_not_updated(self):
 		"""The toggle endpoint stores ON only after DialogBrain is updated; a plain form
 		save must not be a way around it. OFF is always stored."""
@@ -1091,7 +1181,15 @@ class TestInstanceBinding(_AgentIntegrationCase):
 		second.integrations[int(old_iid)] = {  # its ids collide with the old instance's
 			"base_url": "https://someone-else.example.com", "name": "someone else's", "auth": {"theirs": 1}, "ops": {}, "thread_context": None}
 		second.next_id = int(old_iid) + 1
+		# review F2: while the old instance's chats are here, Connect refuses
+		with self.assertRaises(frappe.ValidationError):
+			self._connect(second)
+		self.assertEqual(self._get("integration_id"), old_iid)
+		# the admin deletes the mirrored chats, then connects
+		row = frappe.get_doc("DB Conversation", conv).as_dict()
+		frappe.db.delete("DB Conversation", conv)
 		self._connect(second)
+		frappe.get_doc(row).db_insert()  # a leftover of the old instance (e.g. a restored backup)
 
 		self.assertEqual(self._get("dialogbrain_instance"), self._instance("https://api.other.example.com"))
 		# nothing of the old registration was reused or even looked up

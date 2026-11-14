@@ -10,6 +10,7 @@ import json
 
 import frappe
 
+from dialogbrain.instance import current_instance
 from dialogbrain.party import link_party
 from dialogbrain.sync.notify import notify, publish
 from dialogbrain.sync.upsert import (
@@ -251,7 +252,14 @@ def _on_contact_updated(data):
 	if not contact_id:
 		return
 	display_name = display_value(_s(data.get("display_name")))
-	for name in frappe.get_all("DB Conversation", {"db_contact_id": contact_id}, pluck="name"):
+	# Contact ids are DialogBrain's: only rows of the connected instance are this contact
+	# (a never-stamped row may be another server's; it is stamped when sync touches it).
+	instance = current_instance()
+	for name in frappe.get_all(
+		"DB Conversation",
+		{"db_contact_id": contact_id, "dialogbrain_instance": instance or ["is", "not set"]},
+		pluck="name",
+	):
 		if display_name:
 			frappe.db.set_value("DB Conversation", name, "contact_name", display_name)
 		link_party(name)

@@ -122,8 +122,15 @@ Open **DialogBrain Settings** (`/app/dialogbrain-settings`). There are two ways 
      to another workspace, Disconnect first.
    - While the site is connected, the API key and the Base Url cannot be changed: press
      **Disconnect** first.
-   - Changing the DialogBrain address makes the existing chats unidentified for the AI
-     agent until they are re-linked (synced again from the new address).
+   - Changing the DialogBrain address while the site holds mirrored chats: Connect (either
+     way) first asks whether it is **the same DialogBrain server and workspace at a new
+     address**. *Yes*: the existing chats are moved to the new address and keep syncing;
+     their verified customer links become unverified, so the AI agent sees those
+     customers' data again only after a manager confirms the link (or the phone match
+     verifies it again). *No*, or a key of another workspace: Connect refuses and writes
+     nothing. Chats from a different DialogBrain server or workspace cannot be mixed into
+     one site (their thread ids collide with the old ones): use a new site, or delete the
+     mirrored chats (DB Conversation) first.
 2. **Connect with API key.** Expand the "Connect with API key" section, paste the base URL
    and a DialogBrain API key, save and press **Connect with API key**. Use this for
    `http` sites on a non-loopback host.
@@ -217,8 +224,10 @@ DialogBrain server has the "Safe send retries" capability. Both buttons need the
   agents: it also switches the integration back on for every agent.
 - **One ERPNext site per DialogBrain workspace.** A connected site reconnects only to the
   same workspace. A copy of the site (for example a restored backup at another address)
-  registers its own integration at Connect instead of taking over the original's; chats
-  synced from another DialogBrain server or workspace are never identified to the agent.
+  registers its own integration at Connect instead of taking over the original's. A site
+  never mixes chats of two DialogBrain servers or workspaces: Connect refuses while chats
+  of another one are mirrored (see "Connecting to DialogBrain"), and a leftover chat of
+  another one is never identified to the agent.
 - Draft Sales Orders created by the agent are inserted as **Administrator**: hooks and
   server scripts on Sales Order insert run as Administrator for them.
 - **Disconnect** switches the integration off for the agents and revokes the agent user's
