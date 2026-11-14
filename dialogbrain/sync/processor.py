@@ -188,18 +188,26 @@ def _on_message_deleted(data):
 
 	names = []
 	if conversation:
+		# Message ids (Telegram) are unique only within one chat: a known conversation
+		# is the whole scope, even when the deleted message was never mirrored.
 		names = frappe.get_all(
 			"DB Message", filters={"conversation": conversation, "message_id": ["in", ids]}, pluck="name"
 		)
-	if not names and channel:
-		names = frappe.get_all(
+	elif channel:
+		# Conversation unknown: an id counts only when exactly one row of this
+		# account carries it (otherwise it could be another chat's message).
+		rows = frappe.get_all(
 			"DB Message",
 			filters={
 				"message_id": ["in", ids],
 				"conversation": ["in", frappe.get_all("DB Conversation", {"channel": channel}, pluck="name") or [""]],
 			},
-			pluck="name",
+			fields=["name", "message_id"],
 		)
+		by_id = {}
+		for row in rows:
+			by_id.setdefault(row.message_id, []).append(row.name)
+		names = [found[0] for found in by_id.values() if len(found) == 1]
 	for name in names:
 		frappe.db.set_value("DB Message", name, "delivery_status", "deleted")
 		publish(frappe.db.get_value("DB Message", name, "conversation"), "message_updated", {"message": name})

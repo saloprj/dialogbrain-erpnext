@@ -666,6 +666,44 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(_msg("9000002").delivery_status, "deleted")
 		self.assertNotEqual(_msg("9000099").delivery_status, "deleted")
 
+	def test_message_deleted_never_leaves_its_known_conversation(self):
+		"""Telegram message ids are unique per chat: a deletion in a known chat whose
+		message was never mirrored must not hit the same id in another chat."""
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)  # telegram:7000001 in the group (1002)
+		_process(INBOUND)  # the DM (1001)
+		process_event(
+			"message.deleted",
+			{
+				"channel": "telegram",
+				"account_id": "155",
+				"thread_id": "telegram:telegram:100000001",
+				"message_ids": ["telegram:7000001"],
+			},
+		)
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+
+	def test_message_deleted_unknown_conversation_falls_back_only_on_unique_id(self):
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)
+		event = {
+			"channel": "telegram",
+			"account_id": "155",
+			"thread_id": "telegram:telegram:999999",  # never mirrored
+			"message_ids": ["telegram:7000001"],
+		}
+		# the id exists in a second chat of the same account -> ambiguous, untouched
+		_process(INBOUND, message_id="telegram:7000001")
+		process_event("message.deleted", copy.deepcopy(event))
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+		self.assertNotEqual(_msg("9000001").delivery_status, "deleted")
+		# unique on the account -> marked
+		frappe.db.delete("DB Message", {"db_id": "9000001"})
+		process_event("message.deleted", copy.deepcopy(event))
+		self.assertEqual(_msg("9000002").delivery_status, "deleted")
+
 	def test_contact_updated_relinks(self):
 		from dialogbrain.sync.processor import process_event
 
