@@ -115,6 +115,7 @@ def _insert(doc):
 	frappe.db.savepoint(save_point)
 	log_len = len(frappe.local.message_log or [])
 	try:
+		doc.flags.dialogbrain_server_write = True  # identity fields (DBConversation.validate)
 		doc.insert(ignore_permissions=True)
 		return True
 	except DUPLICATE_ERRORS:

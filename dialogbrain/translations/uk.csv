@@ -464,3 +464,4 @@ write tools could not be identified; agents not attached,інструменти 
 {0} agent(s) could not be switched off and may still have the ERPNext tools — press Reconnect,не вдалося вимкнути агентів: {0}; вони можуть досі мати інструменти ERPNext — натисніть «Перепідключити»,
 {0} cannot be assigned to this conversation,{0} не можна призначити в цю розмову,
 {0} {1} not found,{0} {1} не знайдено,DialogBrain
+Only DialogBrain sync or a System Manager can change these fields: {0},Ці поля може змінити лише синхронізація DialogBrain або системний менеджер: {0},
