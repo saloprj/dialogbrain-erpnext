@@ -881,6 +881,23 @@ class TestCustomerTools(DialogBrainTestCase):
 		out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
 		self.assertEqual(out["currency"], "USD")  # the company's currency
 
+	def test_create_draft_order_uses_the_customers_price_list(self):
+		"""The customer's own price list (as ERPNext resolves it) wins over Selling Settings."""
+		self._order_ready()
+		vip = "Agent VIP Prices"
+		if not frappe.db.exists("Price List", vip):
+			_raw("Price List", vip, price_list_name=vip, currency="USD", selling=1, enabled=1)
+		frappe.db.delete("Item Price", {"price_list": vip})
+		_price("AGT-LAPTOP-14", 999, price_list=vip)
+		_clear_cached("Price List", vip)
+		frappe.db.set_value("Customer", self.customer, "default_price_list", vip)
+		try:
+			out = self.call("create_draft_order", items=[{"item_code": "AGT-LAPTOP-14", "qty": 1}])
+		finally:
+			frappe.db.set_value("Customer", self.customer, "default_price_list", None)
+		self.assertEqual(frappe.db.get_value("Sales Order", out["order"], "selling_price_list"), vip)
+		self.assertEqual(out["items"][0]["rate"], 999.0)
+
 	def test_create_draft_order_notifies_the_channel_users_when_unassigned(self):
 		self._order_ready()
 		agent_user = _user("agent-b2-chat@example.com", "Chat Agent")

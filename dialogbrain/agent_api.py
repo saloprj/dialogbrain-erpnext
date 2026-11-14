@@ -608,7 +608,7 @@ def _create_draft_order(ctx, items):
 			"order_type": "Sales",
 			"transaction_date": day,
 			"delivery_date": day,
-			"selling_price_list": frappe.db.get_single_value("Selling Settings", "selling_price_list") or None,
+			"selling_price_list": _price_list(customer),
 			"db_conversation": ctx.conversation,
 			"items": [{"item_code": code, "qty": qty, "delivery_date": day} for code, qty in lines],
 		}
@@ -629,6 +629,18 @@ def _create_draft_order(ctx, items):
 			for i in so.items
 		],
 	}, 1
+
+
+def _price_list(customer):
+	"""ERPNext's own rule: the customer's enabled default price list, else its customer
+	group's, else the Selling Settings default."""
+	from erpnext.accounts.party import get_default_price_list
+
+	return (
+		get_default_price_list(frappe.get_doc("Customer", customer))
+		or frappe.db.get_single_value("Selling Settings", "selling_price_list")
+		or None
+	)
 
 
 def _order_lines(items) -> list:
