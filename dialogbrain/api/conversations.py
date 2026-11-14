@@ -653,12 +653,24 @@ def assignable_users(conversation: "str | None" = None) -> list:
 _SECRET = re.compile(r"db_(?:live|test)_\w+")
 AGENT_ERROR_MAX = 200
 # The header asks on every open / new message: keep it fast and cheap.
-AGENT_STATUS_TIMEOUT = 5
+AGENT_STATUS_TIMEOUT = 3
 AGENT_STATUS_CACHE_SECONDS = 10
+# An error answer is cached too (own key), so a DialogBrain that is down is not asked on
+# every open — each ask could take the whole timeout (final wave F6).
+AGENT_STATUS_ERROR_CACHE_SECONDS = 30
 
 
 def _agent_status_key(conversation):
 	return f"dialogbrain_agent_status:{conversation}"
+
+
+def _agent_status_error_key(conversation):
+	return f"dialogbrain_agent_status_error:{conversation}"
+
+
+def _clear_agent_status(conversation):
+	frappe.cache().delete_value(_agent_status_key(conversation))
+	frappe.cache().delete_value(_agent_status_error_key(conversation))
 
 
 def _thread_param(conversation):
@@ -682,7 +694,7 @@ def _set_agent_paused(conversation, paused):
 	except DialogBrainError as exc:
 		frappe.log_error(title="DialogBrain threads.set_agent_paused failed", message=frappe.get_traceback())
 		frappe.throw(_("DialogBrain could not change the agent on this conversation: {0}").format(_agent_reason(exc)))
-	frappe.cache().delete_value(_agent_status_key(conversation))
+	_clear_agent_status(conversation)
 	override = "human" if paused else "agent"
 	frappe.db.set_value("DB Conversation", conversation, "agent_override", override)
 	row = _changed(conversation, {"agent_override": override})
@@ -712,8 +724,9 @@ def give_back(conversation: str) -> dict:
 def agent_status(conversation: str) -> dict:
 	"""``{supported, paused, paused_by, paused_at}``; ``{supported: False}`` without the
 	capability; ``{supported: True, error}`` when DialogBrain could not answer or the
-	conversation has no thread. A good answer is cached 10 s per conversation (cleared by
-	take over / give back); errors are not cached."""
+	conversation has no thread. A good answer is cached 10 s per conversation, an error
+	answer 30 s under its own key (both cleared by take over / give back); the call to
+	DialogBrain times out after 3 s."""
 	assert_can_access(conversation)
 	if not has_capability("agent_pause"):
 		return {"supported": False}
@@ -722,15 +735,20 @@ def agent_status(conversation: str) -> dict:
 	if not thread:
 		return {"supported": True, "error": _("The conversation has no DialogBrain thread id")}
 	key = _agent_status_key(conversation)
-	cached = frappe.cache().get_value(key)
-	if isinstance(cached, dict):
-		return cached
+	for cache_key in (key, _agent_status_error_key(conversation)):
+		cached = frappe.cache().get_value(cache_key)
+		if isinstance(cached, dict):
+			return cached
 	try:
 		client = DialogBrainClient.from_settings()
 		client.timeout = AGENT_STATUS_TIMEOUT
 		data = client.execute("threads.get_agent_status", {"thread_id": thread}) or {}
 	except DialogBrainError as exc:
-		return {"supported": True, "error": _agent_reason(exc)}
+		error = {"supported": True, "error": _agent_reason(exc)}
+		frappe.cache().set_value(
+			_agent_status_error_key(conversation), error, expires_in_sec=AGENT_STATUS_ERROR_CACHE_SECONDS
+		)
+		return error
 	result = {
 		"supported": True,
 		"paused": bool(data.get("paused")),

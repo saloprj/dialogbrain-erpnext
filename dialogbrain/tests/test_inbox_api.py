@@ -730,7 +730,7 @@ class TestInboxApi(DialogBrainTestCase):
 		frappe.set_user(self.agent_a)
 		state = {"paused": True, "paused_by": "operator", "paused_at": "2026-11-14T10:00:00+00:00"}
 		client, _, first = self._agent_call(api.agent_status, self.a_open_mine, result=state)
-		self.assertEqual(client.timeout, 5)
+		self.assertEqual(client.timeout, 3)
 		client2, _, second = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
 		client2.execute.assert_not_called()
 		self.assertEqual(second, first)
@@ -741,17 +741,34 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertFalse(third["paused"])
 		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
 
-	def test_agent_status_errors_are_not_cached(self):
+	def _clear_status_cache(self):
+		for prefix in ("dialogbrain_agent_status", "dialogbrain_agent_status_error"):
+			frappe.cache().delete_value(f"{prefix}:{self.a_open_mine}")
+
+	def test_agent_status_errors_are_cached_30s_under_their_own_key(self):
+		"""Final wave F6: a DialogBrain that is down is not asked again on every open
+		(each ask can take the whole timeout); a take over / give back clears it."""
 		from dialogbrain.client import DialogBrainError
 
 		self._caps(agent_pause=True)
-		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+		self._clear_status_cache()
+		self.addCleanup(self._clear_status_cache)
 		frappe.set_user(self.agent_a)
-		self._agent_call(api.agent_status, self.a_open_mine, error=DialogBrainError("down"))
-		client, _, out = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
-		client.execute.assert_called_once()
-		self.assertFalse(out["paused"])
-		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+		cache = frappe.cache()
+		with patch.object(cache, "set_value", wraps=cache.set_value) as spy:
+			client, _, first = self._agent_call(api.agent_status, self.a_open_mine, error=DialogBrainError("down"))
+		self.assertEqual(client.timeout, 3)
+		self.assertTrue(first["error"])
+		(key, value), kwargs = spy.call_args
+		self.assertEqual((key, kwargs), (f"dialogbrain_agent_status_error:{self.a_open_mine}", {"expires_in_sec": 30}))
+		client2, _, second = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client2.execute.assert_not_called()
+		self.assertEqual(second, first)
+		# a take-over / give-back clears it
+		self._agent_call(api.give_back, self.a_open_mine, result={"paused": False})
+		client3, _, third = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client3.execute.assert_called_once()
+		self.assertFalse(third["paused"])
 
 	def test_agent_status_without_thread_is_an_error_result(self):
 		self._caps(agent_pause=True)

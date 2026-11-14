@@ -232,6 +232,27 @@ class TestProcessor(DialogBrainTestCase):
 		_process(INBOUND, db_id="9000003")  # later events just land
 		self.assertEqual(frappe.db.count("DB Message", {"conversation": id_row}), 3)
 
+	def test_merge_repoints_agent_call_logs_and_db_conversation_fields(self):
+		"""Final wave F6: the agent's call log and the documents it created (Lead /
+		Sales Order / Quotation ``db_conversation``) follow a merged conversation."""
+		from dialogbrain.sync.upsert import _merge_conversation
+
+		def conv(thread_id, ref=None):
+			return frappe.get_doc({"doctype": "DB Conversation", "thread_id": thread_id, "thread_ref": ref}).insert(
+				ignore_permissions=True
+			).name
+
+		target, source = conv("merge-t1"), conv(None, "telegram:merge")
+		log = frappe.get_doc({"doctype": "DB Agent Call Log", "tool": "get_item", "conversation": source}).insert(
+			ignore_permissions=True
+		).name
+		lead = frappe.get_doc({"doctype": "Lead", "first_name": "Merge Lead", "db_conversation": source}).insert(
+			ignore_permissions=True
+		).name
+		_merge_conversation(target, source)
+		self.assertEqual(frappe.db.get_value("DB Agent Call Log", log, "conversation"), target)
+		self.assertEqual(frappe.db.get_value("Lead", lead, "db_conversation"), target)
+
 	def test_thread_ref_collision_with_other_internal_id_does_not_merge(self):
 		"""Two rows with different internal ids are different DialogBrain threads: keep
 		both, leave the ref where it is (no unique-index error)."""

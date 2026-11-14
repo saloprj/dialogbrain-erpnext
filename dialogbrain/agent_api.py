@@ -158,6 +158,13 @@ def _run(tool, impl, extra=None, **kwargs):
 	ctx = None
 	try:
 		agent_guard()
+	except frappe.PermissionError as exc:
+		# Logged only for the agent user or an API-key call: any logged-in desk/portal user
+		# (or Guest) opening the URL must not fill the log (final wave F6).
+		if _refusal_worth_logging():
+			_log_failure(tool, None, exc)
+		raise
+	try:
 		_refuse_query_string()
 		ctx, reason = _context()
 		if extra is not None:
@@ -168,6 +175,19 @@ def _run(tool, impl, extra=None, **kwargs):
 		raise
 	_log(tool, ctx, count, reason)
 	return result
+
+
+def _refusal_worth_logging() -> bool:
+	"""A guard refusal of the configured agent user (e.g. its role was removed) or of a call
+	authenticated with an API key (``Authorization: token …`` / ``Basic …``): someone is
+	using a key against the agent API."""
+	user = frappe.session.user
+	if user and user == frappe.db.get_single_value(SETTINGS, "erpnext_agent_user"):
+		return True
+	request = getattr(frappe.local, "request", None)
+	headers = getattr(request, "headers", None)
+	auth = ((headers.get("Authorization") if headers is not None else None) or "").strip().lower()
+	return user not in (None, "", "Guest") and auth.startswith(("token ", "basic "))
 
 
 def _refuse_query_string() -> None:

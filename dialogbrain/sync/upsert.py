@@ -310,7 +310,11 @@ CONVERSATION_LINKS = (
 	("Comment", "reference_name", "reference_doctype"),
 	("ToDo", "reference_name", "reference_type"),
 	("File", "attached_to_name", "attached_to_doctype"),
+	("DB Agent Call Log", "conversation", None),
 )
+# Documents the AI agent created point back at their chat (``install.DB_CONVERSATION_DOCTYPES``);
+# the custom field may be absent (e.g. mid-uninstall), so each is checked first.
+DB_CONVERSATION_FIELD_DOCTYPES = ("Sales Order", "Quotation", "Lead")
 MERGE_FIELDS = (
 	"title",
 	*CONTACT_FIELDS,
@@ -352,8 +356,8 @@ def _mergeable(holder, internal):
 
 def _merge_conversation(target, source):
 	"""Fold ``source`` (a ref-only duplicate of the same thread) into ``target`` and delete
-	it, in the caller's transaction. Messages, drafts, notifications, comments, ToDos and
-	files are re-pointed; party link, assignment and contact details are taken from
+	it, in the caller's transaction. Messages, drafts, notifications, comments, ToDos,
+	files, agent call logs and the agent's documents (``db_conversation``) are re-pointed; party link, assignment and contact details are taken from
 	``source`` where ``target`` has none; counters are combined."""
 	for doctype, field, type_field in CONVERSATION_LINKS:
 		where = f"`{field}` = %(source)s"
@@ -363,6 +367,12 @@ def _merge_conversation(target, source):
 			f"update `tab{doctype}` set `{field}` = %(target)s where {where}",
 			{"target": target, "source": source},
 		)
+	for doctype in DB_CONVERSATION_FIELD_DOCTYPES:
+		if frappe.db.has_column(doctype, "db_conversation"):
+			frappe.db.sql(
+				f"update `tab{doctype}` set `db_conversation` = %(target)s where `db_conversation` = %(source)s",
+				{"target": target, "source": source},
+			)
 
 	tgt = frappe.db.get_value("DB Conversation", target, list(MERGE_FIELDS), as_dict=True)
 	src = frappe.db.get_value("DB Conversation", source, list(MERGE_FIELDS), as_dict=True)

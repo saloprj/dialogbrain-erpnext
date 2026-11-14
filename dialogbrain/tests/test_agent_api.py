@@ -76,6 +76,14 @@ def _set_settings(**values):
 		frappe.db.set_single_value(SETTINGS, field, value)
 
 
+def tc_context(**fields):
+	from dialogbrain.thread_context import Context
+
+	values = {"thread_id": "1", "conversation": None, "party_type": None, "party": None, "identified": True}
+	values.update(fields)
+	return Context(**values)
+
+
 def _logs(**filters):
 	return frappe.get_all(LOG, filters=filters, fields=["*"], order_by="creation asc")
 
@@ -163,7 +171,9 @@ class TestAgentApi(DialogBrainTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			agent_api.agent_guard()
 
-	def test_tools_refuse_other_users_and_log_the_refusal(self):
+	def test_tools_refuse_other_users_without_filling_the_log(self):
+		"""Final wave F6: a refusal is logged only for the agent user or an API-key call;
+		any logged-in desk/portal user (or Guest) hitting the URL writes no log row."""
 		for user in ("Administrator", _user("agent-api-desk2@example.com", "Chat Agent"), "Guest"):
 			frappe.set_user(user)
 			with self.assertRaises(frappe.PermissionError):
@@ -172,10 +182,37 @@ class TestAgentApi(DialogBrainTestCase):
 				agent_api.create_lead("Mallory")
 		frappe.set_user("Administrator")
 		self.assertFalse(frappe.db.exists("Lead", {"first_name": "Mallory"}))
+		self.assertEqual(_logs(), [])
+
+	def test_refusals_of_the_agent_user_or_an_api_key_call_are_logged(self):
+		from werkzeug.test import EnvironBuilder
+		from werkzeug.wrappers import Request
+
+		frappe.get_doc("User", self.agent).remove_roles(ROLE)
+		self._as_agent()  # the agent user that lost its role
+		with self.assertRaises(frappe.PermissionError):
+			agent_api.get_item("laptop")
+		frappe.set_user(_user("agent-api-key@example.com", "Chat Agent"))  # someone else's API key
+		builder = EnvironBuilder(path="/api/method/dialogbrain.agent_api.get_item", method="POST",
+								 headers={"Authorization": "token abc:def"})
+		try:
+			with patch.object(frappe.local, "request", Request(builder.get_environ()), create=True):
+				with self.assertRaises(frappe.PermissionError):
+					agent_api.get_item("laptop")
+		finally:
+			builder.close()
+		frappe.set_user("Administrator")
 		logs = _logs()
-		self.assertEqual(len(logs), 6)
-		self.assertTrue(all(row.error for row in logs))
-		self.assertEqual({row.tool for row in logs}, {"get_item", "create_lead"})
+		self.assertEqual(len(logs), 2)
+		self.assertTrue(all(row.error and "PermissionError" in row.error for row in logs))
+
+	def test_call_log_rows_do_not_block_deleting_the_party(self):
+		"""Final wave F6: deleting a Lead / Customer is not blocked by its call log rows."""
+		lead = frappe.get_doc({"doctype": "Lead", "first_name": "Log Lead"}).insert(ignore_permissions=True).name
+		agent_api._log("find_customer", tc_context(party_type="Lead", party=lead), 1)
+		frappe.delete_doc("Lead", lead, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Lead", lead))
+		self.assertEqual(len(_logs(party=lead)), 1)  # the history stays
 
 	# --- get_item --------------------------------------------------------------------
 

@@ -26,6 +26,10 @@ has_permission = {
 	"DB Quick Reply": "dialogbrain.permissions.quick_reply_has_permission",
 }
 
+# The agent's call log is history: it never blocks deleting a Customer / Lead / chat
+# (final wave F6; honoured for Link and Dynamic Link fields on Frappe v15 and v16).
+ignore_links_on_delete = ["DB Agent Call Log"]
+
 scheduler_events = {
 	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
 	"daily": [
