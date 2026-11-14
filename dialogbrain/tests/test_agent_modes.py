@@ -508,6 +508,17 @@ class TestChangeMode(_Base):
 		self.assertEqual((row.agent_mode, row.agent_mode_status), ("", SHARED))
 		self.assertFalse(row.agent_trigger_id or row.agent_id or row.agent_name)
 
+	def test_a_non_numeric_stored_binding_gets_the_refresh_message(self):
+		from dialogbrain.api import channels
+
+		for field, value in (("agent_id", "ten"), ("agent_trigger_id", "x1")):
+			agent_modes.sync(self.fake)
+			frappe.db.set_value("DB Channel", "101", field, value)
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				channels.set_agent_mode("101", "off")
+			self.assertIn("changed in DialogBrain", str(ctx.exception))
+			self.assertEqual(self.updates(), [])
+
 	def test_a_bound_trigger_that_was_deleted_is_not_switched(self):
 		from dialogbrain.api import channels
 

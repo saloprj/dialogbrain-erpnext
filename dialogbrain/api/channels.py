@@ -105,6 +105,14 @@ def choose_agent(channel: str, trigger_id: str) -> dict:
 	return _payload(doc.name, found)
 
 
+def _numeric_ids(doc) -> "tuple | None":
+	"""``(trigger_id, agent_id)`` as DialogBrain's integers, or None if either is not one."""
+	try:
+		return int(str(doc.agent_trigger_id).strip()), int(str(doc.agent_id).strip())
+	except (TypeError, ValueError):
+		return None
+
+
 @frappe.whitelist(methods=["POST"])
 def set_agent_mode(channel: str, mode: str) -> dict:
 	"""Switch the channel's agent to copilot (drafts), autopilot (answers) or off."""
@@ -119,14 +127,16 @@ def set_agent_mode(channel: str, mode: str) -> dict:
 	if unreadable:
 		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_unreadable()))
 	bound = str(doc.agent_trigger_id)
-	if not any(c["exclusive"] and c["trigger_id"] == bound for c in found):
-		# the stored binding is stale (trigger shared, deleted, agent inactive): never switch it
+	ids = _numeric_ids(doc)
+	if ids is None or not any(c["exclusive"] and c["trigger_id"] == bound for c in found):
+		# the stored binding is stale (trigger shared, deleted, agent inactive, or ids that
+		# are not DialogBrain's numeric ones): never switch it
 		agent_modes.store_decision(doc, found)
 		frappe.db.commit()  # frappe.throw rolls back; keep the refreshed binding
 		frappe.throw(
 			_("The agent setup of this channel changed in DialogBrain; the channel was refreshed. Nothing was switched.")
 		)
-	params = {"trigger_id": int(doc.agent_trigger_id), "agent_id": int(doc.agent_id), **MODES[mode]}
+	params = {"trigger_id": ids[0], "agent_id": ids[1], **MODES[mode]}
 	try:
 		client.execute("agents.trigger_update", params)
 	except DialogBrainError as exc:
