@@ -1,11 +1,15 @@
 # Plan 4 (agent modes, reports, translations, v15/v16 CI) — follow-ups and rulings
 
-Final state: v16 657 tests + 14 translation tests OK; v15 (`dev/test-v15.sh`, Python 3.10) 671 tests OK.
+Final state: v16 657 tests + 14 translation tests OK; v15 (`dev/test-v15.sh`, Python 3.10) 671 tests OK. GitHub Actions is green on both versions (PR #6, run 43618415476, 2026-11-14).
 
 ## Still owed
-- First GitHub Actions run of `.github/workflows/ci.yml` (nothing was pushed when the plan finished). Watch for a missing `bench setup requirements --dev`.
 - Browser: the mode chip in the conversation header (the only bound channel on the dev stand has no conversations); Take over / Give back (needs a DialogBrain gateway with PR #5382); the navbar badge on v15.
 - Check once on the bench how the glossary overrides (Customer, Lead, Draft, Note, Assign, Off, Connect, Conversation) read on ERPNext's own screens in uk/ru.
+
+## What the first CI runs turned up
+- The runner's MariaDB client insists on TLS; the workflow writes `skip-ssl` into `~/.my.cnf`.
+- Frappe/ERPNext translation catalogs must be compiled (`bench --site … compile-po-to-mo`) for the translation tests; `dev/test-v15.sh` does the same now.
+- ERPNext words some strings differently on v15 and v16 (uk/ru). Rows for labels another app translates were dropped (the installed version's wording applies); our own UI strings got the "DialogBrain" context. An upstream wording change can make `test_no_translation_overrides_another_app` fail again: drop the row or add the context.
 
 ## Rulings
 - P1: the CI workflow is written and validated locally; its first run is after the push.
