@@ -47,7 +47,9 @@ them. The controls are in **DialogBrain Settings → AI Agent Tools**.
 ### What the agent can see
 
 - **Catalogue, prices and stock** for any chat: item name and code, the price from the
-  default selling price list, and whether it is in stock.
+  default selling price list, and whether it is in stock. The stock is the sum over all
+  warehouses of the company; the price is the plain rate on the default selling price
+  list (no pricing rules, no other units of measure).
 - **Order status and unpaid invoices** only for the customer of that chat: their last
   submitted Sales Orders, their unpaid Sales Invoices and what they owe per currency. The
   agent never sees another customer's data.
@@ -92,20 +94,23 @@ DialogBrain server, found at Connect:
 
 - **Customer data tools**: the agent can see order status and unpaid invoices of the
   chat's own customer.
-- **Safe send retries (request_id)**: idempotent sends. DialogBrain remembers a send, so
-  a retry never delivers a reply twice.
+- **Safe send retries (request_id)**: idempotent sends. DialogBrain remembers a send that
+  completed, so a retry of it is not delivered again.
 - **Take over / give back**: the buttons below work.
-- **Full draft text**: the inbox shows the whole text of an agent's draft reply, not a
-  shortened one.
+- **Full draft text**: the whole text of an agent's draft reply is loaded when you press
+  **Edit** (the list shows a shortened preview).
 
 A cross means the DialogBrain server needs to be updated. Everything else keeps working.
+The line is worked out at Connect: after DialogBrain is upgraded, press **Reconnect** to
+pick up the new capabilities.
 
 ### Take over and Give back to agent
 
 In a conversation, **Take over** pauses the AI agent in that chat so that only people
 answer. **Give back to agent** lets it answer again, whatever the reason for the pause.
-A manager's reply sent from ERPNext also pauses the agent in that chat. Both buttons
-need the "Take over / give back" capability.
+A manager's reply sent from ERPNext also pauses the agent in that chat, but only when the
+DialogBrain server has the "Safe send retries" capability. Both buttons need the
+"Take over / give back" capability.
 
 ### Operating notes
 
@@ -113,7 +118,14 @@ need the "Take over / give back" capability.
   **Reconnect**.
 - **Reconnect** switches the integration on for every agent again and rewrites each
   agent's list of denied tools to match "Allow agent writes". It also re-enables the
-  agent user and issues a new key.
+  agent user and issues a new key. Toggling **Allow agent writes** does the same for the
+  agents: it also switches the integration back on for every agent.
+- **One ERPNext site per DialogBrain workspace.** A connected site reconnects only to the
+  same workspace. A copy of the site (for example a restored backup at another address)
+  registers its own integration at Connect instead of taking over the original's; chats
+  synced from another DialogBrain server or workspace are never identified to the agent.
+- Draft Sales Orders created by the agent are inserted as **Administrator**: hooks and
+  server scripts on Sales Order insert run as Administrator for them.
 - **Disconnect** switches the integration off for the agents and revokes the agent user's
   API key.
 - To cut the agent's access **immediately**: untick **Allow agent writes** (writes only),
@@ -122,20 +134,24 @@ need the "Take over / give back" capability.
 
 ### Security notes
 
-- The agent user (`dialogbrain-agent@<your site>`) has no document permissions. Its API
-  key can call only the agent tools, which return fixed, limited fields. It cannot open
-  `/api/resource` for anything.
-- It is still an internal user, so it has what every desk user has, for example public
-  events and file upload.
-- Every call is logged in **DB Agent Call Log** for 30 days, including refused calls. For
-  a call where the customer was not identified, the log gives the reason.
+- The agent user (`dialogbrain-agent@<your site>`) has no document permissions of its
+  own: through the standard API it cannot read customers, orders, invoices or items. The
+  agent tools return fixed, limited fields.
+- It is still an internal user, so it has what every desk user has, for example file
+  upload, ToDo and public notes.
+- Every call is logged in **DB Agent Call Log** for 30 days, including calls refused to
+  the agent user or to an API key. For a call where the customer was not identified, the
+  log gives the reason. The log never blocks deleting a Customer or Lead.
+- Uninstalling the app removes the `DialogBrain Conversation` fields, disables the agent
+  user, clears its key and (when connected) switches the integration off for the agents.
 
 ### Retrying a reply
 
-A reply marked "Delivery not confirmed" can be retried safely for about a day (23 hours)
-when the DialogBrain server supports idempotent sends: DialogBrain recognises the repeat
-and does not send it twice. Without that capability, only a reply that definitely failed
-can be retried.
+A reply marked "Delivery not confirmed" can be retried for about a day (23 hours) when
+the DialogBrain server supports idempotent sends. A retry is deduplicated by DialogBrain
+when the earlier send completed; in rare cases (DialogBrain lost its cache, or two
+attempts overlap) a message can still be delivered twice. Without that capability, only a
+reply that definitely failed can be retried.
 
 ## Known limitations
 
