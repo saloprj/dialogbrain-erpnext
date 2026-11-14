@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-14 12:00:00.000000",
+ "modified": "2026-11-14 13:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -172,20 +172,22 @@
    "fieldtype": "Check",
    "label": "Allow Agent Writes",
    "default": "0",
-   "description": "Let the DialogBrain AI agent create Leads and draft Sales Orders. Off: the write tools are refused by ERPNext."
+   "description": "Let the DialogBrain AI agent create Leads and Draft Sales Orders (never submitted). Off by default. Turning it off takes effect in ERPNext immediately."
   },
   {
    "fieldname": "erpnext_agent_user",
    "fieldtype": "Link",
    "label": "ERPNext Agent User",
    "options": "User",
-   "read_only": 1
+   "read_only": 1,
+   "description": "The user the AI agent signs in as. It has no document permissions and can call only the agent tools. Disabling it stops the agent's access; Reconnect re-enables it."
   },
   {
    "fieldname": "integration_id",
    "fieldtype": "Data",
    "label": "Integration Id",
-   "read_only": 1
+   "read_only": 1,
+   "description": "The ERPNext integration in DialogBrain that holds the agent tools. Set by Connect."
   },
   {
    "fieldname": "agent_capabilities",
@@ -197,7 +199,8 @@
    "fieldname": "agent_tools_status",
    "fieldtype": "Small Text",
    "label": "Agent Tools Status",
-   "read_only": 1
+   "read_only": 1,
+   "description": "Result of the last Connect or Reconnect: how many tools and agents were set up, and any problem."
   },
   {
    "fieldname": "agent_tool_names",
@@ -211,7 +214,8 @@
    "fieldname": "thread_context_secret",
    "fieldtype": "Password",
    "label": "Thread Context Secret",
-   "read_only": 1
+   "read_only": 1,
+   "description": "Set by Connect. Lets ERPNext check which chat an agent call comes from. Do not share it."
   }
  ],
  "links": [],
