@@ -420,7 +420,9 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	doc.modified = frappe.db.get_single_value(SETTINGS, "modified") or doc.modified
 	previous = _names(doc)
 	problems = []
-	iid = cint(doc.integration_id) or None
+	iid = _verified_integration(client, cint(doc.integration_id) or None, site, tools)
+	if not iid:
+		previous = {}  # a new integration: the old tool names say nothing about it
 
 	# Rotate inside a savepoint: if the new key does not reach DialogBrain, roll back to
 	# the previous key, which DialogBrain still holds, so working tools keep working.
@@ -528,6 +530,30 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	if failed:
 		problems.append(_("{0} agent(s) could not be given the tools").format(failed))
 	return {"tools": len(names), "customer_tools": customer_ok, "agents": attached, "problems": problems}
+
+
+def _verified_integration(client, iid, site, tools) -> "int | None":
+	"""The stored integration id, if it is this site's (final wave F3c).
+
+	A backup restored on another site carries the original site's ``integration_id``:
+	reusing it would hand the original's integration our key and endpoints. With
+	``integrations.get_endpoints`` the integration's ``base_url`` must equal this site's
+	public URL (normalised); a mismatch or "not found" drops the id, so a new integration
+	is created. Any other error raises (nothing is touched). Without the tool the id is
+	reused as before."""
+	from dialogbrain.instance import normalise_url
+
+	if not iid or "integrations.get_endpoints" not in tools:
+		return iid
+	try:
+		listed = client.execute("integrations.get_endpoints", {"integration_id": iid}) or {}
+	except DialogBrainError as exc:
+		if "not_found" in str(exc) or exc.status == 404 or getattr(exc, "error_type", None) == "not_found":
+			return None
+		raise DialogBrainError(f"could not verify the stored integration {iid}: {exc}", status=exc.status) from None
+	if normalise_url(listed.get("base_url")) != normalise_url(site):
+		return None
+	return iid
 
 
 def _tool_names(client, iid, tools, wanted, added_names, problems, stale=False) -> dict:

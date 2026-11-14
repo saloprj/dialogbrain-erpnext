@@ -60,6 +60,8 @@ SERVER_FIELDS = (
 	"agent_capabilities",
 	"agent_tools_status",
 	"agent_tool_names",
+	# final wave F3: the DialogBrain instance + workspace of the last Connect
+	"dialogbrain_instance",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
@@ -183,6 +185,8 @@ def _connect(doc) -> dict:
 		workspace = client.execute("workspace.current", {}) or {}
 	except DialogBrainError:
 		frappe.throw(_("Invalid API key or DialogBrain unreachable"))
+	workspace_id = str(workspace.get("id") or "") or None
+	_refuse_workspace_switch(doc, workspace, workspace_id)
 
 	missing = []
 	tools = set()
@@ -204,9 +208,10 @@ def _connect(doc) -> dict:
 		upsert_channel(account.get("account_id"), account.get("channel"), account.get("display_name"))
 
 	configure_webhook(doc, mode, client, hooks)
+	_bind_instance(doc, workspace_id)
 	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
 	agent_tools = agent_integration.on_connect(doc, client, tools)
-	doc.workspace_id = str(workspace.get("id") or "") or None
+	doc.workspace_id = workspace_id
 	doc.workspace_name = workspace.get("name")
 	doc.connected = 1
 	doc.last_reconcile_at = now_datetime()
@@ -220,6 +225,32 @@ def _connect(doc) -> dict:
 		"agent_tools": agent_tools,
 		"agent_tools_ok": agent_integration.status_flag(doc) != "problems",
 	}
+
+
+def _refuse_workspace_switch(doc, workspace: dict, workspace_id) -> None:
+	"""R13 / final wave F3a: a connected site never moves to another workspace on a
+	reconnect (the OAuth path checks the same before it stores the new key)."""
+	if not doc.connected or not doc.workspace_id or workspace_id == str(doc.workspace_id):
+		return
+	current = str(doc.workspace_name or doc.workspace_id or "")[:100]
+	new = str(workspace.get("name") or workspace_id or "")[:100]
+	frappe.throw(_("This site is connected to {0}. Disconnect first to switch to {1}.").format(current, new))
+
+
+def _bind_instance(doc, workspace_id) -> None:
+	"""Store the instance key (DialogBrain base URL + workspace) on ``doc`` (not saved).
+
+	When it differs from the stored one, the site now talks to another DialogBrain (or
+	workspace): the old integration id, context secret and tool names belong to that one
+	and are cleared before registering (final wave F3d)."""
+	from dialogbrain.instance import instance_key
+
+	key = instance_key(doc.base_url, workspace_id)
+	if doc.dialogbrain_instance and key != doc.dialogbrain_instance:
+		doc.integration_id = None
+		doc.thread_context_secret = None
+		doc.agent_tool_names = None
+	doc.dialogbrain_instance = key
 
 
 @frappe.whitelist(methods=["POST"])

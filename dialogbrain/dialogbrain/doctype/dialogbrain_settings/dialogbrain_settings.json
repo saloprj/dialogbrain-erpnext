@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-14 13:00:00.000000",
+ "modified": "2026-11-14 15:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -31,6 +31,7 @@
   "allow_agent_writes",
   "erpnext_agent_user",
   "integration_id",
+  "dialogbrain_instance",
   "agent_capabilities",
   "agent_tools_status",
   "agent_tool_names",
@@ -188,6 +189,14 @@
    "label": "Integration Id",
    "read_only": 1,
    "description": "The ERPNext integration in DialogBrain that holds the agent tools. Set by Connect."
+  },
+  {
+   "fieldname": "dialogbrain_instance",
+   "fieldtype": "Data",
+   "label": "DialogBrain Instance",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Instance key of the last Connect (DialogBrain base URL + workspace id). A change clears the agent registration."
   },
   {
    "fieldname": "agent_capabilities",

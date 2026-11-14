@@ -71,6 +71,7 @@ class TestThreadContext(DialogBrainTestCase):
 		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel"):
 			frappe.db.delete(dt)
 		set_secret()
+		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", None)
 		self.channel = _channel("ctx-ch", "telegram")
 		self.customer = _customer("Ctx Customer")
 		self.conv = _conv(self.channel, thread_id=THREAD, party_type="Customer", party=self.customer,
@@ -123,6 +124,17 @@ class TestThreadContext(DialogBrainTestCase):
 		self.assertEqual(tc.resolve(req, now=TS), (None, tc.QUERY_STRING))
 		# an empty query ("...?") carries no arguments
 		self.assertTrue(self.verify(make_request(body=b"", raw_uri=ORDER_PATH + "?", headers=headers)).identified)
+
+	def test_conversation_of_another_instance_is_not_identified(self):
+		"""Final wave F3b: the thread id of a chat stamped by another DialogBrain instance
+		(or workspace) may name a different chat here: treated as unknown."""
+		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", "aaaaaaaaaaaaaaaa")
+		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", "bbbbbbbbbbbbbbbb")
+		self.assertEqual(tc.resolve(make_request(headers=signed_headers()), now=TS), (None, tc.OTHER_INSTANCE))
+		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", None)
+		self.assertEqual(tc.resolve(make_request(headers=signed_headers()), now=TS), (None, tc.OTHER_INSTANCE))
+		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", "aaaaaaaaaaaaaaaa")
+		self.assertTrue(self.verify(make_request(headers=signed_headers())).identified)
 
 	def test_auto_verified_link_is_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_verified")

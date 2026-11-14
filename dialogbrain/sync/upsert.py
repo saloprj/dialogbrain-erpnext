@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import frappe
 from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
+from dialogbrain.instance import current_instance
 from dialogbrain.party import contact_keys_from_ref, link_party
 from dialogbrain.sync.notify import notify, publish
 
@@ -224,6 +225,10 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	Viber DMs, email DMs) fills a missing one, so backfill and reconcile, which get no
 	contact metadata, link parties too. ``link_party`` runs on create and whenever
 	phone/email change.
+
+	``dialogbrain_instance`` (final wave F3b) is set to the current connection's instance
+	key on create, and on an existing row that has none; a row stamped by another instance
+	keeps its key (the agent tools then do not identify it).
 	"""
 	internal, ref = thread_keys(thread)
 	if not internal and not (ref and channel):
@@ -247,6 +252,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 				"channel": channel,
 				"status": "Open",
 				"unread_count": 0,
+				"dialogbrain_instance": current_instance(),
 				**values,
 			}
 		)
@@ -264,13 +270,15 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
 		return name, False
 
-	fields = {"thread_id", "thread_ref", "channel", "phone", "email", *values.keys()}
+	fields = {"thread_id", "thread_ref", "channel", "phone", "email", "dialogbrain_instance", *values.keys()}
 	current = frappe.db.get_value("DB Conversation", name, sorted(fields), as_dict=True)
 	for field, value in contact_keys_from_ref(ref or current.thread_ref).items():
 		if field not in values and not current.get(field):
 			values[field] = _fit(field, value)
 	values = {k: v for k, v in values.items() if v}
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
+	if not current.dialogbrain_instance and (instance := current_instance()):
+		updates["dialogbrain_instance"] = instance
 	if internal and current.thread_id != internal:
 		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)
 	new_ref = ref if ref and not current.thread_ref else None

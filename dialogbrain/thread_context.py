@@ -15,6 +15,10 @@ SHA-256 of the raw body bytes (never re-serialized JSON). The timestamp must be 
 ±300 s, and only ``/api/method/dialogbrain.agent_api.*`` paths without a query string
 accept a context (query args are not signed; Ruling R9).
 
+A conversation stamped with another DialogBrain instance than the current connection's
+(``dialogbrain_instance``, final wave F3b) is treated like an unknown thread
+(``other_instance``).
+
 A context is *identified* only when its conversation is linked to an existing Customer or
 Lead with ``link_source`` ``manual`` or ``auto_verified``. Customer data is released only
 then. :func:`resolve` also gives a reason code for the call log (Ruling R8).
@@ -68,6 +72,9 @@ UNLINKED = "unlinked"
 UNVERIFIED = "unverified"
 QUERY_STRING = "query_string"
 NO_SECRET = "no_secret"
+# The conversation was made under another DialogBrain instance / workspace (final wave
+# F3b): its thread id may name a different chat here.
+OTHER_INSTANCE = "other_instance"
 
 
 def verify(request=None, now=None) -> Context | None:
@@ -118,11 +125,15 @@ def resolve(request=None, now=None) -> tuple[Context | None, str | None]:
 	conv = frappe.db.get_value(
 		"DB Conversation",
 		{"thread_id": thread_id},
-		["name", "party_type", "party", "link_source"],
+		["name", "party_type", "party", "link_source", "dialogbrain_instance"],
 		as_dict=True,
 	)
 	if not conv:
 		return None, UNKNOWN_THREAD
+	from dialogbrain.instance import current_instance
+
+	if (conv.dialogbrain_instance or "") != (current_instance() or ""):
+		return None, OTHER_INSTANCE
 	linked = bool(
 		conv.party_type in PARTY_TYPES and conv.party and frappe.db.exists(conv.party_type, conv.party)
 	)

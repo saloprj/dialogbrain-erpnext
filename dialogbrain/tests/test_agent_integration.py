@@ -60,6 +60,7 @@ class FakeDialogBrain:
 		self.next_id = 77
 		self.last_request_id = None
 		self.fail = {}  # tool_id -> exception
+		self.workspace = copy.deepcopy(load_fixture("workspace_current")["data"])
 
 	def list_tools(self):
 		return set(self.tools)
@@ -85,7 +86,7 @@ class FakeDialogBrain:
 		if tool_id not in self.tools:
 			raise DialogBrainError(f"HTTP 404: tool {tool_id} not found", status=404)
 		if tool_id == "workspace.current":
-			return copy.deepcopy(load_fixture("workspace_current")["data"])
+			return copy.deepcopy(self.workspace)
 		if tool_id == "channels.list":
 			return copy.deepcopy(load_fixture("channels_list")["data"])
 		if tool_id == "integrations.add_endpoints":
@@ -126,9 +127,16 @@ class FakeDialogBrain:
 				"note": f"prefix ext{iid}_",
 			}
 		if tool_id == "integrations.get_endpoints":
+			if params["integration_id"] not in self.integrations:
+				raise DialogBrainError(f"not_found: integration {params['integration_id']}")
 			integ = self.integrations[params["integration_id"]]
 			ops = [{"operationId": o, "method": "POST", "path": p} for p, o in integ["ops"].items()]
-			return {"integration_id": params["integration_id"], "endpoint_count": len(ops), "endpoints": ops}
+			return {
+				"integration_id": params["integration_id"],
+				"base_url": integ["base_url"],
+				"endpoint_count": len(ops),
+				"endpoints": ops,
+			}
 		if tool_id == "integrations.remove_endpoints":
 			integ = self.integrations[params["integration_id"]]
 			drop = set(params.get("operation_ids") or [])
@@ -188,6 +196,9 @@ class _AgentIntegrationCase(DialogBrainTestCase):
 				"agent_tool_names": None,
 				"thread_context_secret": None,
 				"allow_agent_writes": 0,
+				"workspace_id": None,
+				"workspace_name": None,
+				"dialogbrain_instance": None,
 			}
 		)
 		doc.flags.dialogbrain_server_write = True
@@ -694,7 +705,18 @@ class TestAgentIntegrationFixRound1(_AgentIntegrationCase):
 		fake = FakeDialogBrain()
 		self._connect(fake)
 		fake.thread_context_error = DialogBrainError("refused", error_type="permission_denied")
-		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 500", status=500)
+		# the stored integration is verified (F3c); only the later listing fails
+		real, listings = fake.execute, []
+
+		def execute(tool_id, params, **kw):
+			if tool_id == "integrations.get_endpoints":
+				listings.append(params)
+				if len(listings) > 1:
+					fake.calls.append((tool_id, params))
+					raise DialogBrainError("DialogBrain HTTP 500", status=500)
+			return real(tool_id, params, **kw)
+
+		fake.execute = execute
 		self._connect(fake)
 		self.assertIn("customer tools may still be registered", self._get("agent_tools_status"))
 
@@ -804,3 +826,211 @@ class TestAgentIntegrationB4(_AgentIntegrationCase):
 		self.assertTrue(has_capability("request_id"))
 		self.assertFalse(has_capability("agent_pause"))
 		self.assertFalse(has_capability("full_drafts"))
+
+
+class TestInstanceBinding(_AgentIntegrationCase):
+	"""Final wave F3 (R13): a site is bound to one DialogBrain instance + workspace, and its
+	integration to this site's URL."""
+
+	def setUp(self):
+		super().setUp()
+		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel"):
+			frappe.db.delete(dt)
+
+	def _instance(self, base_url="https://api.example.com", workspace_id="128"):
+		from dialogbrain.instance import instance_key
+
+		return instance_key(base_url, workspace_id)
+
+	# --- a: the pasted-key path refuses a workspace switch --------------------------
+
+	def test_pasted_key_reconnect_to_another_workspace_is_refused(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = self._get("integration_id")
+		fake.workspace = {"id": 999, "name": "Other WS"}
+		fake.calls.clear()
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._connect(fake)
+		self.assertIn("This site is connected to Test User. Disconnect first to switch to Other WS.", str(cm.exception))
+		self.assertEqual(self._get("workspace_id"), "128")
+		self.assertEqual(self._get("integration_id"), iid)
+		self.assertFalse(fake.called("integrations.add_endpoints"))
+
+	def test_after_disconnect_another_workspace_may_connect(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		frappe.db.set_single_value(SETTINGS, "connected", 0)
+		fake.workspace = {"id": 999, "name": "Other WS"}
+		self._connect(fake)
+		self.assertEqual(self._get("workspace_id"), "999")
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance(workspace_id="999"))
+
+	# --- b: conversations carry the instance ----------------------------------------
+
+	def test_connect_stores_the_instance_and_conversations_get_it(self):
+		from dialogbrain.instance import instance_key
+		from dialogbrain.sync.upsert import upsert_conversation, upsert_channel
+
+		self._connect(FakeDialogBrain())
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance())
+		self.assertEqual(len(self._instance()), 16)
+		# the base URL is normalised: case, trailing slash and default port do not matter
+		self.assertEqual(instance_key("HTTPS://API.example.com:443/", "128"), self._instance())
+		self.assertNotEqual(instance_key("https://api.other.com", "128"), self._instance())
+
+		channel = upsert_channel("acc-inst", "telegram")
+		name, created = upsert_conversation({"id": "5501", "thread_id": "telegram:1"}, channel)
+		self.assertTrue(created)
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "dialogbrain_instance"), self._instance())
+
+		frappe.db.set_value("DB Conversation", name, "dialogbrain_instance", None)
+		upsert_conversation({"id": "5501", "thread_id": "telegram:1"}, channel)
+		self.assertEqual(frappe.db.get_value("DB Conversation", name, "dialogbrain_instance"), self._instance())
+
+	def test_patch_fills_existing_rows_only_when_connected(self):
+		from dialogbrain.patches.v0_1 import set_conversation_instance as patch_mod
+		from dialogbrain.sync.upsert import upsert_channel
+
+		channel = upsert_channel("acc-inst2", "telegram")
+		conv = frappe.get_doc({"doctype": "DB Conversation", "thread_id": "5502", "channel": channel}).insert(
+			ignore_permissions=True
+		).name
+		frappe.db.set_single_value(SETTINGS, {"workspace_id": "128", "connected": 0})
+		patch_mod.execute()
+		self.assertFalse(frappe.db.get_value("DB Conversation", conv, "dialogbrain_instance"))
+		self.assertFalse(self._get("dialogbrain_instance"))
+		frappe.db.set_single_value(SETTINGS, "connected", 1)
+		patch_mod.execute()
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "dialogbrain_instance"), self._instance())
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance())
+
+	# --- c: the stored integration must be this site's --------------------------------
+
+	def test_restored_backup_on_another_site_url_creates_its_own_integration(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		old = int(self._get("integration_id"))
+		old_auth = copy.deepcopy(fake.integrations[old]["auth"])
+		# the backup is restored on a copy at another URL, same DialogBrain workspace
+		frappe.db.set_single_value(SETTINGS, "public_site_url", "https://erp-copy.example.com")
+		fake.calls.clear()
+		self._connect(fake)
+		new = int(self._get("integration_id"))
+		self.assertNotEqual(new, old)
+		self.assertEqual(fake.integrations[new]["base_url"], "https://erp-copy.example.com")
+		self.assertEqual(fake.integrations[old]["auth"], old_auth)  # the original site keeps working
+		self.assertFalse([p for p in fake.called("integrations.set_auth") if p["integration_id"] == old])
+		self.assertFalse([p for p in fake.called("integrations.add_endpoints") if p.get("integration_id") == old])
+
+	def test_same_site_url_reuses_the_integration_after_checking_it(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		frappe.db.set_single_value(SETTINGS, "public_site_url", SITE.upper().replace("HTTPS", "https") + "/")
+		fake.calls.clear()
+		self._connect(fake)
+		self.assertEqual(int(self._get("integration_id")), iid)
+		self.assertEqual(fake.calls[[t for t, _p in fake.calls].index("integrations.get_endpoints")][1],
+			{"integration_id": iid})
+		self.assertEqual(list(fake.integrations), [iid])
+
+	def test_stored_integration_not_found_creates_a_new_one(self):
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		old = int(self._get("integration_id"))
+		del fake.integrations[old]
+		fake.calls.clear()
+		self._connect(fake)
+		self.assertNotEqual(int(self._get("integration_id")), old)
+		self.assertFalse(fake.called("integrations.set_auth"))
+
+	def test_unverifiable_integration_is_not_touched(self):
+		"""A transient error while checking the stored integration: nothing is reused or
+		created this time (the outcome is in the status); Connect itself succeeds."""
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		auth = copy.deepcopy(fake.integrations[iid]["auth"])
+		fake.fail["integrations.get_endpoints"] = DialogBrainError("DialogBrain HTTP 503", status=503)
+		fake.calls.clear()
+		result = self._connect(fake)
+		self.assertEqual(self._get("connected"), 1)
+		self.assertFalse(result["agent_tools_ok"])
+		self.assertIn("could not verify the stored integration", self._get("agent_tools_status"))
+		self.assertFalse(fake.called("integrations.set_auth"))
+		self.assertFalse(fake.called("integrations.add_endpoints"))
+		self.assertEqual(fake.integrations[iid]["auth"], auth)
+
+	def test_without_get_endpoints_the_integration_is_reused_as_before(self):
+		fake = FakeDialogBrain(tools=REQUIRED | (REGISTRATION - {"integrations.get_endpoints"}) | PART_A)
+		self._connect(fake)
+		iid = int(self._get("integration_id"))
+		self._connect(fake)
+		self.assertEqual(int(self._get("integration_id")), iid)
+		self.assertNotIn("verif", self._get("agent_tools_status"))
+
+	# --- d: another DialogBrain instance (base URL) -----------------------------------
+
+	def test_base_url_switch_starts_a_new_registration_and_old_chats_are_not_identified(self):
+		from dialogbrain import thread_context as tc
+		from dialogbrain.sync.upsert import upsert_channel
+		from dialogbrain.tests.test_party_card import _customer
+		from dialogbrain.tests.test_thread_context import TS, make_request, signed_headers
+
+		first = FakeDialogBrain()
+		self._connect(first)
+		old_iid = self._get("integration_id")
+		old_secret = get_decrypted_password(SETTINGS, SETTINGS, "thread_context_secret")
+		channel = upsert_channel("acc-inst3", "telegram")
+		from dialogbrain.sync.upsert import upsert_conversation
+
+		conv, _created = upsert_conversation({"id": "4217", "thread_id": "telegram:2"}, channel)
+		frappe.db.set_value("DB Conversation", conv, {
+			"party_type": "Customer", "party": _customer("Inst Customer"), "link_source": "manual"})
+
+		def ctx(secret):
+			return tc.resolve(make_request(headers=signed_headers(thread="4217", secret=secret)), now=TS)
+
+		self.assertTrue(ctx(old_secret)[0].identified)
+
+		# the same workspace id on ANOTHER DialogBrain (e.g. dev -> prod)
+		frappe.db.set_single_value(SETTINGS, "base_url", "https://api.other.example.com")
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		second = FakeDialogBrain()
+		second.integrations[int(old_iid)] = {  # its ids collide with the old instance's
+			"base_url": "https://someone-else.example.com", "name": "someone else's", "auth": {"theirs": 1}, "ops": {}, "thread_context": None}
+		second.next_id = int(old_iid) + 1
+		self._connect(second)
+
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance("https://api.other.example.com"))
+		# nothing of the old registration was reused or even looked up
+		tools_called = [t for t, _p in second.calls]
+		first_add = tools_called.index("integrations.add_endpoints")
+		self.assertNotIn("integrations.set_auth", tools_called)
+		self.assertNotIn("integrations.get_endpoints", tools_called[:first_add])
+		self.assertNotIn("integration_id", second.called("integrations.add_endpoints")[0])
+		self.assertEqual(second.integrations[int(old_iid)]["auth"], {"theirs": 1})
+		self.assertNotEqual(self._get("integration_id"), old_iid)
+		new_secret = get_decrypted_password(SETTINGS, SETTINGS, "thread_context_secret")
+		self.assertNotEqual(new_secret, old_secret)
+		# the old instance's conversation is not identified, even with a valid signature
+		self.assertEqual(ctx(new_secret), (None, tc.OTHER_INSTANCE))
+
+	def test_instance_change_clears_the_old_registration_before_registering(self):
+		from dialogbrain.setup import agent_integration as ai
+
+		fake = FakeDialogBrain()
+		self._connect(fake)
+		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", "0123456789abcdef")  # someone else's
+		seen = {}
+		real = ai.register
+
+		def spy(doc, *a, **k):
+			seen.update(iid=doc.integration_id, names=doc.agent_tool_names, secret=doc.thread_context_secret)
+			return real(doc, *a, **k)
+
+		with patch.object(ai, "register", side_effect=spy):
+			self._connect(fake)
+		self.assertEqual(seen, {"iid": None, "names": None, "secret": None})
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance())
