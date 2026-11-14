@@ -83,7 +83,7 @@
 				<div v-else class="db-muted db-small">{{ __("Linked to a customer you have no access to.") }}</div>
 				<div v-if="card.link_source" class="db-muted db-small">{{ __("Linked: {0}", [__(card.link_source)]) }}</div>
 				<template v-if="card.contact">
-					<div class="db-sub">{{ __("Contact") }}</div>
+					<div class="db-sub">{{ __("Contact", null, "DialogBrain") }}</div>
 					<div v-if="card.contact.phone" class="db-line">
 						<a :href="'tel:' + card.contact.phone">{{ card.contact.phone }}</a>
 					</div>
@@ -148,7 +148,7 @@
 					<span v-if="card.lead.company_name"> {{ card.lead.company_name }}</span>
 				</div>
 				<template v-if="card.contact">
-					<div class="db-sub">{{ __("Contact") }}</div>
+					<div class="db-sub">{{ __("Contact", null, "DialogBrain") }}</div>
 					<div v-if="card.contact.phone" class="db-line">
 						<a :href="'tel:' + card.contact.phone">{{ card.contact.phone }}</a>
 					</div>

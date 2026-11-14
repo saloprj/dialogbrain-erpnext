@@ -63,7 +63,7 @@
 				@blur="picker.open && closePickerSoon()"
 			></textarea>
 			<button type="button" class="btn btn-primary btn-sm db-send" :disabled="!canSend || sending" @click="send">
-				{{ c.draft ? __("Approve") : __("Send") }}
+				{{ c.draft ? __("Approve") : __("Send", null, "DialogBrain") }}
 			</button>
 		</div>
 	</div>
@@ -250,7 +250,7 @@ function onFiles(e) {
 			.catch((err) => {
 				target.files = target.files.filter((f) => f.key !== chip.key);
 				frappe.msgprint({
-					title: __("Upload failed"),
+					title: __("Upload failed", null, "DialogBrain"),
 					indicator: "red",
 					message: frappe.utils.escape_html(__("Could not upload {0}: {1}", [file.name, err.message])),
 				});

@@ -21,7 +21,7 @@ frappe.query_reports["First Response Time"] = {
 			options: [
 				{ value: "Manager", label: __("Manager", null, "DialogBrain") },
 				{ value: "Channel", label: __("Channel") },
-				{ value: "Day", label: __("Day") },
+				{ value: "Day", label: __("Day", null, "DialogBrain") },
 			],
 			default: "Manager",
 		},

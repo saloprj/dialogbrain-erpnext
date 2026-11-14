@@ -8,7 +8,7 @@
 				:aria-label="__('Search conversations')"
 				v-model="search"
 			/>
-			<select class="form-control input-xs db-select" v-model="store.filters.status" :aria-label="__('Status')">
+			<select class="form-control input-xs db-select" v-model="store.filters.status" :aria-label="__('Status', null, 'DialogBrain')">
 				<option value="Open">{{ __("Open", null, "DialogBrain") }}</option>
 				<option value="Closed">{{ __("Closed", null, "DialogBrain") }}</option>
 				<option value="All">{{ __("All", null, "DialogBrain") }}</option>

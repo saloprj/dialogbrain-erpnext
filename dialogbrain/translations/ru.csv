@@ -42,7 +42,7 @@ Anyone,Любой,
 Api Key,Ключ API,
 Approve,Одобрить,
 Approved but not sent.,"Одобрено, но не отправлено.",
-Assign to me,Назначить мне,
+Assign to me,Назначить мне,DialogBrain
 Assigned to,Назначено,
 At most {0} items per draft order,Не более {0} позиций в черновике заказа,
 Attach files,Прикрепить файлы,
@@ -83,7 +83,8 @@ Connect with DialogBrain failed,Не удалось подключить чер�
 Connected,Подключено,
 Connected to DialogBrain workspace {0},Подключено к рабочему пространству DialogBrain {0},
 "Connected to {0}: {1} channels, history import queued","Подключено к {0}: каналов {1}, импорт истории поставлен в очередь",
-Contact,Контакт,
+Contact,Контакт,DialogBrain
+Contact Name,Контактное имя,
 Conversation,Диалог,
 Conversations,Диалоги,
 Conversations by Channel and Manager,Диалоги по каналам и менеджерам,
@@ -100,6 +101,7 @@ Create Lead,Создать лида,DialogBrain
 Create Quotation,Создать коммерческое предложение,DialogBrain
 Create Sales Order,Создать заказ покупателя,DialogBrain
 Create a Lead from this conversation's contact?,Создать лида из контакта этого диалога?,
+Created At,Создано в,
 Customer,Клиент,
 Customer data tools,Инструменты данных клиентов,
 Customer data tools need an admin/owner DialogBrain API key,Инструментам данных клиентов нужен ключ API DialogBrain администратора или владельца,
@@ -116,15 +118,15 @@ DB Message Attachment,Вложение сообщения DialogBrain,
 DB Note,Заметка DialogBrain,
 DB Quick Reply,Быстрый ответ DialogBrain,
 DB Webhook Log,Журнал вебхуков DialogBrain,
-Day,День,
+Day,День,DialogBrain
 Db Contact Id,Идентификатор контакта DialogBrain,
 Db Id,Идентификатор DialogBrain,
+Default Company,Компания по умолчанию,
 Default Manager,Менеджер по умолчанию,
 Delete note,Удалить заметку,
 Delete this note?,Удалить эту заметку?,
-Deleted,Удалено,
+Deleted,Удалено,DialogBrain
 Delivery Id,Идентификатор доставки,
-Delivery Status,Статус доставки,
 Delivery not confirmed,Доставка не подтверждена,
 Delivery status unknown,Статус доставки неизвестен,
 Delivery status unknown: DialogBrain did not confirm this message. Check the conversation before sending it again.,"Статус доставки неизвестен: DialogBrain не подтвердил это сообщение. Проверьте диалог, прежде чем отправлять его ещё раз.",
@@ -168,7 +170,6 @@ ERPNext Agent User,Пользователь-агент ERPNext,
 Each item needs an item_code,Каждой позиции нужен item_code,
 Edit,Изменить,DialogBrain
 Editing AI draft — Send approves it with your text,Редактирование черновика ИИ — «Отправить» одобрит его с вашим текстом,
-Enabled,Включено,
 "Enter to send, Shift+Enter for a new line, / for quick replies","Enter — отправить, Shift+Enter — новая строка, / — быстрые ответы",
 Error,Ошибка,
 Event,Событие,
@@ -178,6 +179,7 @@ File Id,Идентификатор файла,
 Filename,Имя файла,
 Filter by party needs both party_type and party,"Для фильтра по стороне нужны и party_type, и party",
 First Response Seconds,Секунд до первого ответа,
+First Response Time,Время первого отклика,
 From Date,С даты,DialogBrain
 From chat,Из чата,
 Full Text,Полный текст,
@@ -315,7 +317,7 @@ Search conversations,Искать диалоги,
 "Search name, phone, text…","Искать по имени, телефону, тексту…",
 Searching…,Поиск…,
 Select a conversation,Выберите диалог,
-Send,Отправить,
+Send,Отправить,DialogBrain
 Sending,Отправляется,DialogBrain
 Sent,Отправлено,DialogBrain
 Sent At,Отправлено,
@@ -326,7 +328,7 @@ Several agents answer this channel: choose one,Этот канал обслуж�
 Shortcut,Сокращение,
 "Sign-in with DialogBrain needs an https site address. Use ""Connect with API key"" instead.",Для входа через DialogBrain нужен адрес сайта с https. Воспользуйтесь вместо этого «Подключить по ключу API».,
 Size,Размер,
-Status,Статус,
+Status,Статус,DialogBrain
 Stop syncing with DialogBrain? Mirrored conversations stay in ERPNext.,Прекратить синхронизацию с DialogBrain? Скопированные диалоги останутся в ERPNext.,
 Stop the AI agent answering this conversation until you give it back,"Остановить ответы ИИ-агента в этом диалоге, пока вы не вернёте его",
 Suggestions,Возможные совпадения,DialogBrain
@@ -362,7 +364,7 @@ Thread Id,Идентификатор ветки,
 Thread Ref,Ссылка на ветку,
 Title,Название,DialogBrain
 To Date,По дату,DialogBrain
-Today,Сегодня,
+Today,Сегодня,DialogBrain
 Tool,Инструмент,
 Unanswered,Без ответа,
 Unanswered Conversations,Диалоги без ответа,
@@ -378,7 +380,7 @@ Unpaid invoices,Неоплаченные счета,
 Unread,Непрочитанные,DialogBrain
 Unread Count,Количество непрочитанных,
 Updating DialogBrain agents…,Обновление агентов DialogBrain…,
-Upload failed,Не удалось загрузить,
+Upload failed,Не удалось загрузить,DialogBrain
 Uploading…,Загрузка…,
 User,Пользователь,
 Waiting (min),Ожидание (мин),
@@ -426,6 +428,7 @@ default,по умолчанию,
 deleted,удалено,
 e.g. /price. Unique per owner.,Напр. /price. Уникально для каждого владельца.,
 editing below,редактирование ниже,
+failed,не выполнено,
 file_urls must be a list,file_urls должен быть списком,
 human,человек,
 in,входящее,

@@ -29,7 +29,7 @@ def group_label(group_by):
 	if group_by == "Manager":
 		return _("Manager", context="DialogBrain")
 	if group_by == "Day":
-		return _("Day")
+		return _("Day", context="DialogBrain")
 	return _("Channel")
 
 

@@ -110,7 +110,7 @@ const agentPausedTitle = computed(() =>
 );
 const agentOptions = computed(() => {
 	const a = props.conv.assigned_to;
-	if (!a) return [{ label: __("Assign to me"), user: me }];
+	if (!a) return [{ label: __("Assign to me", null, "DialogBrain"), user: me }];
 	if (a === me) return [{ label: __("Unassign"), user: null }];
 	return [];
 });

@@ -27,6 +27,9 @@ GLOSSARY_OVERRIDES = {
 	"Chats", "Conversation", "Take over", "Give back to agent", "Assign", "Unassigned", "Unanswered",
 	"Draft", "Quick reply", "Note", "Copilot", "Autopilot", "Off", "Customer", "Lead",
 	"Connect", "Reconnect", "Disconnect",
+	# the stored Select value of the glossary "Off" (DB Channel agent_mode); Frappe v15 has
+	# "від" (uk) / "выкл" (ru) for it, v16 nothing: the glossary wording is used on both
+	"off",
 }
 # Rows whose translation may equal the source: product names only.
 SAME_AS_SOURCE = {"DialogBrain"}
@@ -231,9 +234,12 @@ class TestTranslations(FrappeTestCase):
 		for lang in LANGUAGES:
 			other = other_apps_translations(lang)
 			ours = {row_key(row[0], row[2]): row[1] for row in read_rows(lang)}
-			# keys both we and another app translate: our rows plus the bare strings we left to them
-			visible_bare = {s for s, c in visible_strings() if not c}
-			shared = (set(ours) | visible_bare) & set(other)
+			# sources this policy covers, i.e. that another app translates too: bare ones (our
+			# rows, or left to that app) are compared below, contextual ones carry a context
+			# because of it. Counted over sources so the guard holds on v15 too, whose
+			# dictionaries are far smaller than v16's (52 vs 74 at the time of writing).
+			visible = visible_strings()
+			shared = ({s for s, _c in visible} | {row[0] for row in read_rows(lang)}) & set(other)
 			self.assertGreater(len(shared), 40, f"{lang}: suspiciously few shared keys, the check is vacuous")
 			collisions = sorted(
 				k for k in set(ours) & set(other) if ours[k] != other[k] and k not in GLOSSARY_OVERRIDES

@@ -10,7 +10,7 @@
 			<div v-else-if="m.text" class="db-body db-plain">{{ m.text }}</div>
 			<AttachmentView v-for="(a, i) in m.attachments || []" :key="a.file_id || i" :message="m.name" :att="a" />
 			<div class="db-foot">
-				<span v-if="m.delivery_status === 'deleted'" class="db-deleted">{{ __("Deleted") }}</span>
+				<span v-if="m.delivery_status === 'deleted'" class="db-deleted">{{ __("Deleted", null, "DialogBrain") }}</span>
 				<span class="db-time" :title="fullTime">{{ clockTime(m.sent_at) }}</span>
 				<span v-if="m.direction === 'out'" class="db-status" :class="'db-status-' + status">
 					<svg v-if="status === 'pending'" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
@@ -67,7 +67,7 @@ const statusLabel = computed(
 			sent: __("Sent", null, "DialogBrain"),
 			unknown: __("Delivery status unknown"),
 			failed: __("Failed", null, "DialogBrain"),
-			deleted: __("Deleted"),
+			deleted: __("Deleted", null, "DialogBrain"),
 		})[status.value] || ""
 );
 
