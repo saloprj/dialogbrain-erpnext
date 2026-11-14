@@ -163,11 +163,33 @@ def require_capability(name):
 		frappe.throw(_(UNSUPPORTED_MESSAGE))
 
 
+# Element names of HTML: only these count as tags in :func:`_plain`, so a customer's
+# ``<john@example.com>`` or ``a < b and c > d`` is text, not markup.
+_HTML_TAGS = (
+	"a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption "
+	"center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed "
+	"fieldset figcaption figure font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html "
+	"i iframe img input ins kbd label legend li link main map mark math menu meta meter nav noscript "
+	"object ol optgroup option output p param picture pre progress q rp rt ruby s samp script section "
+	"select small source span strike strong style sub summary sup svg table tbody td template textarea "
+	"tfoot th thead time title tr track tt u ul var video wbr"
+).split()
+_TAG_RE = re.compile(r"</?(?:" + "|".join(_HTML_TAGS) + r")(?=[\s/>])[^>]*>", re.I)
+_CONTENT_RE = re.compile(r"<(script|style)(?=[\s/>])[^>]*>.*?(?:</\1\s*>|$)", re.I | re.S)
+_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)", re.S)
+
+
+def _strip_tags(text):
+	"""Drop real HTML (comments, script/style with their content, tags by element name) and
+	keep every other angle bracket. The result is shown through Vue text interpolation."""
+	return _TAG_RE.sub("", _CONTENT_RE.sub("", _COMMENT_RE.sub("", text)))
+
+
 def _plain(value):
 	# Strip again after unescaping: Frappe v15 sanitises stored HTML with bleach, which
 	# escapes disallowed tags (``&lt;script&gt;``) instead of dropping them like v16's nh3,
 	# and the plain text must not turn those back into markup.
-	return strip_html(html_lib.unescape(strip_html(value or ""))).strip()
+	return _strip_tags(html_lib.unescape(_strip_tags(value or ""))).strip()
 
 
 def _row(r):

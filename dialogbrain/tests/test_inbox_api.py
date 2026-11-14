@@ -441,6 +441,28 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertNotIn(">", preview)
 		self.assertEqual(api.get_conversation(self.a_open_mine)["last_message_preview"], preview)
 
+	def test_plain_text_keeps_angle_brackets_of_the_customer(self):
+		# v15 (bleach) stores a customer's angle brackets escaped exactly like this
+		for stored, plain in (
+			("John &lt;john@example.com&gt;", "John <john@example.com>"),
+			("a &lt; b and c &gt; d", "a < b and c > d"),
+			("price &lt;100, qty &gt;5", "price <100, qty >5"),
+			("<p>a &lt; b and c &gt; d</p>", "a < b and c > d"),
+			("a < b and c > d", "a < b and c > d"),  # raw, unescaped
+			("mail <a@x.com> now", "mail <a@x.com> now"),
+		):
+			self.assertEqual(api._plain(stored), plain, stored)
+
+	def test_plain_text_drops_escaped_markup(self):
+		for stored, plain in (
+			("<p>hi</p>&lt;script&gt;x&lt;/script&gt;&lt;img src=x onerror=y&gt;", "hi"),
+			("&lt;style&gt;p{}&lt;/style&gt;&lt;b&gt;bold&lt;/b&gt;&lt;br/&gt;!", "bold!"),
+			('&lt;iframe src="https://evil.example"&gt;&lt;/iframe&gt;ok', "ok"),
+			("&lt;SCRIPT type=x&gt;alert(1)&lt;/SCRIPT&gt;fine", "fine"),
+			("&lt;!-- note --&gt;text", "text"),
+		):
+			self.assertEqual(api._plain(stored), plain, stored)
+
 	def test_message_html_drops_forms_meta_and_styles(self):
 		"""R3: no phishing forms, no link/meta, no style attributes (overlays)."""
 		evil = (
