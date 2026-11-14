@@ -67,6 +67,23 @@ def _bad_gateway():
 	frappe.throw(_("Could not fetch the attachment from DialogBrain"), MediaBadGateway)
 
 
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _requested_range():
+	"""The client's single ``bytes=a-b | a- | -n`` range, or None. The value forwarded
+	upstream is rebuilt from the regex groups, never the raw header."""
+	try:
+		headers = frappe.request.headers
+	except (RuntimeError, AttributeError):  # no request bound (tests, background calls)
+		return None
+	raw = headers.get("Range") if headers else None
+	match = _RANGE_RE.match(raw.strip()) if isinstance(raw, str) else None
+	if not match or not (match.group(1) or match.group(2)):
+		return None
+	return f"bytes={match.group(1)}-{match.group(2)}"
+
+
 def _safe_filename(name):
 	name = (name or "file").replace("\r", " ").replace("\n", " ").replace('"', "'")
 	return name.encode("latin-1", "replace").decode("latin-1") or "file"
@@ -76,7 +93,7 @@ def _disposition(kind, filename):
 	return f"{kind}; filename=\"{_safe_filename(filename)}\"; filename*=UTF-8''{quote(filename or 'file', safe='')}"
 
 
-def _open_upstream(file_id, numeric_id):
+def _open_upstream(file_id, numeric_id, range_value=None):
 	"""Resolve the URL and open the stream. Returns None on any failure; the URL never
 	leaves this frame (the caller raises outside any except block)."""
 	try:
@@ -91,6 +108,8 @@ def _open_upstream(file_id, numeric_id):
 		)
 		if not url:
 			return None
+		if range_value:
+			return requests.get(url, stream=True, timeout=30, headers={"Range": range_value})
 		return requests.get(url, stream=True, timeout=30)
 	except (DialogBrainError, requests.RequestException):
 		return None
@@ -117,12 +136,12 @@ def get(message, file_id):
 	except ValueError:
 		frappe.throw(_("Invalid file id"), frappe.PermissionError)
 
-	upstream = _open_upstream(file_id, numeric_id)
+	upstream = _open_upstream(file_id, numeric_id, _requested_range())
 	if upstream is None:
 		_bad_gateway()
 
 	try:
-		if upstream.status_code != 200:
+		if upstream.status_code not in (200, 206, 416):
 			_bad_gateway()
 		try:
 			length = int(upstream.headers.get("Content-Length") or 0)
@@ -134,6 +153,7 @@ def get(message, file_id):
 		upstream.close()
 		raise
 
+	status = upstream.status_code
 	normalized = _normalize_mime(att.mime_type or upstream.headers.get("Content-Type"))
 	kind = "inline" if normalized in INLINE_MIMES else "attachment"
 	headers = {
@@ -144,6 +164,18 @@ def get(message, file_id):
 		"X-Content-Type-Options": "nosniff",
 		"Content-Security-Policy": "sandbox; default-src 'none'",
 	}
+	if kind == "inline" and normalized.startswith(("audio/", "video/")):
+		headers["Accept-Ranges"] = "bytes"
+	if status == 416:
+		content_range = str(upstream.headers.get("Content-Range") or "")
+		if re.match(r"^bytes \*/\d+$", content_range):
+			headers["Content-Range"] = content_range
+		upstream.close()
+		return Response(b"", status=416, headers=headers)
+	if status == 206:
+		content_range = str(upstream.headers.get("Content-Range") or "")
+		if re.match(r"^bytes \d+-\d+/(\d+|\*)$", content_range):
+			headers["Content-Range"] = content_range
 	if length:
 		headers["Content-Length"] = str(length)
 
@@ -160,4 +192,4 @@ def get(message, file_id):
 		finally:
 			upstream.close()
 
-	return Response(stream(), headers=headers, direct_passthrough=True)
+	return Response(stream(), status=status, headers=headers, direct_passthrough=True)

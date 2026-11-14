@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -28,6 +29,10 @@ def _upstream(chunks=(b"abc", b"def"), length=None, status=200, ctype="image/png
 		up.headers["Content-Length"] = str(length)
 	up.iter_content.return_value = iter(chunks)
 	return up
+
+
+def _range_req(value):
+	return patch.object(frappe, "request", SimpleNamespace(headers={"Range": value}), create=True)
 
 
 def _client(url=SECRET_URL, file_id=42):
@@ -218,3 +223,106 @@ class TestMedia(DialogBrainTestCase):
 			self.assertTrue(resp.headers["Content-Disposition"].startswith(kind), repr(mime))
 			self.assertNotIn("X-Evil", resp.headers)
 			self.assertNotIn("Set-Cookie", resp.headers)
+
+
+	def _av(self, fid, mime="audio/ogg", filename="v.ogg"):
+		return _att_msg(self.conv_a, fid, mime=mime, filename=filename)
+
+	def test_range_request_is_forwarded_and_answered_206(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("90")
+		body = b"x" * 100
+		up = _upstream(chunks=(body,), length=100, status=206, ctype="audio/ogg")
+		up.headers["Content-Range"] = "bytes 100-199/5000"
+		with patch(CLIENT, _client(file_id=90)), patch(REQUESTS_GET, return_value=up) as rg, \
+				_range_req("bytes=100-199"):
+			resp = media.get(msg, "90")
+			got = b"".join(resp.response)
+		rg.assert_called_once_with(SECRET_URL, stream=True, timeout=30, headers={"Range": "bytes=100-199"})
+		self.assertEqual(resp.status_code, 206)
+		self.assertEqual(resp.headers["Content-Range"], "bytes 100-199/5000")
+		self.assertEqual(resp.headers["Content-Length"], "100")
+		self.assertEqual(got, body)
+
+	def test_open_ended_and_suffix_ranges_are_forwarded(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("91")
+		for value in ("bytes=100-", "bytes=-500"):
+			up = _upstream(chunks=(b"zz",), length=2, status=206, ctype="audio/ogg")
+			up.headers["Content-Range"] = "bytes 4998-4999/5000"
+			with patch(CLIENT, _client(file_id=91)), patch(REQUESTS_GET, return_value=up) as rg, \
+					_range_req(value):
+				resp = media.get(msg, "91")
+				got = b"".join(resp.response)
+			rg.assert_called_once_with(SECRET_URL, stream=True, timeout=30, headers={"Range": value})
+			self.assertEqual(resp.status_code, 206, value)
+			self.assertEqual(resp.headers["Content-Range"], "bytes 4998-4999/5000")
+			self.assertEqual(got, b"zz")
+
+	def test_storage_that_ignores_range_gives_a_full_200(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("92")
+		up = _upstream(chunks=(b"abc", b"def"), length=6, status=200, ctype="audio/ogg")
+		with patch(CLIENT, _client(file_id=92)), patch(REQUESTS_GET, return_value=up), \
+				_range_req("bytes=2-3"):
+			resp = media.get(msg, "92")
+			got = b"".join(resp.response)
+		self.assertEqual(resp.status_code, 200)
+		self.assertNotIn("Content-Range", resp.headers)
+		self.assertEqual(resp.headers["Content-Length"], "6")
+		self.assertEqual(got, b"abcdef")
+
+	def test_unsatisfiable_range_is_416_not_500(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("93")
+		up = _upstream(chunks=(b"<Error/>",), status=416, ctype="application/xml")
+		up.headers["Content-Range"] = "bytes */5000"
+		with patch(CLIENT, _client(file_id=93)), patch(REQUESTS_GET, return_value=up), \
+				_range_req("bytes=9000-"):
+			resp = media.get(msg, "93")
+			got = b"".join(resp.response)
+		self.assertEqual(resp.status_code, 416)
+		self.assertEqual(resp.headers["Content-Range"], "bytes */5000")
+		self.assertEqual(got, b"")
+		up.close.assert_called()
+
+	def test_malformed_or_multi_range_is_ignored(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("94")
+		for value in ("bytes=abc", "items=0-1", "bytes=0-1,5-6", "bytes=-", "bytes=1-2\r\nX: y"):
+			up = _upstream(chunks=(b"abc", b"def"), length=6, ctype="audio/ogg")
+			with patch(CLIENT, _client(file_id=94)), patch(REQUESTS_GET, return_value=up) as rg, \
+					_range_req(value):
+				resp = media.get(msg, "94")
+				got = b"".join(resp.response)
+			rg.assert_called_once_with(SECRET_URL, stream=True, timeout=30)
+			self.assertEqual(resp.status_code, 200, value)
+			self.assertEqual(got, b"abcdef")
+
+	def test_audio_and_video_advertise_accept_ranges(self):
+		frappe.set_user(self.agent_a)
+		for i, (mime, expect) in enumerate((("audio/ogg", True), ("video/mp4", True),
+										   ("image/png", False), ("application/pdf", False))):
+			fid = str(100 + i)
+			msg = _att_msg(self.conv_a, fid, mime=mime, filename="x.bin")
+			with patch(CLIENT, _client(file_id=int(fid))), patch(REQUESTS_GET, return_value=_upstream()):
+				resp = media.get(msg, fid)
+			if expect:
+				self.assertEqual(resp.headers["Accept-Ranges"], "bytes", mime)
+			else:
+				self.assertNotIn("Accept-Ranges", resp.headers, mime)
+
+	def test_range_keeps_the_security_headers(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("95", mime="video/mp4", filename="v.mp4")
+		up = _upstream(chunks=(b"xy",), length=2, status=206, ctype="video/mp4")
+		up.headers["Content-Range"] = "bytes 0-1/10"
+		with patch(CLIENT, _client(file_id=95)), patch(REQUESTS_GET, return_value=up), \
+				_range_req("bytes=0-1"):
+			resp = media.get(msg, "95")
+		self.assertEqual(resp.status_code, 206)
+		self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
+		self.assertEqual(resp.headers["Content-Security-Policy"], "sandbox; default-src 'none'")
+		self.assertTrue(resp.headers["Content-Disposition"].startswith("inline"))
+		self.assertEqual(resp.headers["Content-Type"], "video/mp4")
+		self.assertEqual(resp.headers["Accept-Ranges"], "bytes")
