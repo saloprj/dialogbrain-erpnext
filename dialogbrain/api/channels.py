@@ -42,11 +42,19 @@ def _reason(exc) -> str:
 	return _SECRET.sub("[hidden]", str(exc) or type(exc).__name__)[:REASON_MAX]
 
 
-def _found(channel, client) -> list:
+def _unreadable():
+	return _("the agent of this channel could not be read from DialogBrain right now; try again")
+
+
+def _read(channel, client, changing=False) -> tuple:
+	"""``(found, unreadable)``; a failing read throws with the key scrubbed (``changing``:
+	the caller is about to change the mode, so the message says nothing was changed)."""
 	try:
-		return agent_modes.candidates(client).get(str(channel.account_id), [])
+		return agent_modes.read_channel(client, channel)
 	except DialogBrainError as exc:
 		frappe.log_error(title="DialogBrain agent options failed", message=frappe.get_traceback())
+		if changing:
+			frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_reason(exc)))
 		frappe.throw(_("Agents could not be read from DialogBrain: {0}").format(_reason(exc)))
 
 
@@ -76,10 +84,9 @@ def agent_options(channel: str) -> dict:
 	"""The channel's agent, mode and the agents that could serve it, read live."""
 	_require_manager()
 	doc = _channel(channel)
-	found = _found(doc, DialogBrainClient.from_settings())
-	values = agent_modes._decide(doc, found)
-	values["agent_mode_synced_at"] = now_datetime()
-	frappe.db.set_value(CHANNEL, doc.name, values, update_modified=False)
+	found, unreadable = _read(doc, DialogBrainClient.from_settings())
+	if not unreadable:
+		agent_modes.store_decision(doc, found)
 	return _payload(doc.name, found)
 
 
@@ -88,7 +95,9 @@ def choose_agent(channel: str, trigger_id: str) -> dict:
 	"""Bind the channel to one of its exclusive agent triggers."""
 	_require_manager()
 	doc = _channel(channel)
-	found = _found(doc, DialogBrainClient.from_settings())
+	found, unreadable = _read(doc, DialogBrainClient.from_settings())
+	if unreadable:
+		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_unreadable()))
 	chosen = next((c for c in found if c["exclusive"] and c["trigger_id"] == str(trigger_id)), None)
 	if not chosen:
 		frappe.throw(_("This agent trigger can not be chosen for this channel"))
@@ -118,17 +127,13 @@ def set_agent_mode(channel: str, mode: str) -> dict:
 	if not (doc.agent_trigger_id and doc.agent_id):
 		frappe.throw(_("This channel has no agent to switch. Open the channel and choose one."))
 	client = DialogBrainClient.from_settings()
-	try:
-		found = agent_modes.candidates(client).get(str(doc.account_id), [])
-	except DialogBrainError as exc:
-		frappe.log_error(title="DialogBrain agent options failed", message=frappe.get_traceback())
-		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_reason(exc)))
+	found, unreadable = _read(doc, client, changing=True)
+	if unreadable:
+		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_unreadable()))
 	bound = str(doc.agent_trigger_id)
 	if not any(c["exclusive"] and c["trigger_id"] == bound for c in found):
 		# the stored binding is stale (trigger shared, deleted, agent inactive): never switch it
-		values = agent_modes._decide(doc, found)
-		values["agent_mode_synced_at"] = now_datetime()
-		frappe.db.set_value(CHANNEL, doc.name, values, update_modified=False)
+		agent_modes.store_decision(doc, found)
 		frappe.db.commit()  # frappe.throw rolls back; keep the refreshed binding
 		frappe.throw(
 			_("The agent setup of this channel changed in DialogBrain; the channel was refreshed. Nothing was switched.")

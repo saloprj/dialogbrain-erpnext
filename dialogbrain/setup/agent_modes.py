@@ -75,6 +75,22 @@ def _read(client) -> tuple:
 	return found, failed
 
 
+def read_channel(client, channel) -> tuple:
+	"""Live read for one channel: ``(found, unreadable)``. ``unreadable`` is True when the
+	agent the channel is bound to could not be read in this call (a 5xx, a deletion in
+	between): the caller must then write nothing for the channel, as ``sync`` does."""
+	found, failed = _read(client)
+	unreadable = bool(channel.agent_id) and str(channel.agent_id) in failed
+	return found.get(str(channel.account_id), []), unreadable
+
+
+def store_decision(channel, found: list) -> None:
+	"""Store what ``sync`` would store for this one channel, given its live candidates."""
+	values = _decide(channel, found)
+	values["agent_mode_synced_at"] = now_datetime()
+	frappe.db.set_value(CHANNEL, channel.name, values, update_modified=False)
+
+
 def _failure_text(exc: DialogBrainError) -> str:
 	if exc.error_type == "permission_denied":
 		return _("The DialogBrain key may not read agents: connect with a member, admin or owner key")

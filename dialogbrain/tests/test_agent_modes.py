@@ -399,6 +399,23 @@ class TestChangeMode(_Base):
 		self.assertEqual(self.updates(), [])
 		self.assertEqual(self.row("101"), before)
 
+	def test_an_unreadable_bound_agent_is_not_unbound_or_switched(self):
+		from dialogbrain.api import channels
+
+		before = self.row("101")
+		self.fake.get_errors[10] = DialogBrainError("HTTP 500", status=500)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			channels.set_agent_mode("101", "off")
+		self.assertIn("DialogBrain did not change the agent mode", str(ctx.exception))
+		self.assertIn("could not be read", str(ctx.exception))
+		self.assertEqual(self.updates(), [])
+		self.assertEqual(self.row("101"), before)
+		channels.agent_options("101")  # same situation: row unchanged
+		self.assertEqual(self.row("101"), before)
+		with self.assertRaises(frappe.ValidationError):
+			channels.choose_agent("101", "1")
+		self.assertEqual(self.row("101"), before)
+
 	def test_set_mode_returns_the_real_choices(self):
 		from dialogbrain.api import channels
 
