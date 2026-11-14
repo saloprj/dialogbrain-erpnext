@@ -7,9 +7,10 @@ not captured, DialogBrain's publishers (``conversation_event_service``,
 """
 
 import json
+from time import monotonic
 
 import frappe
-from frappe.utils.background_jobs import is_job_enqueued
+from frappe.utils.background_jobs import get_job, get_workers
 
 from dialogbrain.party import link_party
 from dialogbrain.sync.notify import notify, publish
@@ -42,7 +43,8 @@ def delivery_job_id(log_name: str) -> str:
 DRAIN_JOB = "dialogbrain.sync.processor.drain"
 DRAIN_BATCH = 100
 DRAIN_MAX_BATCHES = 100
-DRAIN_TIMEOUT = 3600  # RQ's queue default (300 s on short) would fire inside a row's processing
+DRAIN_MAX_SECONDS = 600  # a run returns regularly; what is left waits for the next kick
+DRAIN_TIMEOUT = 900  # above the run budget; RQ's 300 s default on short would fire inside a row
 DRAIN_SAVEPOINT = "dialogbrain_drain_row"
 KICK_ERROR_EVERY = 300  # seconds between Error Log rows for a failing kick of one lane
 
@@ -52,15 +54,37 @@ def drain_job_id(lane: str) -> str:
 	return f"dialogbrain_drain_{lane}"
 
 
+def live_worker_names() -> set:
+	return {w.name for w in get_workers()}
+
+
+def _drain_in_flight(job_id: str) -> bool:
+	"""Is the lane's drain queued, or started on a worker that is still alive? A job whose
+	worker died (deploy, OOM, SIGKILL) stays ``started`` in Redis until RQ's registry
+	cleanup, up to timeout + maintenance interval; such a job is deleted so a new drain can
+	be queued now instead of every kick of the lane being skipped for that long."""
+	job = get_job(job_id)
+	if job is None:
+		return False
+	status = job.get_status(refresh=False)
+	if status == "queued":
+		return True
+	if status == "started":
+		if job.worker_name in live_worker_names():
+			return True
+		job.delete()
+	return False
+
+
 def kick_drain(lane: str) -> None:
-	"""Enqueue the lane's drain unless one is queued or running (checked here first:
+	"""Enqueue the lane's drain unless one is in flight (checked here first:
 	``frappe.enqueue``'s own dedupe logs an error line per skipped kick, and a burst is
 	thousands of kicks). Never raises: the delivery row is already committed, and a full RQ
 	queue (``QueueOverloaded``) must not become a 503 that DialogBrain retries five times;
 	the scheduler kicks again within a minute. One Error Log per lane per 5 minutes."""
 	job_id = drain_job_id(lane)
 	try:
-		if is_job_enqueued(job_id):
+		if _drain_in_flight(job_id):
 			return
 		frappe.enqueue(
 			DRAIN_JOB, queue=lane, timeout=DRAIN_TIMEOUT, job_id=job_id, deduplicate=True, lane=lane
@@ -78,19 +102,24 @@ def drain(lane: str = "short", batch_size: int = DRAIN_BATCH, max_batches: int =
 	process. One job per lane instead of one per delivery: a burst of thousands of webhook
 	deliveries (channel-sync backfill) costs one worker fork, not thousands, and the RQ queue
 	never overflows. Commits after every row, so a killed job keeps what it finished. Bounded
-	by ``max_batches``; a row still queued after that is picked up by the next kick. A row
-	whose processing raises past ``process_delivery``'s own guard (its FOR UPDATE reads: a
-	lock wait or deadlock) is logged and left queued for the next kick; the lane goes on."""
-	lane_sql = "ifnull(`lane`, 'short') = %(lane)s" if lane == "short" else "`lane` = %(lane)s"
+	by ``max_batches`` and ``DRAIN_MAX_SECONDS``; a row still queued after that is picked up
+	by the next kick. A row whose processing raises past ``process_delivery``'s own guard
+	(its FOR UPDATE reads: a lock wait or deadlock) is logged once, skipped for the rest of
+	this run and left queued for the next kick; the lane goes on."""
+	started = monotonic()
+	skipped = [""]  # never empty: "in (...)" needs a value
 	for _ in range(max_batches):
+		if monotonic() - started > DRAIN_MAX_SECONDS:
+			return
 		names = frappe.db.sql(
-			f"""
+			"""
 			select name from `tabDB Webhook Log`
-			where status = 'queued' and ifnull(attempts, 0) < %(max)s and {lane_sql}
+			where status = 'queued' and ifnull(attempts, 0) < %(max)s
+			  and ifnull(`lane`, 'short') = %(lane)s and name not in %(skipped)s
 			order by received_at, name
 			limit %(limit)s
 			""",
-			{"lane": lane, "max": MAX_ATTEMPTS, "limit": batch_size},
+			{"lane": lane, "max": MAX_ATTEMPTS, "limit": batch_size, "skipped": tuple(skipped)},
 			pluck=True,
 		)
 		if not names:
@@ -101,6 +130,7 @@ def drain(lane: str = "short", batch_size: int = DRAIN_BATCH, max_batches: int =
 				process_delivery(name)
 			except Exception:  # noqa: BLE001 - one row must not kill the lane's job
 				rollback_to(DRAIN_SAVEPOINT)
+				skipped.append(name)
 				frappe.log_error(title="DialogBrain delivery raised in drain", message=frappe.get_traceback())
 				continue
 			_commit()

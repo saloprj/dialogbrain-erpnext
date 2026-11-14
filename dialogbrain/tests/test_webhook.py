@@ -177,20 +177,47 @@ class TestReceive(DialogBrainTestCase):
 	def test_kick_drain_skips_enqueue_while_the_drain_is_queued_or_running(self):
 		"""frappe.enqueue's own dedupe logs an error line per skipped kick; a burst is
 		thousands of kicks, so the check is done here first."""
-		with patch("dialogbrain.sync.processor.is_job_enqueued", return_value=True), patch(
-			"frappe.enqueue"
-		) as enq:
+		from types import SimpleNamespace
+
+		queued = SimpleNamespace(worker_name=None)
+		queued.get_status = lambda refresh=False: "queued"
+		with patch("dialogbrain.sync.processor.get_job", return_value=queued), patch("frappe.enqueue") as enq:
 			webhook.kick_drain("long")
+		enq.assert_not_called()
+
+	def test_kick_drain_replaces_a_drain_whose_worker_is_gone(self):
+		"""A worker killed mid-drain leaves its job 'started' in Redis until RQ's registry
+		cleanup (timeout + maintenance): without this, every kick of the lane would be
+		skipped for that long and live messages would wait."""
+		from types import SimpleNamespace
+
+		dead = SimpleNamespace(worker_name="rq:worker:gone", delete=lambda: None, deleted=False)
+		dead.get_status = lambda refresh=False: "started"
+		dead.delete = lambda: setattr(dead, "deleted", True)
+		with patch("dialogbrain.sync.processor.get_job", return_value=dead), patch(
+			"dialogbrain.sync.processor.live_worker_names", return_value={"rq:worker:other"}
+		), patch("frappe.enqueue") as enq:
+			webhook.kick_drain("short")
+		self.assertTrue(dead.deleted)
+		enq.assert_called_once()
+
+	def test_kick_drain_leaves_a_running_drain_alone(self):
+		from types import SimpleNamespace
+
+		running = SimpleNamespace(worker_name="rq:worker:alive")
+		running.get_status = lambda refresh=False: "started"
+		with patch("dialogbrain.sync.processor.get_job", return_value=running), patch(
+			"dialogbrain.sync.processor.live_worker_names", return_value={"rq:worker:alive"}
+		), patch("frappe.enqueue") as enq:
+			webhook.kick_drain("short")
 		enq.assert_not_called()
 
 	def test_kick_drain_gives_the_job_a_long_timeout(self):
 		"""RQ's queue default (300 s on short) would fire inside process_event and be
 		swallowed as a failed delivery; the drain is bounded by max_batches instead."""
-		with patch("dialogbrain.sync.processor.is_job_enqueued", return_value=False), patch(
-			"frappe.enqueue"
-		) as enq:
+		with patch("dialogbrain.sync.processor.get_job", return_value=None), patch("frappe.enqueue") as enq:
 			webhook.kick_drain("short")
-		self.assertGreaterEqual(enq.call_args.kwargs["timeout"], 3600)
+		self.assertGreater(enq.call_args.kwargs["timeout"], 300)
 
 	def test_receive_rejects_bad_signature(self):
 		with patch("frappe.enqueue") as enq:

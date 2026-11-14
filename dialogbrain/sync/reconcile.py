@@ -51,6 +51,7 @@ from frappe.utils.password import remove_encrypted_password
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.sync.backfill import (
+	DEFAULT_BACKFILL_DAYS,
 	BACKFILL_JOB_ID,
 	SETTINGS,
 	STATUS_LENGTH,
@@ -256,7 +257,7 @@ def reconcile() -> None:
 		return
 	start = now_datetime()
 	last = get_datetime(settings.last_reconcile_at) if settings.last_reconcile_at else start
-	floor = utc_day(start - timedelta(days=int(settings.backfill_days or 30)))
+	floor = utc_day(start - timedelta(days=int(settings.backfill_days or DEFAULT_BACKFILL_DAYS)))
 	since = max(utc_day(last - timedelta(days=1)), floor)
 	client = DialogBrainClient.from_settings()
 	global_ok = True

@@ -6,11 +6,11 @@ import frappe
 from dateutil import parser as dateparser
 from frappe.utils import now_datetime
 
+from dialogbrain.sync.backfill import DEFAULT_BACKFILL_DAYS
 from dialogbrain.sync.processor import kick_drain
 from dialogbrain.sync.signature import verify_signature
 
 MAX_BODY_BYTES = 1024 * 1024
-DEFAULT_BACKFILL_DAYS = 30
 
 
 def _respond(status_code: int, ok: bool, **extra):

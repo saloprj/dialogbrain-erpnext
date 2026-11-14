@@ -112,9 +112,18 @@ class TestDrain(DialogBrainTestCase):
 		with patch.object(processor, "process_delivery", side_effect=flaky), patch(
 			"dialogbrain.sync.processor.process_event"
 		), patch("frappe.log_error") as log_error:
-			processor.drain("short", max_batches=1)
+			processor.drain("short", batch_size=1)  # the raising row is oldest: first in every select
 		self.assertEqual((self._status(bad), self._status(good)), ("queued", "processed"))
-		log_error.assert_called_once()
+		log_error.assert_called_once()  # skipped for the rest of this run, not re-selected per batch
+
+	def test_drain_stops_when_its_time_budget_is_spent(self):
+		"""A job that returns regularly gives a dead-worker kick a chance within minutes."""
+		for i in range(3):
+			_log("short", 5 - i, marker=f"m{i}")
+		clock = iter([0.0, 0.0, 1000.0, 1000.0, 1000.0])
+		with patch("dialogbrain.sync.processor.monotonic", side_effect=lambda: next(clock)):
+			seen = self._run("short", batch_size=1)
+		self.assertEqual(seen, ["m0"])
 
 	def test_drain_stops_after_max_batches(self):
 		"""A bounded job: the RQ timeout never kills it mid-row; the next kick continues."""

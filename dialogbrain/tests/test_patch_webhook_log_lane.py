@@ -25,14 +25,15 @@ def _row(skip_push, status="queued"):
 
 
 class TestWebhookLogLanePatch(DialogBrainTestCase):
-	def test_queued_backfill_rows_go_to_long_and_the_rest_to_short(self):
+	def test_backfill_rows_go_to_long_whatever_their_status_and_the_rest_to_short(self):
+		"""A failed backfill row is retried on its lane, so it needs ``long`` too."""
 		from dialogbrain.patches.v0_1.set_webhook_log_lane import execute
 
 		backfill = _row(True)
 		live = _row(False)
-		done = _row(True, status="processed")
+		done = _row(True, status="failed")
 		for name in (backfill, live, done):
 			frappe.db.set_value("DB Webhook Log", name, "lane", None, update_modified=False)
 		execute()
 		lanes = {n: frappe.db.get_value("DB Webhook Log", n, "lane") for n in (backfill, live, done)}
-		self.assertEqual(lanes, {backfill: "long", live: "short", done: "short"})
+		self.assertEqual(lanes, {backfill: "long", live: "short", done: "long"})
