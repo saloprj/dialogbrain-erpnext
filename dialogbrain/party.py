@@ -176,6 +176,11 @@ def link_party(conversation):
 			chosen = of_type[0] if len(of_type) == 1 else None
 			break
 	if not chosen:
+		# The current phone / email no longer supports a verified link (changed, or now
+		# shared by two parties): keep the link for a manager to review, but unverified,
+		# so the agent no longer gets the party's data.
+		if conv.link_source == "auto_verified":
+			frappe.db.set_value("DB Conversation", conversation, "link_source", "auto_unverified")
 		return None
 
 	channel_type = (frappe.db.get_value("DB Channel", conv.channel, "channel_type") or "").lower() if conv.channel else ""
