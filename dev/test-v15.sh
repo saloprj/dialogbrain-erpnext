@@ -4,12 +4,15 @@
 # Everything happens in throwaway containers on a private Docker network, all named
 # dbx-v15-<pid>[-...]: mariadb:10.6, redis:7 and frappe/erpnext:v15. No host ports are
 # published, no named volumes are used (the database lives on tmpfs), and the containers
-# and the network are removed on exit -- also on failure and on Ctrl-C.
+# and the network are removed on exit -- also on failure, on Ctrl-C and on SIGTERM (long
+# steps run in the background and are waited for, so a signal is handled at once).
 #
-# This repo is mounted read-only into the bench container and *copied* into
-# apps/dialogbrain, so the v15 build never writes into this checkout (public/dist,
-# node_modules, ...). .git, .superpowers, node_modules and dev/dialogbrain-dev.env are not
-# copied.
+# The repo is NOT mounted into the container: its tree is streamed from the host with
+# `tar | docker exec -i ... tar -x` into apps/dialogbrain, so the v15 build never writes
+# into this checkout (public/dist, node_modules, ...) and nothing outside the copy is
+# visible in a container that runs a Docker Hub image and installs from PyPI. .git,
+# .superpowers, node_modules and every *.env file (dev/dialogbrain-dev.env holds an API
+# key) are not sent; the smoke step checks that no *.env file of ours is in the container.
 #
 # Python: the frappe/erpnext:v15 image runs Python 3.11, but v15's floor (and ours) is 3.10.
 # The script therefore rebuilds the bench virtualenv on a Python 3.10 found on the host
@@ -24,7 +27,8 @@
 #                       cache, so repeated runs don't download every wheel again)
 #        DBX_V15_TAIL   (lines shown, default 60)
 #        DBX_V15_HOLD   (set: after setup, keep the containers up for debugging instead of
-#                       running the suite; Ctrl-C / SIGTERM removes them)
+#                       running the suite; Ctrl-C / SIGTERM removes them; re-send the app
+#                       with the `send_app` pipeline below)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,11 +58,14 @@ if [ -n "${DBX_V15_PIP_CACHE:-}" ]; then
 fi
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dbx-v15.XXXXXX")"
 
-HOLD_PID=""
+CHILD=""
 cleanup() {
 	local rc=$?
 	trap - EXIT INT TERM
-	[ -n "$HOLD_PID" ] && kill "$HOLD_PID" 2>/dev/null
+	if [ -n "$CHILD" ]; then
+		pkill -TERM -P "$CHILD" 2>/dev/null || true
+		kill -TERM "$CHILD" 2>/dev/null || true
+	fi
 	echo ">>> cleanup: removing $NAME containers and network" >&2
 	sudo docker rm -f -v "$BENCH" "$REDIS" "$DB" >/dev/null 2>&1 || true
 	sudo docker network rm "$NET" >/dev/null 2>&1 || true
@@ -69,8 +76,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 step() { echo ">>> $*" >&2; }
+# Run "$@" in the background and wait for it. bash runs a trap only after the foreground
+# command ends, but `wait` returns as soon as a signal arrives: INT/TERM are handled at
+# once (cleanup kills the child and removes the containers).
+bg() {
+	local rc=0
+	"$@" &
+	CHILD=$!
+	wait "$CHILD" || rc=$?
+	CHILD=""
+	return "$rc"
+}
 # Run a command in the bench directory of the v15 container as the frappe user.
-in_bench() { sudo docker exec -i -w /home/frappe/frappe-bench "$BENCH" bash -c "$1"; }
+in_bench() { bg sudo docker exec -i -w /home/frappe/frappe-bench "$BENCH" bash -c "$1"; }
+# Stream the app from the host into apps/dialogbrain (no bind mount: see the header).
+send_app() {
+	tar -C "$REPO" \
+		--exclude=./.git --exclude=./.superpowers --exclude=node_modules --exclude='*.env' \
+		--exclude=__pycache__ --exclude=./dialogbrain/public/dist \
+		-cf - . \
+		| sudo docker exec -i -w /home/frappe/frappe-bench "$BENCH" \
+			bash -c 'mkdir -p apps/dialogbrain && tar -C apps/dialogbrain -xf -'
+}
 
 step "network $NET"
 sudo docker network create "$NET" >/dev/null
@@ -88,7 +115,7 @@ sudo docker run -d --name "$REDIS" --network "$NET" --network-alias redis redis:
 
 step "$IMAGE ($BENCH)"
 sudo docker run -d --name "$BENCH" --network "$NET" \
-	-v "$REPO:/src:ro" "${EXTRA_MOUNTS[@]}" \
+	"${EXTRA_MOUNTS[@]}" \
 	--entrypoint sleep "$IMAGE" infinity >/dev/null
 
 step "waiting for mariadb"
@@ -115,11 +142,8 @@ fi
 step "versions"
 in_bench 'env/bin/python --version; env/bin/python -c "import frappe, erpnext; print(\"frappe\", frappe.__version__, \"erpnext\", erpnext.__version__)"'
 
-step "copying the app into apps/dialogbrain"
-in_bench 'mkdir -p apps/dialogbrain && tar -C /src \
-	--exclude=./.git --exclude=./.superpowers --exclude=node_modules \
-	--exclude=./dev/dialogbrain-dev.env --exclude=__pycache__ --exclude=./dialogbrain/public/dist \
-	-cf - . | tar -C apps/dialogbrain -xf -'
+step "copying the app into apps/dialogbrain (streamed from the host)"
+bg send_app
 
 # The frappe/erpnext image ships no compiler. --only-binary=:all: makes pip refuse to
 # build any dependency from source, so a future dependency without a wheel fails here
@@ -153,15 +177,19 @@ in_bench 'ls sites/assets/dialogbrain/dist/js/ | grep -E "\.bundle\..*\.js$"'
 step "smoke: open the inbox (list_conversations, counters)"
 in_bench "bench --site $SITE execute dialogbrain.api.conversations.list_conversations && bench --site $SITE execute dialogbrain.api.conversations.counters"
 
+step "smoke: no *.env file of this repo reached the container"
+# counts only, never names or contents
+in_bench 'app=$(find apps/dialogbrain -name "*.env" | wc -l); \
+	key=$(find / \( -path /proc -o -path /sys \) -prune -o -name dialogbrain-dev.env -print 2>/dev/null | wc -l); \
+	echo "*.env in apps/dialogbrain: $app; dialogbrain-dev.env anywhere: $key"; [ "$app" -eq 0 ] && [ "$key" -eq 0 ]'
+
 if [ -n "${DBX_V15_HOLD:-}" ]; then
-	# Debugging: keep the containers up (still removed on exit). Re-copy the app with
-	#   sudo docker exec $BENCH bash -c 'tar -C /src ... | tar -C apps/dialogbrain -xf -'
-	# and run single modules with
+	# Debugging: keep the containers up (still removed on exit). Re-send the app from the
+	# host with the tar pipeline of send_app above (tar -C <repo> ... -cf - . | sudo docker
+	# exec -i $BENCH ... tar -C apps/dialogbrain -xf -) and run single modules with
 	#   sudo docker exec -w /home/frappe/frappe-bench $BENCH bench --site $SITE run-tests ...
 	step "holding: bench container $BENCH is ready; Ctrl-C (or SIGTERM to $$) removes it"
-	sleep infinity &
-	HOLD_PID=$!
-	wait "$HOLD_PID"
+	bg sleep infinity
 fi
 
 step "bench run-tests --app dialogbrain"

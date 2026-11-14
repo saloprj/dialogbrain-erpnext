@@ -87,8 +87,9 @@ The same code runs on both; the few API differences are handled in
 - **v16:** the dev bench above (`erpnext-backend-1`), command as in Development.
 - **v15:** `dev/test-v15.sh` runs the whole suite on Frappe/ERPNext v15 in throwaway
   containers (`mariadb:10.6`, `redis:7`, `frappe/erpnext:v15`, all named `dbx-v15-<pid>`,
-  on their own network, no published ports, removed on exit). The repo is copied into the
-  container read-only, so the run never writes into your checkout. The image ships
+  on their own network, no published ports, removed on exit, also on Ctrl-C / SIGTERM). The repo is not
+  mounted: its tree is streamed into the container with `tar` (without `.git` and any
+  `*.env` file), so the run never writes into your checkout and never sees the dev key. The image ships
   Python 3.11; to test on 3.10 the script rebuilds the bench virtualenv on a Python 3.10
   from the host (`DBX_V15_PYTHON=/path/to/python3.10`, or found with
   `uv python find 3.10`; get one with `uv python install 3.10`). Set
