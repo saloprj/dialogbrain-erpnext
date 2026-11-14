@@ -22,3 +22,20 @@ def period(filters):
 
 def minutes(seconds):
 	return round(seconds / 60.0, 1)
+
+
+def group_label(group_by):
+	"""Column title of a group-by value; literal ``_()`` calls run per request, in the user's language."""
+	if group_by == "Manager":
+		return _("Manager")
+	if group_by == "Day":
+		return _("Day")
+	return _("Channel")
+
+
+def label_unassigned(rows):
+	"""The SQL group value ``Unassigned`` is shown in the user's language."""
+	for row in rows:
+		if row.get("group") == "Unassigned":
+			row["group"] = _("Unassigned")
+	return rows
