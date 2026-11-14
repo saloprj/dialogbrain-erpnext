@@ -59,6 +59,9 @@ fi
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dbx-v15.XXXXXX")"
 
 CHILD=""
+# fd 3: the script's own stderr, for cleanup messages (a signal can arrive while a step's
+# output is redirected into its log file)
+exec 3>&2
 cleanup() {
 	local rc=$?
 	trap - EXIT INT TERM
@@ -66,7 +69,7 @@ cleanup() {
 		pkill -TERM -P "$CHILD" 2>/dev/null || true
 		kill -TERM "$CHILD" 2>/dev/null || true
 	fi
-	echo ">>> cleanup: removing $NAME containers and network" >&2
+	echo ">>> cleanup: removing $NAME containers and network" >&3
 	sudo docker rm -f -v "$BENCH" "$REDIS" "$DB" >/dev/null 2>&1 || true
 	sudo docker network rm "$NET" >/dev/null 2>&1 || true
 	exit "$rc"
