@@ -36,26 +36,29 @@
 
 **Files:**
 - Create: `dialogbrain/setup/agent_modes.py`
-- Modify: `dialogbrain/dialogbrain/doctype/db_channel/db_channel.json` (new fields), `dialogbrain/setup/connect.py` (call after channels are upserted)
+- Modify: `dialogbrain/dialogbrain/doctype/db_channel/db_channel.json` (new fields), `dialogbrain/setup/connect.py` (call after channels are upserted), `dialogbrain/hooks.py` (hourly job)
 - Test: `dialogbrain/tests/test_agent_modes.py`
 
 **Interfaces:**
-- Consumes: `DialogBrainClient.execute("agents.list", {})` → `{"agents": [{"id", "name", "status", "send_mode", "trigger_count"}]}`; `execute("agents.get", {"agent_id": id})` → agent dict with `"send_mode"` (or `execution_config.default_send_mode`) and `"triggers": [{"id", "trigger_type", "conditions", "send_mode", "enabled", "priority"}]`. `conditions.channel_account_ids` is a list of account ids as strings or ints.
+- Consumes: `DialogBrainClient.execute("agents.list", {})` → `{"agents": [{"id", "name", "status", "send_mode", "trigger_count", "is_template"}]}` (the list also holds system templates: `is_template: true`, always `active`); `execute("agents.get", {"agent_id": id})` → agent dict with `"send_mode"` (or `execution_config.default_send_mode`) and `"triggers": [{"id", "trigger_type", "conditions", "send_mode", "enabled", "priority"}]`. `conditions.channel_account_ids` is a list of account ids as strings or ints.
 - Produces:
-  - DB Channel fields (all read-only in the form, set by server code only): `agent_id` (Data), `agent_name` (Data), `agent_trigger_id` (Data), `agent_mode_status` (Small Text), `agent_mode_synced_at` (Datetime). `agent_mode` becomes read-only too, with a fourth option `""` (empty = not linked) and default `""`.
+  - DB Channel fields (all read-only in the form, set by server code only): `agent_id` (Data), `agent_name` (Data), `agent_trigger_id` (Data), `agent_mode_status` (Small Text), `agent_mode_synced_at` (Datetime). `agent_mode` becomes read-only too; its Select options become an empty first line followed by `copilot`, `autopilot`, `off` (empty = not linked), default empty.
   - `agent_modes.candidates(client) -> dict[str, list[dict]]`: per channel account id, the triggers that serve it: `{"agent_id", "agent_name", "trigger_id", "mode", "exclusive"}`.
   - `agent_modes.mode_of(trigger: dict, agent: dict) -> str`: `"off"` when `enabled` is false; else `"autopilot"` when the trigger's `send_mode` (or, when it is null, the agent's) is `"auto"`; else `"copilot"`.
   - `agent_modes.sync(client=None) -> dict`: binds every DB Channel and returns `{"linked": n, "ambiguous": n, "none": n}`.
+  - `agent_modes.hourly() -> None`: scheduler entry (`scheduler_events["hourly"]`); does nothing when the site is not connected, calls `sync()` and swallows and logs any error (a mode changed in DialogBrain shows up in ERPNext within the hour without a click).
 
 Rules `sync` applies per channel, in this order:
-1. Only `incoming_message` triggers of agents whose `status` is `active` count. A trigger serves the channel when the channel's `account_id` is in `conditions.channel_account_ids` (compare as strings). `exclusive` is true when that list has exactly this one id.
-2. A channel that already has `agent_trigger_id` keeps it while that trigger is still among its exclusive candidates; its `agent_mode` is refreshed from DialogBrain.
+1. Only `incoming_message` triggers of agents whose `status` is `active` and that are not templates (`is_template` true is skipped, and `agents.get` is not called for it) count. A trigger serves the channel when the channel's `account_id` is in `conditions.channel_account_ids` (compare as strings). `exclusive` is true when that list has exactly this one id.
+2. A channel that already has `agent_trigger_id` keeps it while that trigger is still among its exclusive candidates; its `agent_mode` is refreshed from DialogBrain. A bound trigger that was deleted, or that stopped being exclusive (a second account was added to it in DialogBrain), is unbound and the channel falls through to rules 3–6.
 3. Otherwise, exactly one exclusive candidate → bind it and set `agent_mode` from `mode_of`.
 4. Several exclusive candidates → `agent_mode = ""`, status `Several agents answer this channel: choose one` (the choice is Task 2).
 5. No exclusive candidate but shared ones → `agent_mode = ""`, status `The agent trigger also serves other channels: change it in DialogBrain`.
 6. None → `agent_mode = ""`, status `No agent answers this channel in DialogBrain`.
 
-A DialogBrain error in `sync` is caught by the caller in `connect.py`: Connect never fails because of it; the text goes to every channel's `agent_mode_status` only when nothing could be read at all.
+A DialogBrain error in `sync` is caught by the caller in `connect.py`: Connect never fails because of it; the text goes to every channel's `agent_mode_status` only when nothing could be read at all, and bindings and modes already stored are left as they are. DialogBrain gates these tools by the role of the user who owns the API key (`agents.list`/`agents.get` need member or above, `agents.trigger_update` needs edit rights): a viewer's key is answered `permission_denied`, and the status then reads `The DialogBrain key may not read agents: connect with a member, admin or owner key`.
+
+`autopilot` means "the trigger lets the agent answer by itself". DialogBrain's safety gate can still turn a single answer into a draft; ERPNext does not see that. The README says so (Task 7).
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_agent_modes.py` with a fake client returning two agents and these triggers; assert the stored fields:
 
@@ -74,7 +77,11 @@ def test_two_exclusive_agents_on_one_channel_are_not_guessed(self):      # 104 -
 def test_a_shared_trigger_is_shown_and_not_bound(self):                  # 105 -> "", "…also serves other channels…", agent_trigger_id empty
 def test_a_channel_nobody_answers(self):                                 # 107 (paused agent) and 108 -> "", "No agent answers…"
 def test_a_bound_trigger_survives_a_second_agent_appearing(self):        # bind 104 to trigger 4, sync again -> still 4
-def test_a_bound_trigger_that_is_gone_is_unbound(self):
+def test_a_bound_trigger_that_is_gone_is_unbound(self):                  # trigger deleted in DialogBrain
+def test_a_bound_trigger_that_became_shared_is_unbound(self):            # bound trigger 1 now lists ["101", "109"] -> 101: "", "…also serves other channels…"
+def test_system_templates_are_ignored(self):                             # agent 13 is_template, trigger on "108" -> 108 "No agent answers…"; agents.get never called with 13
+def test_a_key_that_may_not_read_agents(self):                           # agents.list -> permission_denied: connect() returns normally, status names the key role, stored bindings untouched
+def test_hourly_swallows_errors_and_skips_a_disconnected_site(self):
 def test_connect_survives_agents_list_failing(self):                     # connect() returns normally
 def test_account_ids_compare_as_strings(self):                           # 104 given as int
 ```
@@ -88,18 +95,18 @@ def test_account_ids_compare_as_strings(self):                           # 104 g
 
 **Files:**
 - Create: `dialogbrain/api/channels.py`, `dialogbrain/dialogbrain/doctype/db_channel/db_channel.js`
-- Modify: `dialogbrain/public/js/inbox/ConversationHeader.vue` (mode chip), `dialogbrain/api/conversations.py` only if the row lacks a field the chip needs
+- Modify: `dialogbrain/public/js/inbox/ConversationHeader.vue` (mode chip; `get_conversations` already returns the channel's `agent_mode`, so `api/conversations.py` does not change)
 - Test: `dialogbrain/tests/test_agent_modes.py`
 
 **Interfaces:**
-- Consumes: Task 1; `execute("agents.trigger_update", {"trigger_id": int, "send_mode": "auto"|"draft", "enabled": bool})`.
+- Consumes: Task 1; `execute("agents.trigger_update", {"trigger_id": int, "agent_id": int, "send_mode": "auto"|"draft", "enabled": bool})` — DialogBrain requires both ids and looks the trigger up by trigger, agent and workspace; `agent_id` is the one stored on the channel in Task 1.
 - Produces (all `@frappe.whitelist(methods=["POST"])`, allowed for Chat Manager and System Manager, refused for Chat Agent with `frappe.PermissionError`):
   - `dialogbrain.api.channels.agent_options(channel) -> {"mode", "status", "agent_id", "agent_name", "trigger_id", "choices": [{"trigger_id", "agent_name", "mode", "exclusive"}]}` — live from DialogBrain.
   - `dialogbrain.api.channels.choose_agent(channel, trigger_id) -> same dict` — only an exclusive candidate of that channel may be chosen.
   - `dialogbrain.api.channels.set_agent_mode(channel, mode) -> same dict` — `mode` one of `copilot`, `autopilot`, `off`.
   - `dialogbrain.api.channels.refresh_agent_modes() -> {"linked", "ambiguous", "none"}`.
 
-`set_agent_mode` sends `off` → `{"enabled": false}`; `copilot` → `{"enabled": true, "send_mode": "draft"}`; `autopilot` → `{"enabled": true, "send_mode": "auto"}`. It writes `agent_mode` and `agent_mode_synced_at` only after DialogBrain answered success; on `DialogBrainError` nothing is stored and the user gets `DialogBrain did not change the agent mode: {0}` (the key scrubbed, as `_agent_reason` does in `api/conversations.py`). Without a bound trigger it throws `This channel has no agent to switch. Open the channel and choose one.`
+`set_agent_mode` sends, always with the channel's `trigger_id` and `agent_id`: `off` → `{"enabled": false}`; `copilot` → `{"enabled": true, "send_mode": "draft"}`; `autopilot` → `{"enabled": true, "send_mode": "auto"}`. It writes `agent_mode` and `agent_mode_synced_at` only after DialogBrain answered success; on `DialogBrainError` nothing is stored and the user gets `DialogBrain did not change the agent mode: {0}` (the key scrubbed, as `_agent_reason` does in `api/conversations.py`). Without a bound trigger it throws `This channel has no agent to switch. Open the channel and choose one.`
 
 Form script `db_channel.js`: a "DialogBrain agent" section showing agent name, mode and status; buttons **Copilot**, **Autopilot**, **Off** (the current one highlighted), **Choose agent…** (a dialog listing `choices`, only when there are several exclusive ones), **Refresh from DialogBrain**. Inbox header: a small chip next to the channel name: `AI: drafts` / `AI: answers` / `AI: off`, nothing when the mode is empty.
 
@@ -107,7 +114,7 @@ Form script `db_channel.js`: a "DialogBrain agent" section showing agent name, m
 
 ```python
 def test_set_mode_sends_the_trigger_update_and_stores_the_mode(self):
-    # copilot -> {"trigger_id": 2, "enabled": True, "send_mode": "draft"}; DB Channel.agent_mode == "copilot"
+    # copilot -> {"trigger_id": 2, "agent_id": 10, "enabled": True, "send_mode": "draft"}; DB Channel.agent_mode == "copilot"
 def test_off_disables_the_trigger_and_autopilot_enables_it_again(self):
 def test_dialogbrain_refusing_keeps_the_old_mode(self):          # fake.fail["agents.trigger_update"]; mode unchanged; message has no key
 def test_no_bound_trigger_is_refused_without_calling_dialogbrain(self):
@@ -115,6 +122,7 @@ def test_a_shared_trigger_can_not_be_chosen(self):
 def test_choose_agent_binds_and_reads_its_mode(self):
 def test_chat_agent_is_refused(self):                            # PermissionError on all four methods
 def test_unknown_mode_is_refused(self):
+def test_a_key_without_edit_rights_keeps_the_old_mode(self):    # trigger_update -> permission_denied; message names the key role
 ```
 
 - [ ] **Step 2: Run** the module — expected: FAIL.
@@ -164,13 +172,13 @@ def test_range_keeps_the_security_headers(self):
 - Test: `dialogbrain/tests/test_reports.py`
 
 **Interfaces:**
-- Produces three Script Reports (`is_standard: Yes`, `ref_doctype: DB Conversation`, roles **Chat Manager** and **System Manager** only), each with `execute(filters=None) -> (columns, data)`.
+- Produces three Script Reports (`is_standard: Yes`, `module: DialogBrain`, `report_type: Script Report` — without these two `migrate` does not create the Report documents —, `ref_doctype: DB Conversation`, roles **Chat Manager** and **System Manager** only), each with `execute(filters=None) -> (columns, data)`.
 
 **First Response Time** — filters: `from_date`, `to_date` (default: last 30 days), `group_by` (`Manager` | `Channel` | `Day`, default `Manager`), `channel` (Link DB Channel, optional), `assigned_to` (Link User, optional). Base set: conversations with `opened_at` in the period. Columns: group, `Conversations` (all), `Answered` (`first_response_seconds > 0`), `Not answered yet`, `Average (min)`, `Median (min)`, `Longest (min)`, `Within 5 min (%)`. Minutes rounded to 1 decimal; the median is computed in Python from the per-group lists. Group `Manager` uses `assigned_to` (empty → "Unassigned"); `Day` uses the date of `opened_at`.
 
-**Unanswered Conversations** — filters: `channel`, `assigned_to`, `min_waiting_minutes` (Int, default 0). Rows: conversations with `status = "Open"` and `last_message_direction` = the inbound value the sync writes (read it from `sync/upsert.py`, do not guess), ordered by `last_inbound_at` ascending. Columns: conversation (Link), title, channel, assigned to, last inbound at, `Waiting (min)`, unread, last message preview.
+**Unanswered Conversations** — filters: `channel`, `assigned_to`, `min_waiting_minutes` (Int, default 0). Rows: conversations with `status = "Open"` and `last_message_direction` = `in` (the value `sync/upsert.py` writes for inbound), ordered by `last_inbound_at` ascending. Columns: conversation (Link), title, channel, assigned to, last inbound at, `Waiting (min)`, unread, last message preview.
 
-**Conversations by Channel and Manager** — filters: `from_date`, `to_date`, `group_by` (`Channel` | `Manager`). Columns: group, `Opened` (by `opened_at`), `Closed` (by `closed_at`), `Open now`, `Unanswered now`, `Inbound messages`, `Outbound messages`, `By AI` (outbound with the AI `author_type` value the sync writes). Message counts come from `DB Message.sent_at` in the period joined to its conversation.
+**Conversations by Channel and Manager** — filters: `from_date`, `to_date`, `group_by` (`Channel` | `Manager`). Columns: group, `Opened` (by `opened_at`), `Closed` (by `closed_at`), `Open now`, `Unanswered now`, `Inbound messages`, `Outbound messages`, `By AI` (outbound with `author_type = "agent"`). Message counts come from `DB Message.sent_at` in the period joined to its conversation.
 
 - [ ] **Step 1: Write the failing tests** on rows created in the test (`_conv(...)` helpers as in `tests/test_inbox_api.py`), with fixed timestamps:
 
@@ -202,13 +210,13 @@ def test_report_sql_takes_values_as_parameters(self):                      # a c
 
 **Interfaces:**
 - Produces:
-  - `dev/test-v15.sh`: runs the app's suite on Frappe v15 / ERPNext v15 / Python 3.10 in throwaway containers on its own Docker network (`dbx-v15-<pid>`): `mariadb:10.6`, `redis:7`, and `frappe/erpnext:v15` with this repo mounted read-only and copied into `apps/dialogbrain`. It creates a site, installs `erpnext` and `dialogbrain`, runs `bench build --app dialogbrain` and `bench run-tests --app dialogbrain`, prints the last lines, and removes the containers and the network on exit (trap). It never uses the `erpnext` compose project or its volumes.
+  - `dev/test-v15.sh`: runs the app's suite on Frappe v15 / ERPNext v15 / Python 3.10 in throwaway containers on its own Docker network (`dbx-v15-<pid>`): `mariadb:10.6`, `redis:7`, and `frappe/erpnext:v15` with this repo mounted read-only and copied into `apps/dialogbrain`. It creates a site, installs `erpnext` and `dialogbrain`, runs `bench build --app dialogbrain` and `bench run-tests --app dialogbrain`, prints the last lines, and removes the containers and the network on exit (trap). It never uses the `erpnext` compose project or its volumes. The `frappe/erpnext:v15` image has no compiler: `pip install -e apps/dialogbrain` works only while the app has no dependency that needs building; the script says so in a comment and fails with that message if pip tries to compile.
   - `.github/workflows/ci.yml`: on push and pull_request; matrix `{frappe: version-15, python: "3.10", node: 18, mariadb: "10.6"}` and `{frappe: version-16, python: "3.14", node: 24, mariadb: "11.8"}`; services mariadb + redis; steps: `pip install frappe-bench`, `bench init --frappe-branch <branch> --skip-redis-config-generation`, `bench get-app erpnext --branch <branch>`, `bench get-app dialogbrain $GITHUB_WORKSPACE`, `bench new-site`, `bench --site … install-app erpnext dialogbrain`, `bench build --app dialogbrain`, `bench --site … set-config allow_tests true`, `bench --site … run-tests --app dialogbrain`. Before writing the versions, read the `version-16` branch's `pyproject.toml` and `package.json` (`requires-python`, `engines.node`) and use what they say.
 
 - [ ] **Step 1:** Write `dev/test-v15.sh` and run it. Expected first result: failures. Save the failing test names to the task report.
 - [ ] **Step 2:** For each failure, fix the app so the same code passes on both versions (version checks only through `dialogbrain/compat.py`). Re-run `dev/test-v15.sh` until it ends with `OK`, then the v16 suite on `test.localhost` — both green.
 - [ ] **Step 3:** Open the inbox once on the v15 container (`bench --site … execute dialogbrain.api.conversations.get_conversations`) and confirm the bundle built (`sites/assets/dialogbrain/dist/js/*.bundle.*.js` exists).
-- [ ] **Step 4:** Write `.github/workflows/ci.yml`. It is first run by GitHub when the branch is pushed (the push needs the user's go-ahead); a red run there is fixed in this task.
+- [ ] **Step 4:** Write `.github/workflows/ci.yml`. It is first run by GitHub when the branch is pushed (the push needs the user's go-ahead); a red run there is fixed in this task. Frappe v16 needs Python `>=3.14,<3.15`: a v16 job that dies in `bench init`/pip (a dependency without a 3.14 wheel) before our tests start is an infrastructure failure, recorded as such in the task report and not "fixed" in the app.
 - [ ] **Step 5: Commit** `ci: test on Frappe v15 and v16; fix what v15 turned up`.
 
 ### Task 6: Ukrainian and Russian translations
@@ -249,13 +257,15 @@ def test_every_visible_string_has_uk_and_ru(self):
 def test_placeholders_survive_translation(self):         # the multiset of {n} tokens equals the source's, per row, per language
 def test_no_empty_or_untranslated_rows(self):            # translation non-empty and != source, except an allow-list (e.g. "DialogBrain", "ID", "URL")
 def test_csv_has_no_duplicate_sources(self):
-def test_frappe_loads_the_translations(self):            # frappe._("Take over", lang="uk") == "Перехопити"; lang="ru" == "Перехватить"
+def test_frappe_loads_the_translations(self):            # frappe.translate.clear_cache() first (translations are cached in Redis); frappe._("Take over", lang="uk") == "Перехопити"; lang="ru" == "Перехватить"
 def test_no_visible_literal_is_left_unwrapped_in_vue(self):
-    # template text nodes and title=/placeholder= attributes with Latin letters must go through __()
+    # template text nodes and title=/placeholder= attributes with Latin letters must go through __();
+    # {{ … }} expressions are stripped before the check, and an allow-list in the test (product names
+    # "DialogBrain", "ERPNext", "AI", single symbols and file-type labels) is exempt — keep it short and explicit
 ```
 
 - [ ] **Step 2: Run** `--module dialogbrain.tests.test_translations` — expected: FAIL.
-- [ ] **Step 3:** Wrap what the last test finds; write both CSVs. If `test_frappe_loads_the_translations` fails on v16 only because that version reads `locale/*.po` and not CSV, add `dev/csv-to-po.py`, generate `dialogbrain/locale/uk.po` and `ru.po` from the CSVs, commit both, and make the completeness tests check the PO files too.
+- [ ] **Step 3:** Wrap what the last test finds; write both CSVs. Frappe v15 and v16 both read `translations/<lang>.csv` (`frappe/translate.py`), so no PO files are made.
 - [ ] **Step 4: Run** the app suite on v16 and `dev/test-v15.sh` — expected: both pass. Switch the dev user's language to Ukrainian on the `frontend` site and open `/app/dialogbrain-inbox`: no English in the inbox.
 - [ ] **Step 5: Commit** `feat(i18n): Ukrainian and Russian translations`.
 
@@ -266,8 +276,8 @@ def test_no_visible_literal_is_left_unwrapped_in_vue(self):
 
 **Interfaces:**
 - Produces:
-  - Dev stand: the `frontend` service joins `dialogbrain_dialogbrain-network` with the alias `erpnext-dev`; `dev/install.sh` prints that DialogBrain's `SSRF_ALLOW_HTTP_HOSTS` must contain `erpnext-dev` and that the site's Public site URL for the dev stand is `http://erpnext-dev:8080` (why: `host.docker.internal` is 10.200.0.1 here and DialogBrain refuses 10/8 for integration calls). The script changes nothing in the DialogBrain stack.
-  - README: sections "AI agent mode per channel" (what each mode does, the shared-trigger rule, who may switch), "Reports", "Languages", "Supported versions and tests" (v15 + v16, `dev/test-v15.sh`, CI).
+  - Dev stand: the `frontend` service joins `dialogbrain_dialogbrain-network` with the alias `erpnext-dev`; `dev/install.sh` prints that DialogBrain's `SSRF_ALLOW_HTTP_HOSTS` must be set to `minio,erpnext-dev` (the variable replaces the compose default `minio`; leaving `minio` out breaks DialogBrain's media proxy) followed by a restart of `api-gateway`, and that the site's Public site URL for the dev stand is `http://erpnext-dev:8080` (why: `host.docker.internal` is 10.200.0.1 here and DialogBrain refuses 10/8 for integration calls). The script changes nothing in the DialogBrain stack.
+  - README: sections "AI agent mode per channel" (what each mode does; autopilot = the agent may answer by itself, DialogBrain's safety gate can still hold an answer as a draft; the shared-trigger rule; who may switch; the Connect key must belong to a member, admin or owner of the workspace; modes refresh hourly and on "Refresh from DialogBrain"), "Reports", "Languages", "Supported versions and tests" (v15 + v16, `dev/test-v15.sh`, CI).
 
 - [ ] **Step 1:** Change the compose file and `install.sh`; apply with `sudo docker compose -p erpnext -f pwd.yml -f dialogbrain_erpnext/dev/compose.dialogbrain.yml up -d --no-deps frontend` from `/home/denys/projects/erpnext`; verify `sudo docker inspect erpnext-frontend-1` lists the alias.
 - [ ] **Step 2:** Write the README sections.
