@@ -6,15 +6,18 @@ Never send twice
   re-submitted request returns the existing row and enqueues nothing.
 * :func:`deliver` first *claims* the row atomically (``pending`` -> ``unknown``, committed)
   and only then calls ``messages.send``, once. A second job, or a re-run after a killed
-  worker, finds ``unknown`` and sends nothing. An ambiguous outcome (read timeout, 502/504
-  from the gateway, unexpected exception after the request left, a crash) leaves the row
-  ``unknown``: the webhook echo (``upsert_message`` echo matching accepts ``unknown``) or
+  worker, finds ``unknown`` and sends nothing. An ambiguous outcome (read timeout, any HTTP
+  status other than 400/401/403/404/422 — incl. 429/503/52x and a 2xx without JSON —,
+  unexpected exception after the request left, a crash) leaves the row ``unknown``: the webhook echo (``upsert_message`` echo matching accepts ``unknown``) or
   reconcile resolves it. While the send is in flight the row is ``unknown`` with an empty
   ``error``.
 * Every outcome write after the claim is conditional (row still ``unknown`` and no
   ``db_id``): an echo that completed the row during the send is never overwritten.
-* ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error, or
-  nothing was sent) can be retried, via :func:`retry_reply`.
+* ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error — a tool
+  error or HTTP 400/401/403/404/422 —, nothing was sent, or a connection error) can be
+  retried, via :func:`retry_reply`.
+* Before the attempt is stored, the row is re-read under lock: an echo or the sweep that
+  changed it during the upload ends the job without sending.
 
 ``request_id`` (Plan 3 B4)
 --------------------------
@@ -63,7 +66,8 @@ matching stays the second line of defence.
 Echo reconciliation (agrees with ``dialogbrain.sync.upsert``)
 ------------------------------------------------------------
 The pending row has ``sent_at`` = now, so an echo that arrives before the send response is
-merged into it by ``upsert_message`` (same text, +-120 s). On the response, the row gets
+merged into it by ``upsert_message`` (same text, +-120 s of ``sent_at`` or, for a
+retried reply, of its last attempt: ``raw.claimed_at`` / ``raw.send.attempt_at``). On the response, the row gets
 ``db_id = db_message_id``; if that ``db_id`` already belongs to another row (an echo that
 could not be matched), that row is folded into ours (``sent_by`` kept) and deleted. An echo
 arriving after the response finds the row by ``db_id``.
@@ -90,9 +94,10 @@ from dialogbrain.sync.upsert import (
 )
 
 DELIVER_JOB = "dialogbrain.sync.sender.deliver"
-# The send may have happened: the gateway gave up (502/504), or DialogBrain failed after
-# the channel accepted the message (500).
-AMBIGUOUS_HTTP_STATUSES = (500, 502, 504)
+# The only HTTP statuses that say the send did NOT happen (final wave F2a): the request was
+# refused before the tool ran. Every other status (408, 429, 499, 5xx, 520-524, a 2xx
+# without a JSON body, …) may come after the channel accepted the message: ambiguous.
+DEFINITE_HTTP_STATUSES = (400, 401, 403, 404, 422)
 # A pending reply whose deliver job has not claimed it by then is re-enqueued (F3).
 STALE_PENDING_AFTER = timedelta(minutes=2)
 MAX_ERROR_LENGTH = 1000
@@ -476,11 +481,20 @@ def _check_echo(name, client, request_id) -> None:
 	)
 
 
-def _store_send_state(name, raw, request_id, params, attachments, previous) -> None:
+def _store_send_state(name, request_id, params, attachments, previous) -> bool:
 	"""Record (and commit) what is about to be sent with ``request_id``, before the call:
-	an ``unknown`` outcome can then be retried with exactly these params."""
+	an ``unknown`` outcome can then be retried with exactly these params.
+
+	The row is re-read under lock first (final wave F2b): while the files uploaded, an echo
+	may have completed it (``db_id``) or the sweep failed it. Then it is no longer this
+	job's to send: False, the row is left as it is. The attempt is merged into the
+	*current* ``raw``, not the claim-time snapshot."""
+	row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id", "raw"], as_dict=True, for_update=True)
+	if not row or row.db_id or row.delivery_status != "unknown":
+		_commit()
+		return False
 	now = str(now_datetime())
-	raw = _raw_dict(raw)
+	raw = _raw_dict(row.raw)
 	raw["send"] = {
 		"request_id": request_id,
 		"params": params,
@@ -490,6 +504,7 @@ def _store_send_state(name, raw, request_id, params, attachments, previous) -> N
 	}
 	frappe.db.set_value("DB Message", name, "raw", json.dumps(raw))
 	_commit()
+	return True
 
 
 def _upload_files(client, file_urls):
@@ -551,7 +566,8 @@ def deliver(message_name: str) -> None:
 		send_kwargs = {}
 		if previous or _has_request_id():
 			request_id = previous["request_id"] if previous else _fresh_request_id(msg.client_ref, msg.raw)
-			_store_send_state(message_name, msg.raw, request_id, params, attachments, previous)
+			if not _store_send_state(message_name, request_id, params, attachments, previous):
+				return  # completed (echo) or failed (sweep) meanwhile: not ours to send
 			send_kwargs["request_id"] = request_id
 	except Exception as e:  # noqa: BLE001 - recorded on the row, user can retry
 		if _settle(message_name, msg.conversation, "failed", _error_text(e)):
@@ -562,14 +578,17 @@ def deliver(message_name: str) -> None:
 		data = client.execute("messages.send", params, **send_kwargs)
 	except DialogBrainError as e:
 		_commit()  # new snapshot: see what the echo did meanwhile
-		ambiguous = isinstance(e, DialogBrainTimeout) or e.status in AMBIGUOUS_HTTP_STATUSES
-		# ambiguous: stays "unknown" (claimed), only the error text is recorded
-		settled = _settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
 		parsed = getattr(client, "last_response_parsed", False) is True
+		# Definite: a tool error DialogBrain answered, or a 4xx refusal before the tool ran.
+		definite = (parsed and not e.status) or e.status in DEFINITE_HTTP_STATUSES
+		# Ambiguous: any other HTTP status (incl. a 2xx without JSON) or a read timeout.
+		# It stays "unknown" (claimed), only the error text is recorded.
+		ambiguous = not definite and (isinstance(e, DialogBrainTimeout) or bool(e.status))
+		settled = _settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
 		if settled and not ambiguous:
-			# an HTTP error status or a tool error DialogBrain answered is definite; a
-			# connection error (no status, no response read) may have reached it
-			_set_last_outcome(message_name, "answered" if (e.status or parsed) else "no_response")
+			# a connection error (no status, no response read) may have reached DialogBrain:
+			# its retry reuses the stored attempt after the settle wait
+			_set_last_outcome(message_name, "answered" if definite else "no_response")
 		if settled and send_kwargs:
 			if ambiguous:
 				_record_outcome(message_name, e)

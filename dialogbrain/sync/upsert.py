@@ -474,15 +474,42 @@ def _find_echo_target(conversation, parsed):
 			"db_id": ["is", "not set"],
 			"delivery_status": ["in", list(ECHO_STATUSES)],
 		},
-		fields=["name", "text", "sent_at"],
+		fields=["name", "text", "sent_at", "raw"],
 		order_by="creation asc",
 	)
 	for row in candidates:
-		if not row.sent_at or not _same_text(row.text, parsed["body"]):
+		if not _same_text(row.text, parsed["body"]):
 			continue
-		if abs((get_datetime(row.sent_at) - sent_at).total_seconds()) <= ECHO_WINDOW_SECONDS:
-			return row.name
+		for at in _echo_anchors(row):
+			if abs((at - sent_at).total_seconds()) <= ECHO_WINDOW_SECONDS:
+				return row.name
 	return None
+
+
+def _echo_anchors(row):
+	"""When the reply may have gone out: ``sent_at`` (written when the reply was created)
+	and, for a retried reply, its attempts (``raw.claimed_at`` / ``raw.send.attempt_at``):
+	the echo of a retry hours later comes near the retry, not near ``sent_at`` (F2d)."""
+	import json
+
+	values = [row.sent_at]
+	raw = row.raw
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except ValueError:
+			raw = None
+	if isinstance(raw, dict):
+		send = raw.get("send") if isinstance(raw.get("send"), dict) else {}
+		values += [raw.get("claimed_at"), send.get("attempt_at")]
+	anchors = []
+	for value in values:
+		try:
+			if value:
+				anchors.append(get_datetime(value))
+		except Exception:  # noqa: BLE001 - unreadable stamp: ignored
+			pass
+	return anchors
 
 
 def upsert_message(conversation: str, message: dict, *, silent: bool = False) -> "tuple[str, bool]":
