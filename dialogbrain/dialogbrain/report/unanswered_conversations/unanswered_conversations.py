@@ -15,13 +15,13 @@ def get_columns():
 	return [
 		{"label": _("Conversation"), "fieldname": "conversation", "fieldtype": "Link",
 		 "options": "DB Conversation", "width": 160},
-		{"label": _("Title"), "fieldname": "title", "fieldtype": "Data", "width": 180},
+		{"label": _("Title", context="DialogBrain"), "fieldname": "title", "fieldtype": "Data", "width": 180},
 		{"label": _("Channel"), "fieldname": "channel", "fieldtype": "Link", "options": "DB Channel", "width": 140},
 		{"label": _("Assigned to"), "fieldname": "assigned_to", "fieldtype": "Link", "options": "User",
 		 "width": 160},
 		{"label": _("Last inbound at"), "fieldname": "last_inbound_at", "fieldtype": "Datetime", "width": 160},
 		{"label": _("Waiting (min)"), "fieldname": "waiting_min", "fieldtype": "Int", "width": 110},
-		{"label": _("Unread"), "fieldname": "unread_count", "fieldtype": "Int", "width": 80},
+		{"label": _("Unread", context="DialogBrain"), "fieldname": "unread_count", "fieldtype": "Int", "width": 80},
 		{"label": _("Last message preview"), "fieldname": "last_message_preview", "fieldtype": "Data",
 		 "width": 300},
 	]

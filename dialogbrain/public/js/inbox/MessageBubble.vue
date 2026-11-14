@@ -28,7 +28,7 @@
 			<div v-if="m.delivery_status === 'failed' || (status === 'unknown' && m.can_retry)" class="db-failed">
 				<span class="db-error">{{ m.delivery_status === "failed" ? m.error || __("Not delivered") : __("Delivery not confirmed") }}</span>
 				<button type="button" class="btn btn-xs btn-default" :disabled="retrying" @click="retry">
-					{{ retrying ? __("Retrying…") : __("Retry") }}
+					{{ retrying ? __("Retrying…") : __("Retry", null, "DialogBrain") }}
 				</button>
 			</div>
 		</div>
@@ -63,10 +63,10 @@ const status = computed(() => (props.m.in_flight ? "pending" : props.m.delivery_
 const statusLabel = computed(
 	() =>
 		({
-			pending: __("Sending"),
-			sent: __("Sent"),
+			pending: __("Sending", null, "DialogBrain"),
+			sent: __("Sent", null, "DialogBrain"),
 			unknown: __("Delivery status unknown"),
-			failed: __("Failed"),
+			failed: __("Failed", null, "DialogBrain"),
 			deleted: __("Deleted"),
 		})[status.value] || ""
 );

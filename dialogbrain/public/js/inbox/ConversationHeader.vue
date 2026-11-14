@@ -72,7 +72,7 @@
 				</button>
 			</template>
 			<button type="button" class="btn btn-xs btn-default" :disabled="busy" @click="toggleStatus">
-				{{ conv.status === "Closed" ? __("Reopen") : __("Close") }}
+				{{ conv.status === "Closed" ? __("Reopen", null, "DialogBrain") : __("Close") }}
 			</button>
 		</div>
 	</div>

@@ -32,14 +32,14 @@
 			<section v-if="!card.party" class="db-section">
 				<div class="db-section-title">{{ __("Not linked to a customer") }}</div>
 				<template v-if="card.has_access.party">
-				<div v-if="card.suggestions.length" class="db-sub">{{ __("Suggestions") }}</div>
+				<div v-if="card.suggestions.length" class="db-sub">{{ __("Suggestions", null, "DialogBrain") }}</div>
 				<div v-for="s in card.suggestions" :key="s.party_type + s.party" class="db-pick">
 					<div class="db-pick-main">
 						<div class="db-pick-name">{{ s.party_name || s.party }}</div>
 						<div class="db-muted db-small">{{ __(s.party_type) }} · {{ __("matched by {0}", [__(s.matched_by)]) }}</div>
 					</div>
 					<button type="button" class="btn btn-xs btn-default" :disabled="busy" @click="link(s.party_type, s.party)">
-						{{ __("Link") }}
+						{{ __("Link", null, "DialogBrain") }}
 					</button>
 				</div>
 				<div class="db-actions">
@@ -47,7 +47,7 @@
 						{{ __("Link to existing…") }}
 					</button>
 					<button type="button" class="btn btn-xs btn-default" :disabled="busy" @click="createLead">
-						{{ __("Create Lead") }}
+						{{ __("Create Lead", null, "DialogBrain") }}
 					</button>
 				</div>
 				<div v-if="searchOpen" class="db-search-box">
@@ -68,7 +68,7 @@
 							</div>
 						</div>
 						<button type="button" class="btn btn-xs btn-default" :disabled="busy" @click="link(r.party_type, r.party)">
-							{{ __("Link") }}
+							{{ __("Link", null, "DialogBrain") }}
 						</button>
 					</div>
 				</div>
@@ -91,7 +91,7 @@
 						<a :href="'mailto:' + card.contact.email">{{ card.contact.email }}</a>
 					</div>
 					<div class="db-line">
-						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact") }}</a>
+						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact", null, "DialogBrain") }}</a>
 					</div>
 				</template>
 				<template v-if="card.has_access.orders && card.stats">
@@ -125,7 +125,7 @@
 				</template>
 				<div class="db-actions">
 					<button v-if="card.has_access.party && canCreate('Sales Order')" type="button" class="btn btn-xs btn-primary" @click="newDoc('Sales Order', { customer: card.party })">
-						{{ __("Create Sales Order") }}
+						{{ __("Create Sales Order", null, "DialogBrain") }}
 					</button>
 					<button
 						v-if="card.has_access.party && canCreate('Quotation')"
@@ -133,7 +133,7 @@
 						class="btn btn-xs btn-default"
 						@click="newDoc('Quotation', { quotation_to: 'Customer', party_name: card.party })"
 					>
-						{{ __("Create Quotation") }}
+						{{ __("Create Quotation", null, "DialogBrain") }}
 					</button>
 				</div>
 			</section>
@@ -156,7 +156,7 @@
 						<a :href="'mailto:' + card.contact.email">{{ card.contact.email }}</a>
 					</div>
 					<div class="db-line">
-						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact") }}</a>
+						<a :href="formLink('Contact', card.contact.name)">{{ __("Open Contact", null, "DialogBrain") }}</a>
 					</div>
 				</template>
 				<div class="db-actions">
@@ -166,7 +166,7 @@
 						class="btn btn-xs btn-primary"
 						@click="newDoc('Quotation', { quotation_to: 'Lead', party_name: card.party })"
 					>
-						{{ __("Create Quotation") }}
+						{{ __("Create Quotation", null, "DialogBrain") }}
 					</button>
 					<button type="button" class="btn btn-xs btn-default" @click="openLead">
 						{{ __("Open Lead") }}

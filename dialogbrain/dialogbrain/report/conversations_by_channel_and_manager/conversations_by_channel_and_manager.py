@@ -24,8 +24,8 @@ def get_columns(group_by):
 
 	return [
 		{"label": group_label(group_by), "fieldname": "group", "fieldtype": "Data", "width": 200},
-		col(_("Opened"), "opened"),
-		col(_("Closed"), "closed"),
+		col(_("Opened", context="DialogBrain"), "opened"),
+		col(_("Closed", context="DialogBrain"), "closed"),
 		col(_("Open now"), "open_now"),
 		col(_("Unanswered now"), "unanswered_now"),
 		col(_("Inbound messages"), "inbound"),

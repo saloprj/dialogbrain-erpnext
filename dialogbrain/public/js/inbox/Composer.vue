@@ -7,7 +7,7 @@
 		<div v-if="c.files.length" class="db-files">
 			<span v-for="(f, i) in c.files" :key="f.key" class="db-file-chip" :class="{ uploading: f.uploading }">
 				<span class="db-file-name">{{ f.uploading ? __("Uploading…") + " " : "" }}{{ f.file_name }}</span>
-				<button type="button" class="db-file-x" :aria-label="__('Remove')" :title="__('Remove')" @click="removeFile(i)">×</button>
+				<button type="button" class="db-file-x" :aria-label="__('Remove', null, 'DialogBrain')" :title="__('Remove', null, 'DialogBrain')" @click="removeFile(i)">×</button>
 			</span>
 		</div>
 		<div v-if="picker.open" class="db-qr" role="listbox" :aria-label="__('Quick replies')">

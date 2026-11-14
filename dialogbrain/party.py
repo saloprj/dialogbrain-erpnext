@@ -239,7 +239,7 @@ def set_party(conversation, party_type, party):
 	if party_type not in PARTY_TYPES:
 		frappe.throw(_("Party type must be Customer or Lead"))
 	if not frappe.db.exists(party_type, party):
-		frappe.throw(_("{0} {1} not found").format(party_type, party))
+		frappe.throw(_("{0} {1} not found", context="DialogBrain").format(party_type, party))
 	if not frappe.has_permission(party_type, "read", doc=party):
 		label = _("customer") if party_type == "Customer" else _("lead")
 		frappe.throw(_("You don't have access to this {0}").format(label), frappe.PermissionError)

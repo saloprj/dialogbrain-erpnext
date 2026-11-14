@@ -72,7 +72,7 @@ export function dayLabel(value) {
 	if (!m || !m.isValid()) return "";
 	const today = nowUser();
 	if (m.isSame(today, "day")) return __("Today");
-	if (m.isSame(today.clone().subtract(1, "day"), "day")) return __("Yesterday");
+	if (m.isSame(today.clone().subtract(1, "day"), "day")) return __("Yesterday", null, "DialogBrain");
 	return frappe.datetime.str_to_user(m.format("YYYY-MM-DD"));
 }
 

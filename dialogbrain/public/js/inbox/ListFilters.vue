@@ -9,9 +9,9 @@
 				v-model="search"
 			/>
 			<select class="form-control input-xs db-select" v-model="store.filters.status" :aria-label="__('Status')">
-				<option value="Open">{{ __("Open") }}</option>
-				<option value="Closed">{{ __("Closed") }}</option>
-				<option value="All">{{ __("All") }}</option>
+				<option value="Open">{{ __("Open", null, "DialogBrain") }}</option>
+				<option value="Closed">{{ __("Closed", null, "DialogBrain") }}</option>
+				<option value="All">{{ __("All", null, "DialogBrain") }}</option>
 			</select>
 			<select
 				v-if="store.managers.length"
@@ -24,7 +24,7 @@
 			</select>
 		</div>
 		<div class="db-chips" role="toolbar" :aria-label="__('Channel')">
-			<button class="db-chip" :class="{ active: allActive }" @click="resetChips">{{ __("All") }}</button>
+			<button class="db-chip" :class="{ active: allActive }" @click="resetChips">{{ __("All", null, "DialogBrain") }}</button>
 			<button
 				v-for="t in store.channelTypes"
 				:key="t"

@@ -27,7 +27,7 @@ def minutes(seconds):
 def group_label(group_by):
 	"""Column title of a group-by value; literal ``_()`` calls run per request, in the user's language."""
 	if group_by == "Manager":
-		return _("Manager")
+		return _("Manager", context="DialogBrain")
 	if group_by == "Day":
 		return _("Day")
 	return _("Channel")

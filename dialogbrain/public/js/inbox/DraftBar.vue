@@ -21,7 +21,7 @@
 					:title="d.truncated && !canFetchFull ? __('Text shortened by DialogBrain — approve as is or reject') : ''"
 					@click="edit(d)"
 				>
-					{{ __("Edit") }}
+					{{ __("Edit", null, "DialogBrain") }}
 				</button>
 				<button type="button" class="btn btn-xs btn-default" :disabled="busy[d.name]" @click="reject(d)">
 					{{ __("Reject") }}

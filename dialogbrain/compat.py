@@ -72,3 +72,21 @@ def single_values(doctype: str, fields) -> "frappe._dict":
 		if df and value is not None:
 			values[field] = cast(df.fieldtype, value)
 	return values
+
+
+def other_apps_translations(lang: str) -> dict:
+	"""Translations the installed apps other than dialogbrain provide for ``lang``.
+
+	Keys are the source text, or ``source:context`` for contextual rows. v15 reads CSV files
+	only, v16 also gettext MO files; ``get_translations_from_apps`` covers both when it is
+	given the app list, and the CSV reader is the fallback for a Frappe without that argument."""
+	import frappe.translate as translate
+
+	apps = [app for app in frappe.get_installed_apps() if app != "dialogbrain"]
+	try:
+		return dict(translate.get_translations_from_apps(lang, apps))
+	except TypeError:
+		merged = {}
+		for app in apps:
+			merged.update(translate.get_translations_from_csv(lang, app) or {})
+		return merged

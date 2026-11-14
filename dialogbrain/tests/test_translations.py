@@ -11,22 +11,35 @@ import frappe
 import frappe.translate
 from frappe.tests.utils import FrappeTestCase
 
+from dialogbrain.compat import other_apps_translations
+
 LANGUAGES = ("uk", "ru")
 SKIP_DIRS = {"tests", "node_modules", "dist", "__pycache__", "translations"}
 PLACEHOLDER = re.compile(r"\{\d+\}")
 CYRILLIC = re.compile("[Ѐ-ӿ]")
+# Letters of the other language: Russian-only in Ukrainian text, Ukrainian-only in Russian text.
+FOREIGN_LETTERS = {"uk": re.compile("[ыэъёЫЭЪЁ]"), "ru": re.compile("[іїєґІЇЄҐ]")}
 
+# The context of strings whose bare wording Frappe/ERPNext already translate differently.
+CONTEXT = "DialogBrain"
+# Glossary terms (task brief): the only bare keys allowed to override Frappe/ERPNext translations.
+GLOSSARY_OVERRIDES = {
+	"Chats", "Conversation", "Take over", "Give back to agent", "Assign", "Unassigned", "Unanswered",
+	"Draft", "Quick reply", "Note", "Copilot", "Autopilot", "Off", "Customer", "Lead",
+	"Connect", "Reconnect", "Disconnect",
+}
 # Rows whose translation may equal the source: product names only.
 SAME_AS_SOURCE = {"DialogBrain"}
-# Rows whose translation may hold no Cyrillic letters: none beyond the same-as-source ones.
 # Visible-in-Vue exemptions: product names, the AI badge text, single symbols, file-type labels.
 VUE_ALLOWED = {"DialogBrain", "ERPNext", "AI", "PDF", "ZIP", "DOC", "XLS", "MP3", "MP4"}
 # Strings translated through a variable (``__(variable)``), invisible to literal extraction:
 # the channel labels of inbox/utils.js that are words, and the app's role names.
 DYNAMIC_VISIBLE = ("Live chat", "Email", "Chat Agent", "Chat Manager")
 
+_STR = r"""(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`)"""
+# __("text")  or  __("text", <replacements>, "context")
 JS_CALL = re.compile(
-	r"""(?<![\w$.])__\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`)"""
+	r"(?<![\w$.])__\(\s*" + _STR + r"(?:\s*,\s*(?:null|undefined|\[[^\]]*\])\s*,\s*" + _STR + r")?"
 )
 TAG = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>""")
 STATIC_ATTR = re.compile(r"""(?<![:@\w-])(?:title|placeholder|aria-label|alt)="([^"]*)\"""")
@@ -45,7 +58,7 @@ def source_files(*extensions):
 
 
 def python_strings():
-	"""Literals of ``_("…")`` / ``frappe._("…")``; ``_(NAME)`` resolves a module-level string constant."""
+	"""(source, context) of ``_("…")`` / ``frappe._("…")``; ``_(NAME)`` resolves a module-level string constant."""
 	found = set()
 	for path in source_files(".py"):
 		with open(path, encoding="utf-8") as fh:
@@ -69,11 +82,15 @@ def python_strings():
 				or (isinstance(func, ast.Attribute) and func.attr == "_")
 			):
 				continue
+			context = ""
+			for keyword in node.keywords:
+				if keyword.arg == "context" and isinstance(keyword.value, ast.Constant):
+					context = keyword.value.value
 			arg = node.args[0]
 			if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-				found.add(arg.value)
+				found.add((arg.value, context))
 			elif isinstance(arg, ast.Name) and arg.id in constants:
-				found.add(constants[arg.id])
+				found.add((constants[arg.id], context))
 	return found
 
 
@@ -82,18 +99,22 @@ def js_strings():
 	for path in source_files(".js", ".vue"):
 		with open(path, encoding="utf-8") as fh:
 			for match in JS_CALL.finditer(fh.read()):
-				text = next(g for g in match.groups() if g is not None)
-				found.add(text.replace('\\"', '"').replace("\\'", "'").replace("\\n", "\n"))
+				groups = match.groups()
+				text = next(g for g in groups[:3] if g is not None)
+				context = next((g for g in groups[3:] if g is not None), "")
+				text = text.replace('\\"', '"').replace("\\'", "'").replace("\\n", "\n")
+				found.add((text, context))
 	return found
 
 
 def json_strings():
-	"""Labels, descriptions and Select options of the app's DocTypes; report, page and workspace titles."""
+	"""Labels, descriptions and Select options of the app's DocTypes; report, page and workspace titles
+	(Frappe translates these without a context)."""
 	found = set()
 
-	def read(pattern_dir):
+	def read(folder_name):
 		for path in source_files(".json"):
-			if f"{os.sep}{pattern_dir}{os.sep}" in path:
+			if f"{os.sep}{folder_name}{os.sep}" in path:
 				with open(path, encoding="utf-8") as fh:
 					yield json.load(fh)
 
@@ -112,11 +133,11 @@ def json_strings():
 	for doc in read("workspace"):
 		found.add(doc["label"])
 		found.update(shortcut["label"] for shortcut in doc.get("shortcuts", []))
-	return {s for s in found if s and re.search(r"[A-Za-z]", s)}
+	return {(s, "") for s in found if s and re.search(r"[A-Za-z]", s)}
 
 
 def visible_strings():
-	return python_strings() | js_strings() | json_strings() | set(DYNAMIC_VISIBLE)
+	return python_strings() | js_strings() | json_strings() | {(s, "") for s in DYNAMIC_VISIBLE}
 
 
 def read_rows(lang):
@@ -134,14 +155,22 @@ def vue_literals(template):
 	return [s for s in found if re.search(r"[A-Za-z]", s) and s not in VUE_ALLOWED]
 
 
+def row_key(source, context):
+	return f"{source}:{context}" if context else source
+
+
 class TestTranslations(FrappeTestCase):
 	def test_every_visible_string_has_uk_and_ru(self):
 		strings = visible_strings()
 		self.assertGreater(len(strings), 300, "the collector found suspiciously few strings")
+		self.assertTrue(any(ctx for _s, ctx in strings), "the collector found no contextual call")
 		for lang in LANGUAGES:
-			keys = {row[0] for row in read_rows(lang)}
-			self.assertEqual(sorted(strings - keys), [], f"{lang}.csv lacks these strings")
-			self.assertEqual(sorted(keys - strings), [], f"{lang}.csv has rows for strings no longer in the app")
+			ours = {(row[0], row[2]) for row in read_rows(lang)}
+			other = other_apps_translations(lang)
+			# a bare string another app already translates is left to that translation (no row of ours)
+			missing = [(s, c) for s, c in strings - ours if c or s not in other]
+			self.assertEqual(sorted(missing), [], f"{lang}.csv lacks these strings")
+			self.assertEqual(sorted(ours - strings), [], f"{lang}.csv has rows for strings no longer in the app")
 
 	def test_glossary_is_used_verbatim(self):
 		glossary = {
@@ -161,10 +190,9 @@ class TestTranslations(FrappeTestCase):
 			"Disconnect": ("Відключити", "Отключить"),
 		}
 		for index, lang in enumerate(LANGUAGES):
-			rows = {row[0]: row[1] for row in read_rows(lang)}
+			rows = {row[0]: row[1] for row in read_rows(lang) if not row[2]}
 			for source, expected in glossary.items():
-				if expected:
-					self.assertEqual(rows[source], expected[index], f"{lang}: {source}")
+				self.assertEqual(rows[source], expected[index], f"{lang}: {source}")
 
 	def test_placeholders_survive_translation(self):
 		for lang in LANGUAGES:
@@ -180,23 +208,60 @@ class TestTranslations(FrappeTestCase):
 			for row in read_rows(lang):
 				self.assertEqual(len(row), 3, f"{lang}: bad row {row!r}")
 				source, translation, context = row
-				self.assertEqual(context, "", f"{lang}: context is unused ({source!r})")
+				self.assertIn(context, ("", CONTEXT), f"{lang}: unknown context for {source!r}")
 				self.assertTrue(translation.strip(), f"{lang}: empty translation of {source!r}")
 				if source in SAME_AS_SOURCE:
 					continue
 				self.assertNotEqual(translation, source, f"{lang}: untranslated {source!r}")
 				self.assertTrue(CYRILLIC.search(translation), f"{lang}: no Cyrillic in {translation!r}")
 
+	def test_no_letters_of_the_other_language(self):
+		for lang in LANGUAGES:
+			for source, translation, _context in read_rows(lang):
+				self.assertIsNone(
+					FOREIGN_LETTERS[lang].search(translation), f"{lang}: foreign letters in {translation!r}"
+				)
+
 	def test_csv_has_no_duplicate_sources(self):
 		for lang in LANGUAGES:
-			sources = [row[0] for row in read_rows(lang)]
-			self.assertEqual([s for s, n in Counter(sources).items() if n > 1], [], lang)
+			pairs = [(row[0], row[2]) for row in read_rows(lang)]
+			self.assertEqual([p for p, n in Counter(pairs).items() if n > 1], [], lang)
+
+	def test_no_translation_overrides_another_app(self):
+		for lang in LANGUAGES:
+			other = other_apps_translations(lang)
+			ours = {row_key(row[0], row[2]): row[1] for row in read_rows(lang)}
+			# keys both we and another app translate: our rows plus the bare strings we left to them
+			visible_bare = {s for s, c in visible_strings() if not c}
+			shared = (set(ours) | visible_bare) & set(other)
+			self.assertGreater(len(shared), 40, f"{lang}: suspiciously few shared keys, the check is vacuous")
+			collisions = sorted(
+				k for k in set(ours) & set(other) if ours[k] != other[k] and k not in GLOSSARY_OVERRIDES
+			)
+			self.assertEqual(
+				collisions,
+				[],
+				f"{lang}: these rows override a Frappe/ERPNext translation; give the call "
+				f'context="{CONTEXT}" or adopt the other wording',
+			)
 
 	def test_frappe_loads_the_translations(self):
 		frappe.translate.clear_cache()  # translations are cached in Redis
 		self.assertEqual(frappe._("Take over", lang="uk"), "Перехопити")
 		self.assertEqual(frappe._("Take over", lang="ru"), "Перехватить")
 		self.assertEqual(frappe._("Give back to agent", lang="uk"), "Повернути агенту")
+
+	def test_contextual_lookup_returns_ours_and_bare_stays_frappes(self):
+		frappe.translate.clear_cache()
+		for lang, ours in (("uk", "Пов'язати"), ("ru", "Связать")):
+			bare = other_apps_translations(lang)["Link"]
+			self.assertNotEqual(bare, ours)
+			self.assertEqual(frappe._("Link", lang=lang, context=CONTEXT), ours)
+			self.assertEqual(frappe._("Link", lang=lang), bare)
+
+	def test_failed_status_is_a_word_not_a_fragment(self):
+		self.assertEqual(frappe._("Failed", lang="uk", context=CONTEXT), "Помилка")
+		self.assertEqual(frappe._("Failed", lang="ru", context=CONTEXT), "Ошибка")
 
 	def test_report_group_label_follows_the_request_language(self):
 		from dialogbrain.dialogbrain.report import group_label
@@ -216,6 +281,8 @@ class TestTranslations(FrappeTestCase):
 		for path in source_files(".vue"):
 			with open(path, encoding="utf-8") as fh:
 				match = re.search(r"<template>(.*)</template>", fh.read(), re.S)
+			if not match:  # a script-only component has no visible text
+				continue
 			self.assertEqual(vue_literals(match.group(1)), [], os.path.basename(path))
 
 	def test_the_vue_check_sees_unwrapped_text(self):
@@ -225,3 +292,11 @@ class TestTranslations(FrappeTestCase):
 			'<i v-if="n > 2" class="ok">{{ y }}</i></div>'
 		)
 		self.assertEqual(vue_literals(template), ["Hello", "Type", "Plain text"])
+
+	def test_the_js_collector_reads_contexts(self):
+		with_context = '__("Link", null, "DialogBrain") + __(\'Remove\', [a], \'DialogBrain\') + __("Plain")'
+		found = {
+			(next(g for g in m.groups()[:3] if g is not None), next((g for g in m.groups()[3:] if g), ""))
+			for m in JS_CALL.finditer(with_context)
+		}
+		self.assertEqual(found, {("Link", "DialogBrain"), ("Remove", "DialogBrain"), ("Plain", "")})
