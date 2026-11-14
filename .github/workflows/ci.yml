@@ -98,7 +98,7 @@ jobs:
           bench build --app dialogbrain
           # v16 reads translations from compiled catalogs (a full `bench build` makes them);
           # the translation tests compare ours with Frappe's and ERPNext's
-          if bench compile-po-to-mo --help >/dev/null 2>&1; then bench compile-po-to-mo; fi
+          if bench --site test.localhost compile-po-to-mo --help >/dev/null 2>&1; then bench --site test.localhost compile-po-to-mo; fi
         env:
           CI: "Yes"
 
