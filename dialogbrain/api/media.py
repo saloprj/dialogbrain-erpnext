@@ -67,7 +67,11 @@ def _bad_gateway():
 	frappe.throw(_("Could not fetch the attachment from DialogBrain"), MediaBadGateway)
 
 
-_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+_RANGE_RE = re.compile(r"^bytes=([0-9]*)-([0-9]*)$")
+
+
+_CONTENT_RANGE_RE = re.compile(r"^bytes [0-9]+-[0-9]+/([0-9]+|\*)$")
+_UNSATISFIED_RE = re.compile(r"^bytes \*/[0-9]+$")
 
 
 def _requested_range():
@@ -78,7 +82,7 @@ def _requested_range():
 	except (RuntimeError, AttributeError):  # no request bound (tests, background calls)
 		return None
 	raw = headers.get("Range") if headers else None
-	match = _RANGE_RE.match(raw.strip()) if isinstance(raw, str) else None
+	match = _RANGE_RE.fullmatch(raw.strip()) if isinstance(raw, str) else None
 	if not match or not (match.group(1) or match.group(2)):
 		return None
 	return f"bytes={match.group(1)}-{match.group(2)}"
@@ -136,12 +140,20 @@ def get(message, file_id):
 	except ValueError:
 		frappe.throw(_("Invalid file id"), frappe.PermissionError)
 
-	upstream = _open_upstream(file_id, numeric_id, _requested_range())
+	range_value = _requested_range()
+	upstream = _open_upstream(file_id, numeric_id, range_value)
 	if upstream is None:
 		_bad_gateway()
 
 	try:
 		if upstream.status_code not in (200, 206, 416):
+			_bad_gateway()
+		# 206/416 are only meaningful as an answer to a Range we forwarded, and a 206 must
+		# say which bytes it carries.
+		if upstream.status_code in (206, 416) and not range_value:
+			_bad_gateway()
+		if upstream.status_code == 206 and not _CONTENT_RANGE_RE.fullmatch(
+				str(upstream.headers.get("Content-Range") or "")):
 			_bad_gateway()
 		try:
 			length = int(upstream.headers.get("Content-Length") or 0)
@@ -168,14 +180,13 @@ def get(message, file_id):
 		headers["Accept-Ranges"] = "bytes"
 	if status == 416:
 		content_range = str(upstream.headers.get("Content-Range") or "")
-		if re.match(r"^bytes \*/\d+$", content_range):
+		if _UNSATISFIED_RE.fullmatch(content_range):
 			headers["Content-Range"] = content_range
+		headers["Cache-Control"] = "no-store"
 		upstream.close()
 		return Response(b"", status=416, headers=headers)
 	if status == 206:
-		content_range = str(upstream.headers.get("Content-Range") or "")
-		if re.match(r"^bytes \d+-\d+/(\d+|\*)$", content_range):
-			headers["Content-Range"] = content_range
+		headers["Content-Range"] = str(upstream.headers["Content-Range"])
 	if length:
 		headers["Content-Length"] = str(length)
 

@@ -284,7 +284,32 @@ class TestMedia(DialogBrainTestCase):
 		self.assertEqual(resp.status_code, 416)
 		self.assertEqual(resp.headers["Content-Range"], "bytes */5000")
 		self.assertEqual(got, b"")
+		self.assertEqual(resp.headers["Cache-Control"], "no-store")
+		self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
+		self.assertEqual(resp.headers["Content-Security-Policy"], "sandbox; default-src 'none'")
 		up.close.assert_called()
+
+	def test_unusable_206_and_416_are_bad_gateway(self):
+		frappe.set_user(self.agent_a)
+		msg = self._av("96")
+		cases = (
+			("bytes=0-1", 206, None),
+			("bytes=0-1", 206, "garbage"),
+			("bytes=0-1", 206, "bytes 0-1/10\nX: y"),
+			(None, 206, "bytes 0-1/10"),
+			(None, 416, "bytes */10"),
+		)
+		for rng, status, content_range in cases:
+			up = _upstream(chunks=(b"xy",), length=2, status=status, ctype="audio/ogg")
+			if content_range:
+				up.headers["Content-Range"] = content_range
+			with patch(CLIENT, _client(file_id=96)), patch(REQUESTS_GET, return_value=up):
+				if rng:
+					with _range_req(rng):
+						self.assertRaises(media.MediaBadGateway, media.get, msg, "96")
+				else:
+					self.assertRaises(media.MediaBadGateway, media.get, msg, "96")
+			up.close.assert_called()
 
 	def test_malformed_or_multi_range_is_ignored(self):
 		frappe.set_user(self.agent_a)
