@@ -364,6 +364,47 @@ class TestChangeMode(_Base):
 		self.assertNotIn("abc123SECRET", message)
 		self.assertEqual(self.row("101"), before)
 
+	def test_a_bound_trigger_that_became_shared_is_not_switched(self):
+		from dialogbrain.api import channels
+
+		self.fake.agents[10]["triggers"][0]["conditions"]["channel_account_ids"] = ["101", "109"]
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			channels.set_agent_mode("101", "off")
+		self.assertIn("changed in DialogBrain", str(ctx.exception))
+		self.assertEqual(self.updates(), [])
+		row = self.row("101")
+		self.assertEqual((row.agent_mode, row.agent_mode_status), ("", SHARED))
+		self.assertFalse(row.agent_trigger_id or row.agent_id or row.agent_name)
+
+	def test_a_bound_trigger_that_was_deleted_is_not_switched(self):
+		from dialogbrain.api import channels
+
+		self.fake.agents[10]["triggers"] = [t for t in self.fake.agents[10]["triggers"] if t["id"] != 1]
+		with self.assertRaises(frappe.ValidationError):
+			channels.set_agent_mode("101", "autopilot")
+		self.assertEqual(self.updates(), [])
+		row = self.row("101")
+		self.assertEqual((row.agent_mode, row.agent_mode_status), ("", NOBODY))
+		self.assertFalse(row.agent_trigger_id)
+
+	def test_a_failing_live_read_keeps_everything(self):
+		from dialogbrain.api import channels
+
+		before = self.row("101")
+		self.fake.error = DialogBrainError("HTTP 500 db_live_abc123SECRET", status=500)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			channels.set_agent_mode("101", "off")
+		self.assertIn("DialogBrain did not change the agent mode", str(ctx.exception))
+		self.assertNotIn("abc123SECRET", str(ctx.exception))
+		self.assertEqual(self.updates(), [])
+		self.assertEqual(self.row("101"), before)
+
+	def test_set_mode_returns_the_real_choices(self):
+		from dialogbrain.api import channels
+
+		result = channels.set_agent_mode("101", "off")
+		self.assertEqual([c["trigger_id"] for c in result["choices"]], ["1"])
+
 	def test_a_key_without_edit_rights_keeps_the_old_mode(self):
 		from dialogbrain.api import channels
 

@@ -117,16 +117,32 @@ def set_agent_mode(channel: str, mode: str) -> dict:
 	doc = _channel(channel)
 	if not (doc.agent_trigger_id and doc.agent_id):
 		frappe.throw(_("This channel has no agent to switch. Open the channel and choose one."))
+	client = DialogBrainClient.from_settings()
+	try:
+		found = agent_modes.candidates(client).get(str(doc.account_id), [])
+	except DialogBrainError as exc:
+		frappe.log_error(title="DialogBrain agent options failed", message=frappe.get_traceback())
+		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_reason(exc)))
+	bound = str(doc.agent_trigger_id)
+	if not any(c["exclusive"] and c["trigger_id"] == bound for c in found):
+		# the stored binding is stale (trigger shared, deleted, agent inactive): never switch it
+		values = agent_modes._decide(doc, found)
+		values["agent_mode_synced_at"] = now_datetime()
+		frappe.db.set_value(CHANNEL, doc.name, values, update_modified=False)
+		frappe.db.commit()  # frappe.throw rolls back; keep the refreshed binding
+		frappe.throw(
+			_("The agent setup of this channel changed in DialogBrain; the channel was refreshed. Nothing was switched.")
+		)
 	params = {"trigger_id": int(doc.agent_trigger_id), "agent_id": int(doc.agent_id), **MODES[mode]}
 	try:
-		DialogBrainClient.from_settings().execute("agents.trigger_update", params)
+		client.execute("agents.trigger_update", params)
 	except DialogBrainError as exc:
 		frappe.log_error(title="DialogBrain agents.trigger_update failed", message=frappe.get_traceback())
 		frappe.throw(_("DialogBrain did not change the agent mode: {0}").format(_reason(exc)))
 	frappe.db.set_value(
 		CHANNEL, doc.name, {"agent_mode": mode, "agent_mode_synced_at": now_datetime()}, update_modified=False
 	)
-	return _payload(doc.name, [])
+	return _payload(doc.name, found)
 
 
 @frappe.whitelist(methods=["POST"])
