@@ -51,6 +51,7 @@ from frappe.utils.password import remove_encrypted_password
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.sync.backfill import (
+	DEFAULT_BACKFILL_DAYS,
 	BACKFILL_JOB_ID,
 	SETTINGS,
 	STATUS_LENGTH,
@@ -62,7 +63,7 @@ from dialogbrain.sync.backfill import (
 	utc_day,
 )
 from dialogbrain.sync.notify import publish
-from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
+from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id, kick_drain
 from dialogbrain.sync.sender import UNCONFIRMED_ERROR, last_attempt_at, requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
@@ -74,7 +75,6 @@ INTERVALS = {"public": 300, "private": 60}
 # next 60 s tick sees 59.x s and every other minute is skipped.
 TICK_SLACK = 5
 PROBE_LIMIT = 10
-STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
 MAX_THREAD_FAILURES = 5
 STATUS_TEXT_LENGTH = 1000
@@ -120,27 +120,39 @@ def tick() -> None:
 
 
 def retry_webhook_logs() -> None:
-	"""Re-enqueue failed deliveries and ones stuck ``queued`` > 10 min (``attempts < 5``)."""
-	stuck_before = now_datetime() - STUCK_AFTER
-	names = frappe.db.sql(
+	"""Re-enqueue ``failed`` deliveries (``attempts < 5``, one job each: they are few) and
+	kick the drain of every lane that has a ``queued`` row. The drain is the only way a
+	queued row is processed; a kick is deduplicated while a drain runs, so the kick here
+	also closes the race between a drain's last empty select and a row committed just
+	after it (that row waits a minute, not ten)."""
+	rows = frappe.db.sql(
 		"""
-		select name from `tabDB Webhook Log`
-		where ifnull(attempts, 0) < %(max)s
-		  and (status = 'failed' or (status = 'queued' and received_at < %(stuck)s))
+		select name, ifnull(`lane`, 'short') as lane from `tabDB Webhook Log`
+		where status = 'failed' and ifnull(attempts, 0) < %(max)s
 		order by received_at
 		limit 500
 		""",
-		{"max": MAX_ATTEMPTS, "stuck": stuck_before},
-		pluck=True,
+		{"max": MAX_ATTEMPTS},
+		as_dict=True,
 	)
-	for name in names:
+	for row in rows:
 		frappe.enqueue(
 			PROCESS_JOB,
-			queue="short",
-			job_id=delivery_job_id(name),
+			queue=row.lane,  # a failed backfill row never jumps ahead of live traffic
+			job_id=delivery_job_id(row.name),
 			deduplicate=True,
-			log_name=name,
+			log_name=row.name,
 		)
+	lanes = frappe.db.sql(
+		"""
+		select distinct ifnull(`lane`, 'short') from `tabDB Webhook Log`
+		where status = 'queued' and ifnull(attempts, 0) < %(max)s
+		""",
+		{"max": MAX_ATTEMPTS},
+		pluck=True,
+	)
+	for lane in sorted(lanes):
+		kick_drain(lane)
 
 
 # --- reconcile ------------------------------------------------------------------
@@ -245,7 +257,7 @@ def reconcile() -> None:
 		return
 	start = now_datetime()
 	last = get_datetime(settings.last_reconcile_at) if settings.last_reconcile_at else start
-	floor = utc_day(start - timedelta(days=int(settings.backfill_days or 30)))
+	floor = utc_day(start - timedelta(days=int(settings.backfill_days or DEFAULT_BACKFILL_DAYS)))
 	since = max(utc_day(last - timedelta(days=1)), floor)
 	client = DialogBrainClient.from_settings()
 	global_ok = True
