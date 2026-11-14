@@ -40,6 +40,13 @@ services:
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   frontend:
+    # D4: DialogBrain calls ERPNext at http://erpnext-dev:8080 (host.docker.internal is
+    # 10.200.0.1 here and DialogBrain's SSRF guard refuses 10/8 for integration calls).
+    networks:
+      frappe_network: {}
+      dialogbrain:
+        aliases:
+          - erpnext-dev
     volumes:
       # D2: built bundles reach nginx directly (backend's assets/dialogbrain is a symlink
       # into the app, which the frontend container does not have).

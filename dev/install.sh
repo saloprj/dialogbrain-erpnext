@@ -58,3 +58,16 @@ done
 # frontend restart (nginx caches the backend's old address after a recreate)
 bench build --app dialogbrain
 sudo docker restart erpnext-frontend-1
+
+# 7. DialogBrain reaches this site at http://erpnext-dev:8080 (the frontend's alias on the
+# DialogBrain network, see compose D4). Nothing below is changed by this script.
+cat <<'MSG'
+
+Manual steps for a DialogBrain that must call this ERPNext (integration tools):
+  1. In the DialogBrain stack set  SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev
+     (the variable REPLACES the compose default `minio`: leaving `minio` out breaks
+     DialogBrain's media proxy), then restart its api-gateway.
+  2. In ERPNext set the Public site URL of this dev site to  http://erpnext-dev:8080
+     (host.docker.internal is 10.200.0.1 here and DialogBrain refuses 10/8 for
+     integration calls).
+MSG

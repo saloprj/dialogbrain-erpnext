@@ -70,3 +70,9 @@ Dev stand notes:
 - Trace attribution for REST automation calls (a key id that does not make the caller an operator).
 - /approve should return error_type; ref resolution in signed context should prefer t.workspace_id; rollback after failed resolve.
 - Consent/agents: contact_id in message events; group sender names; consent Cancel redirect (from Plans 1b/2).
+
+## Closed by Plan 4 (2026-11-14)
+- Media Range support (from Plan 2): done.
+- A full test run on Frappe v15 / Python 3.10: `dev/test-v15.sh` (see README, "Supported versions and tests").
+- Dev stand alias: `erpnext-dev` on `dialogbrain_dialogbrain-network` is now in `dev/compose.dialogbrain.yml` and the documented way; `dev/install.sh` prints the DialogBrain-side steps (`SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev`, Public site URL `http://erpnext-dev:8080`).
+

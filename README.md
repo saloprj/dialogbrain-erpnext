@@ -7,6 +7,63 @@ Omnichannel inbox that mirrors DialogBrain conversations into ERPNext.
 From the frappe_docker directory: `bash dialogbrain_erpnext/dev/install.sh`.
 Run tests: `sudo docker exec erpnext-backend-1 bench --site test.localhost run-tests --app dialogbrain`
 
+The dev stand's frontend is also reachable from the DialogBrain stack as
+`http://erpnext-dev:8080` (network alias in `dev/compose.dialogbrain.yml`). For a DialogBrain
+that has to call ERPNext, `install.sh` prints two manual steps: `SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev`
+on DialogBrain (it replaces the default `minio`, keep both) with an `api-gateway` restart,
+and the site's Public site URL set to `http://erpnext-dev:8080`.
+
+## AI agent mode per channel
+
+In DialogBrain an AI agent answers a channel through an incoming-message trigger. DialogBrain
+owns that setting; ERPNext reads it and lets a manager switch it. Each **DB Channel** shows
+its agent and mode (read-only fields, plus a line at the top of the form).
+
+| Mode | What the agent does |
+|---|---|
+| **Copilot** | writes a draft reply; a person approves it |
+| **Autopilot** | may answer by itself. DialogBrain's own safety gate can still hold a single answer as a draft; ERPNext does not see that |
+| **Off** | the trigger is disabled: the agent does not answer this channel |
+
+On the DB Channel form, the **DialogBrain agent** button group has **Copilot**, **Autopilot**
+and **Off** (the current mode is highlighted), **Choose agent...** (when several agents
+answer the channel) and **Refresh from DialogBrain**.
+
+- **Who:** Chat Managers and System Managers only; others do not see the buttons and the
+  server refuses the call.
+- **Shared trigger rule:** a channel is switched only when its trigger serves that channel
+  alone. If the trigger also serves other channels, ERPNext does not switch it (that
+  would change the other channels too) and says "The agent trigger also serves other
+  channels: change it in DialogBrain". If several agents answer one channel, use
+  **Choose agent...**.
+- **Key:** the DialogBrain Connect key must belong to a member, admin or owner of the
+  workspace; otherwise agents cannot be read ("connect with a member, admin or owner key").
+- **Refresh:** modes are read from DialogBrain every hour and when someone presses
+  **Refresh from DialogBrain**. A switch made here is stored only after DialogBrain
+  accepted it.
+
+## Reports
+
+Three script reports under the DialogBrain workspace, for Chat Managers and System
+Managers only:
+
+- **First Response Time:** per manager, channel or day: conversations, answered, not
+  answered yet, average / median / longest minutes and the share answered within 5
+  minutes. Filters: period, group by, channel, assigned to. "Manager" is the person the
+  conversation is assigned to, not the one who typed the first reply.
+- **Unanswered Conversations:** open conversations whose last message is from the
+  customer, longest waiting first. Filters: channel, assigned to, minimum minutes waiting.
+- **Conversations by Channel and Manager:** opened and closed in the period, open and
+  unanswered now, inbound and outbound messages, and how many were sent by AI. Filters:
+  period, group by (channel, manager or day).
+
+## Languages
+
+The app is available in English, Ukrainian and Russian (`dialogbrain/translations/uk.csv`
+and `ru.csv`); the language follows the user's setting. The app's own interface strings
+that would otherwise share their wording with ERPNext's carry their own translation
+context ("DialogBrain"), so translating them does not change ERPNext's wording elsewhere.
+
 ## Supported versions and tests
 
 | Frappe / ERPNext | Python | Node | MariaDB |
