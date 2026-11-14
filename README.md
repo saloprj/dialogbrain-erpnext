@@ -59,7 +59,7 @@ show my invoices" does not work.
 
 A chat counts as identified only when it is linked to a Customer or Lead:
 
-- manually, by a manager; or
+- manually, by someone who can read that customer in ERPNext; or
 - automatically, by a phone number that the channel itself verified (for example the
   WhatsApp number).
 
