@@ -483,6 +483,20 @@ class TestOAuthFlow(DialogBrainTestCase):
 		self.assertFalse(oauth.pop_result(self.other)["ok"])
 		self.assertEqual(frappe.get_single(SETTINGS).get_password("api_key"), OLD_KEY)
 
+	def test_callback_other_user_does_not_consume_the_state(self):
+		"""Another user's hit on the callback is refused without burning the starter's
+		pending sign-in: the state is checked first, consumed after."""
+		state = self._state(self._start()[0])
+		frappe.set_user(self.other)
+		self._callback(**self._ok_params(state))
+		self.assertFalse(oauth.pop_result(self.other)["ok"])
+		self.assertIsNotNone(self._entry(state))
+		frappe.set_user(self.admin)
+		_, ex, conn = self._callback(**self._ok_params(state))
+		ex.assert_called_once()
+		conn.assert_called_once()
+		self.assertTrue(oauth.pop_result(self.admin)["ok"])
+
 	def test_callback_iss_mismatch_refused(self):
 		state = self._state(self._start()[0])
 		_, ex, conn = self._callback(**self._ok_params(state, iss="https://evil.example.com"))

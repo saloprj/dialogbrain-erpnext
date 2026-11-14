@@ -257,8 +257,11 @@ def start() -> dict:
 	return {"authorize_url": authorize_url(meta["authorization_endpoint"], client_id, redirect_uri, state, challenge)}
 
 
-def _claim(state) -> "dict | None":
-	"""Read the pending entry for ``state`` and consume it; only one caller ever wins."""
+def _claim(state, user=None) -> "dict | None":
+	"""Read the pending entry for ``state`` and consume it; only one caller ever wins.
+
+	With ``user``: an entry started by another user is returned WITHOUT being consumed
+	(the caller refuses it), so a stray hit cannot burn the starter's sign-in."""
 	if not isinstance(state, str) or not _STATE.match(state):
 		return None
 	cache = frappe.cache()
@@ -266,6 +269,8 @@ def _claim(state) -> "dict | None":
 	entry = cache.get_value(key, expires=True)
 	if not entry:
 		return None
+	if user is not None and entry.get("user") != user:
+		return entry
 	# raw Redis DEL returns how many keys it removed: exactly one concurrent caller gets 1
 	if cache.delete(cache.make_key(key)) != 1:
 		return None
@@ -326,7 +331,7 @@ def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 		return
 	_redirect(SETTINGS_PATH)
 
-	entry = _claim(state)
+	entry = _claim(state, user)
 	if not entry:
 		return _refuse(user, _("DialogBrain sign-in failed: the request expired or was already used. Try again."))
 	if entry.get("user") != user:
