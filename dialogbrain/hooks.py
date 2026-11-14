@@ -32,6 +32,7 @@ ignore_links_on_delete = ["DB Agent Call Log"]
 
 scheduler_events = {
 	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
+	"hourly": ["dialogbrain.setup.agent_modes.hourly"],
 	"daily": [
 		"dialogbrain.sync.maintenance.cleanup_webhook_log",
 		"dialogbrain.sync.maintenance.cleanup_agent_call_log",

@@ -11,7 +11,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
-from dialogbrain.setup import agent_integration
+from dialogbrain.setup import agent_integration, agent_modes
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
 from dialogbrain.sync.upsert import upsert_channel
 
@@ -207,6 +207,12 @@ def _connect(doc) -> dict:
 	for account in channels:
 		upsert_channel(account.get("account_id"), account.get("channel"), account.get("display_name"))
 
+	# Each channel's agent mode (Plan 4): Connect never fails because of it; the reason
+	# is in every channel's agent_mode_status (sync writes it before raising).
+	try:
+		agent_modes.sync(client)
+	except Exception:
+		frappe.log_error(title="DialogBrain: agent modes not read at Connect")
 	configure_webhook(doc, mode, client, hooks)
 	_bind_instance(doc, workspace_id)
 	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
