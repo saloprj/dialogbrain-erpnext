@@ -1,13 +1,16 @@
 import json
+from datetime import datetime, timedelta, timezone
+from functools import partial
 
 import frappe
+from dateutil import parser as dateparser
 from frappe.utils import now_datetime
 
-from dialogbrain.sync.processor import delivery_job_id
+from dialogbrain.sync.processor import kick_drain
 from dialogbrain.sync.signature import verify_signature
 
 MAX_BODY_BYTES = 1024 * 1024
-PROCESSOR = "dialogbrain.sync.processor.process_delivery"
+DEFAULT_BACKFILL_DAYS = 30
 
 
 def _respond(status_code: int, ok: bool, **extra):
@@ -50,6 +53,16 @@ def receive():
 	if frappe.db.exists("DB Webhook Log", {"delivery_id": delivery_id}):
 		return {"ok": True, "duplicate": True}
 
+	# ``skip_push`` is DialogBrain's "nobody wrote to us just now": channel-sync's backfill
+	# re-emits every imported history row this way (thousands per run), and system events
+	# (call markers) carry it too. History older than our own backfill window is not
+	# mirrored at all; the rest goes to ``long`` so live messages on ``short`` never wait.
+	data = body.get("data") if isinstance(body.get("data"), dict) else {}
+	silent = data.get("skip_push") is True
+	if silent and _is_old_history(data, settings):
+		return {"ok": True, "dropped": "history"}
+	lane = "long" if silent else "short"
+
 	log = frappe.get_doc(
 		{
 			"doctype": "DB Webhook Log",
@@ -59,6 +72,7 @@ def receive():
 			"received_at": now_datetime(),
 			"status": "queued",
 			"attempts": 0,
+			"lane": lane,
 		}
 	)
 	try:
@@ -67,15 +81,23 @@ def receive():
 		frappe.db.rollback()
 		return {"ok": True, "duplicate": True}
 
-	# DialogBrain re-emitting fetched channel history (``skip_push``) can be thousands of
-	# deliveries: keep them off ``short``, where live messages and replies are processed.
-	data = body.get("data") if isinstance(body.get("data"), dict) else {}
-	frappe.enqueue(
-		PROCESSOR,
-		queue="long" if data.get("skip_push") is True else "short",
-		enqueue_after_commit=True,
-		job_id=delivery_job_id(log.name),
-		deduplicate=True,
-		log_name=log.name,
-	)
+	# One drain job per lane, kicked after the row is committed (so the drain can see it).
+	frappe.db.after_commit.add(partial(kick_drain, lane))
 	return {"ok": True}
+
+
+def _is_old_history(data, settings) -> bool:
+	"""``message.sent_at`` before the backfill horizon (``backfill_days``). Unparsable or
+	missing dates are kept: dropping is only for what is certainly old."""
+	message = data.get("message") if isinstance(data.get("message"), dict) else {}
+	raw = message.get("sent_at")
+	if not raw:
+		return False
+	try:
+		sent_at = dateparser.isoparse(str(raw))
+	except (ValueError, TypeError, OverflowError):
+		return False
+	if sent_at.tzinfo is None:
+		sent_at = sent_at.replace(tzinfo=timezone.utc)
+	days = int(settings.backfill_days or DEFAULT_BACKFILL_DAYS)
+	return sent_at < datetime.now(timezone.utc) - timedelta(days=days)

@@ -768,7 +768,7 @@ class TestBackfillReconcile(DialogBrainTestCase):
 
 	# --- webhook log maintenance ---------------------------------------------
 
-	def _log(self, status, attempts, received_minutes_ago):
+	def _log(self, status, attempts, received_minutes_ago, lane="short"):
 		return (
 			frappe.get_doc(
 				{
@@ -779,6 +779,7 @@ class TestBackfillReconcile(DialogBrainTestCase):
 					"received_at": now_datetime() - timedelta(minutes=received_minutes_ago),
 					"status": status,
 					"attempts": attempts,
+					"lane": lane,
 				}
 			)
 			.insert(ignore_permissions=True)
@@ -786,26 +787,45 @@ class TestBackfillReconcile(DialogBrainTestCase):
 		)
 
 	def test_retry_failed_and_stuck_logs(self):
+		"""Failed rows get their own job (few, and ``process_delivery`` skips exhausted ones);
+		rows stuck ``queued`` are the drain's: one kick per lane, never a job per row."""
 		from dialogbrain.sync.reconcile import retry_webhook_logs
 
 		failed = self._log("failed", 1, 3)
 		failed_4 = self._log("failed", 4, 30)
 		exhausted = self._log("failed", 5, 3)
 		stuck = self._log("queued", 0, 11)
+		stuck_long = self._log("queued", 0, 12, lane="long")
 		fresh = self._log("queued", 0, 2)
 		stuck_exhausted = self._log("queued", 5, 60)
 		done = self._log("processed", 1, 60)
 
 		with patch("frappe.enqueue") as enqueue:
 			retry_webhook_logs()
-		retried = {c.kwargs["log_name"]: c for c in enqueue.call_args_list}
-		self.assertEqual(set(retried), {failed, failed_4, stuck})
-		for name, call in retried.items():
+		per_row = {c.kwargs["log_name"]: c for c in enqueue.call_args_list if "log_name" in c.kwargs}
+		self.assertEqual(set(per_row), {failed, failed_4})
+		for name, call in per_row.items():
 			self.assertEqual(call.args[0], "dialogbrain.sync.processor.process_delivery")
 			self.assertTrue(call.kwargs["deduplicate"])
 			self.assertIn(name, call.kwargs["job_id"])
-		for name in (exhausted, fresh, stuck_exhausted, done):
-			self.assertNotIn(name, retried)
+		drains = [c for c in enqueue.call_args_list if c.args[0] == "dialogbrain.sync.processor.drain"]
+		self.assertEqual(sorted(c.kwargs["lane"] for c in drains), ["long", "short"])
+		for c in drains:
+			self.assertEqual(c.kwargs["queue"], c.kwargs["lane"])
+			self.assertTrue(c.kwargs["deduplicate"])
+		for name in (exhausted, stuck, stuck_long, fresh, stuck_exhausted, done):
+			self.assertNotIn(name, per_row)
+
+	def test_tick_kicks_the_drain_for_any_queued_row(self):
+		"""Closes the race between the drain's last empty select and a delivery whose kick
+		was deduplicated against that still-running drain: within a minute, not ten."""
+		from dialogbrain.sync.reconcile import tick
+
+		self._log("queued", 0, 1)  # fresh, not "stuck"
+		with patch("frappe.enqueue") as enqueue, patch("dialogbrain.sync.reconcile.requeue_stale_replies"):
+			tick()
+		drains = [c for c in enqueue.call_args_list if c.args[0] == "dialogbrain.sync.processor.drain"]
+		self.assertEqual([c.kwargs["lane"] for c in drains], ["short"])
 
 	def test_retry_runs_processor(self):
 		"""A retried failed delivery is processed; the 5th failure is the last."""

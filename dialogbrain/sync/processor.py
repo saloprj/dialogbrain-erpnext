@@ -34,8 +34,53 @@ PROCESSABLE = ("queued", "failed")
 
 
 def delivery_job_id(log_name: str) -> str:
-	"""One RQ job id per delivery: the receiver and the retry dedupe on it."""
+	"""One RQ job id per delivery (the scheduler's retry of a ``failed`` row)."""
 	return f"dialogbrain_delivery_{log_name}"
+
+
+DRAIN_JOB = "dialogbrain.sync.processor.drain"
+DRAIN_BATCH = 100
+DRAIN_MAX_BATCHES = 200
+
+
+def drain_job_id(lane: str) -> str:
+	"""One RQ job per lane: every kick while it runs is deduplicated against it."""
+	return f"dialogbrain_drain_{lane}"
+
+
+def kick_drain(lane: str) -> None:
+	"""Enqueue the lane's drain (idempotent while one is queued or running). Never raises:
+	the delivery row is already committed, and a full RQ queue (``QueueOverloaded``) must
+	not become a 503 that DialogBrain retries five times; the scheduler kicks again."""
+	try:
+		frappe.enqueue(DRAIN_JOB, queue=lane, job_id=drain_job_id(lane), deduplicate=True, lane=lane)
+	except Exception:  # noqa: BLE001 - see docstring
+		frappe.log_error(title=f"DialogBrain drain kick failed ({lane})", message=frappe.get_traceback())
+
+
+def drain(lane: str = "short", batch_size: int = DRAIN_BATCH, max_batches: int = DRAIN_MAX_BATCHES) -> None:
+	"""Background job: process every ``queued`` delivery of ``lane``, oldest first, in one
+	process. One job per lane instead of one per delivery: a burst of thousands of webhook
+	deliveries (channel-sync backfill) costs one worker fork, not thousands, and the RQ queue
+	never overflows. Commits after every row, so a killed job keeps what it finished. Bounded
+	by ``max_batches``; a row still queued after that is picked up by the next kick."""
+	lane_sql = "ifnull(`lane`, 'short') = %(lane)s" if lane == "short" else "`lane` = %(lane)s"
+	for _ in range(max_batches):
+		names = frappe.db.sql(
+			f"""
+			select name from `tabDB Webhook Log`
+			where status = 'queued' and ifnull(attempts, 0) < %(max)s and {lane_sql}
+			order by received_at, name
+			limit %(limit)s
+			""",
+			{"lane": lane, "max": MAX_ATTEMPTS, "limit": batch_size},
+			pluck=True,
+		)
+		if not names:
+			return
+		for name in names:
+			process_delivery(name)
+			_commit()
 
 
 def _commit():

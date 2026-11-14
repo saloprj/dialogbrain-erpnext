@@ -2,9 +2,11 @@ import hashlib
 import hmac
 import json
 from types import SimpleNamespace
+from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
+from frappe.utils import now_datetime
 
 from dialogbrain.api import webhook
 from dialogbrain.sync.signature import verify_signature
@@ -71,35 +73,87 @@ class TestReceive(DialogBrainTestCase):
 	def _rows(self):
 		return frappe.db.count("DB Webhook Log", {"delivery_id": self.delivery_id})
 
-	def test_receive_stores_and_enqueues(self):
+	def test_receive_stores_and_kicks_the_drain(self):
+		"""One drain job per lane, not one RQ job per delivery: a burst of thousands of
+		deliveries must never fill the RQ queue (frappe.QueueOverloaded -> 503 -> retries)."""
+		frappe.db.after_commit.reset()
 		with patch("frappe.enqueue") as enq:
 			res = self._post()
+			enq.assert_not_called()  # the kick waits for the row's commit
+			frappe.db.after_commit.run()
 		self.assertTrue(res["ok"])
 		self.assertEqual(self._rows(), 1)
 		row = frappe.get_doc("DB Webhook Log", {"delivery_id": self.delivery_id})
-		self.assertEqual(row.status, "queued")
-		self.assertEqual(row.event, "message.received")
+		self.assertEqual((row.status, row.event, row.lane), ("queued", "message.received", "short"))
 		self.assertEqual(json.loads(row.payload)["delivery_id"], self.delivery_id)
 		enq.assert_called_once()
-		self.assertEqual(enq.call_args.args[0], "dialogbrain.sync.processor.process_delivery")
-		self.assertEqual(enq.call_args.kwargs["log_name"], row.name)
+		self.assertEqual(enq.call_args.args[0], "dialogbrain.sync.processor.drain")
+		self.assertEqual(enq.call_args.kwargs["lane"], "short")
 		self.assertEqual(enq.call_args.kwargs["queue"], "short")
-		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
-		# same job id as the scheduler's retry, so one delivery is never queued twice
-		self.assertEqual(enq.call_args.kwargs["job_id"], f"dialogbrain_delivery_{row.name}")
+		self.assertEqual(enq.call_args.kwargs["job_id"], "dialogbrain_drain_short")
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+		self.assertFalse(enq.call_args.kwargs.get("enqueue_after_commit"))
 
-	def test_receive_routes_skip_push_history_to_long_queue(self):
-		"""F7: DialogBrain re-emitting fetched history (``skip_push``) can be thousands of
-		deliveries; they go to ``long`` so replies and live messages on ``short`` don't wait."""
+	def test_receive_routes_skip_push_to_the_long_lane(self):
+		"""F7: DialogBrain's backfill rows (``skip_push``) can be thousands of deliveries;
+		they go to ``long`` so replies and live messages on ``short`` don't wait."""
 		body = json.loads(self.body)
 		body["data"]["skip_push"] = True
 		raw = json.dumps(body).encode()
+		frappe.db.after_commit.reset()
 		with patch("frappe.enqueue") as enq:
 			self._post(body=raw)
+			frappe.db.after_commit.run()
+		row = frappe.get_doc("DB Webhook Log", {"delivery_id": self.delivery_id})
+		self.assertEqual(row.lane, "long")
 		enq.assert_called_once()
 		self.assertEqual(enq.call_args.kwargs["queue"], "long")
-		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+		self.assertEqual(enq.call_args.kwargs["lane"], "long")
+		self.assertEqual(enq.call_args.kwargs["job_id"], "dialogbrain_drain_long")
+
+	def test_receive_drops_backfill_rows_older_than_the_backfill_window(self):
+		"""channel-sync re-emits every imported history row as message.received with
+		``skip_push``; rows older than our own backfill horizon are not mirrored at all."""
+		frappe.db.set_single_value("DialogBrain Settings", "backfill_days", 30, update_modified=False)
+		body = json.loads(self.body)
+		body["data"]["skip_push"] = True
+		body["data"]["message"]["sent_at"] = "2025-01-01T10:00:00+00:00"
+		frappe.db.after_commit.reset()
+		with patch("frappe.enqueue") as enq:
+			res = self._post(body=json.dumps(body).encode())
+			frappe.db.after_commit.run()
+		self.assertEqual(res, {"ok": True, "dropped": "history"})
+		self.assertNotIn("http_status_code", frappe.local.response)
+		self.assertEqual(self._rows(), 0)
+		enq.assert_not_called()
+
+	def test_receive_keeps_recent_skip_push_rows(self):
+		"""A call marker is a system event with ``skip_push`` and a current ``sent_at``."""
+		body = json.loads(self.body)
+		body["data"]["skip_push"] = True
+		body["data"]["message"]["sent_at"] = (now_datetime() - timedelta(hours=1)).isoformat()
+		with patch("frappe.enqueue"):
+			res = self._post(body=json.dumps(body).encode())
+		self.assertEqual(res, {"ok": True})
+		self.assertEqual(self._rows(), 1)
+
+	def test_receive_keeps_skip_push_rows_without_a_parsable_date(self):
+		body = json.loads(self.body)
+		body["data"]["skip_push"] = True
+		body["data"]["message"]["sent_at"] = "yesterday-ish"
+		with patch("frappe.enqueue"):
+			res = self._post(body=json.dumps(body).encode())
+		self.assertEqual(res, {"ok": True})
+		self.assertEqual(self._rows(), 1)
+
+	def test_kick_drain_survives_an_overloaded_queue(self):
+		"""The row is stored and committed; frappe.QueueOverloaded must not turn into a 503
+		(DialogBrain would retry 5 times). The drain catches the row later."""
+		with patch("frappe.enqueue", side_effect=frappe.QueueOverloaded("full")), patch(
+			"frappe.log_error"
+		) as log_error:
+			webhook.kick_drain("short")  # does not raise
+		log_error.assert_called_once()
 
 	def test_receive_rejects_bad_signature(self):
 		with patch("frappe.enqueue") as enq:
@@ -118,13 +172,16 @@ class TestReceive(DialogBrainTestCase):
 		enq.assert_not_called()
 
 	def test_receive_dedupes_delivery_id(self):
+		frappe.db.after_commit.reset()
 		with patch("frappe.enqueue") as enq:
 			r1 = self._post()
 			r2 = self._post()
+			frappe.db.after_commit.run()
 		self.assertTrue(r1["ok"] and r2["ok"])
+		self.assertEqual(r2.get("duplicate"), True)
 		self.assertNotIn("http_status_code", frappe.local.response)
 		self.assertEqual(self._rows(), 1)
-		enq.assert_called_once()
+		enq.assert_called_once()  # the duplicate stores nothing and kicks nothing
 
 	def test_receive_when_not_connected_returns_200_and_drops(self):
 		settings = frappe.get_single("DialogBrain Settings")

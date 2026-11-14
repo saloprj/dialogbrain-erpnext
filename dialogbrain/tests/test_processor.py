@@ -913,9 +913,11 @@ class TestProcessor(DialogBrainTestCase):
 				retry_webhook_logs()
 			if not enqueue.called:
 				break
-			self.assertEqual(enqueue.call_args.kwargs["log_name"], log)
+			# a queued row is the drain's: the scheduler kicks the lane, not the row
+			self.assertEqual(enqueue.call_args.args[0], processor.DRAIN_JOB)
+			self.assertEqual(enqueue.call_args.kwargs["lane"], "short")
 			with patch.object(processor, "process_event", side_effect=Killed), self.assertRaises(Killed):
-				processor.process_delivery(log_name=log)
+				processor.drain("short")
 			runs += 1
 		self.assertEqual(runs, 5)
 		row = frappe.db.get_value("DB Webhook Log", log, ["status", "attempts"], as_dict=True)

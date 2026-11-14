@@ -62,7 +62,7 @@ from dialogbrain.sync.backfill import (
 	utc_day,
 )
 from dialogbrain.sync.notify import publish
-from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
+from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id, kick_drain
 from dialogbrain.sync.sender import UNCONFIRMED_ERROR, last_attempt_at, requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
@@ -74,7 +74,6 @@ INTERVALS = {"public": 300, "private": 60}
 # next 60 s tick sees 59.x s and every other minute is skipped.
 TICK_SLACK = 5
 PROBE_LIMIT = 10
-STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
 MAX_THREAD_FAILURES = 5
 STATUS_TEXT_LENGTH = 1000
@@ -120,17 +119,19 @@ def tick() -> None:
 
 
 def retry_webhook_logs() -> None:
-	"""Re-enqueue failed deliveries and ones stuck ``queued`` > 10 min (``attempts < 5``)."""
-	stuck_before = now_datetime() - STUCK_AFTER
+	"""Re-enqueue ``failed`` deliveries (``attempts < 5``, one job each: they are few) and
+	kick the drain of every lane that has a ``queued`` row. The drain is the only way a
+	queued row is processed; a kick is deduplicated while a drain runs, so the kick here
+	also closes the race between a drain's last empty select and a row committed just
+	after it (that row waits a minute, not ten)."""
 	names = frappe.db.sql(
 		"""
 		select name from `tabDB Webhook Log`
-		where ifnull(attempts, 0) < %(max)s
-		  and (status = 'failed' or (status = 'queued' and received_at < %(stuck)s))
+		where status = 'failed' and ifnull(attempts, 0) < %(max)s
 		order by received_at
 		limit 500
 		""",
-		{"max": MAX_ATTEMPTS, "stuck": stuck_before},
+		{"max": MAX_ATTEMPTS},
 		pluck=True,
 	)
 	for name in names:
@@ -141,6 +142,16 @@ def retry_webhook_logs() -> None:
 			deduplicate=True,
 			log_name=name,
 		)
+	lanes = frappe.db.sql(
+		"""
+		select distinct ifnull(`lane`, 'short') from `tabDB Webhook Log`
+		where status = 'queued' and ifnull(attempts, 0) < %(max)s
+		""",
+		{"max": MAX_ATTEMPTS},
+		pluck=True,
+	)
+	for lane in sorted(lanes):
+		kick_drain(lane)
 
 
 # --- reconcile ------------------------------------------------------------------

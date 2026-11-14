@@ -10,6 +10,7 @@
   "event",
   "payload",
   "received_at",
+  "lane",
   "status",
   "attempts",
   "error"
@@ -37,6 +38,13 @@
    "fieldtype": "Datetime",
    "label": "Received At",
    "search_index": 1
+  },
+  {
+   "default": "short",
+   "fieldname": "lane",
+   "fieldtype": "Select",
+   "label": "Lane",
+   "options": "short\nlong"
   },
   {
    "fieldname": "status",
