@@ -5,6 +5,7 @@
 			<div class="db-header-sub">
 				<span>{{ channelLabel(conv.channel && conv.channel.channel_type) }}</span>
 				<span v-if="conv.channel && conv.channel.title">· {{ conv.channel.title }}</span>
+				<span v-if="agentModeLabel" class="db-agent-mode" :class="'db-agent-mode-' + conv.channel.agent_mode">{{ agentModeLabel }}</span>
 				<span v-if="conv.phone">· {{ conv.phone }}</span>
 				<span v-else-if="conv.email">· {{ conv.email }}</span>
 				<a v-if="conv.party" class="db-party-chip" :href="formLink(conv.party_type, conv.party)" :title="conv.party_type">
@@ -91,6 +92,15 @@ const users = ref(null);
 const name = computed(() => props.conv.contact_name || props.conv.title || props.conv.name);
 const canAssignAny = computed(() => !!(props.conv.permissions && props.conv.permissions.can_assign_any));
 // Take over / give back: only when the connected DialogBrain supports it (Plan 3).
+const AGENT_MODE_LABELS = {
+	copilot: () => __("AI: drafts"),
+	autopilot: () => __("AI: answers"),
+	off: () => __("AI: off"),
+};
+const agentModeLabel = computed(() => {
+	const label = AGENT_MODE_LABELS[props.conv.channel && props.conv.channel.agent_mode];
+	return label ? label() : "";
+});
 const canPause = computed(() => !!(props.conv.permissions && props.conv.permissions.agent_pause));
 const agent = ref(null); // {paused, paused_by, paused_at}; null = not known
 const agentPausedTitle = computed(() =>
@@ -242,6 +252,17 @@ function toggleStatus() {
 	border-radius: 999px;
 	background: var(--bg-yellow);
 	color: var(--yellow-700, var(--text-color));
+}
+.db-agent-mode {
+	margin-left: 4px;
+	padding: 0 8px;
+	border-radius: 999px;
+	background: var(--control-bg);
+	color: var(--text-muted);
+}
+.db-agent-mode-autopilot {
+	background: var(--bg-green);
+	color: var(--green-700, var(--text-color));
 }
 .db-header-actions {
 	display: flex;
