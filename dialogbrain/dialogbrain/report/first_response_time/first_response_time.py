@@ -3,7 +3,15 @@ import statistics
 import frappe
 from frappe import _
 
-from dialogbrain.dialogbrain.report import assert_manager, group_label, label_unassigned, minutes, period
+from dialogbrain.dialogbrain.report import (
+	assert_manager,
+	group_key,
+	group_label,
+	label_channels,
+	label_unassigned,
+	minutes,
+	period,
+)
 
 # group_by filter value -> SQL expression (fixed here, never taken from the request)
 GROUPS = {
@@ -17,7 +25,8 @@ def execute(filters=None):
 	assert_manager()
 	filters = frappe._dict(filters or {})
 	group_by = filters.group_by if filters.group_by in GROUPS else "Manager"
-	return get_columns(group_by), label_unassigned(get_data(filters, group_by))
+	data = get_data(filters, group_by)
+	return get_columns(group_by), label_channels(data) if group_by == "Channel" else label_unassigned(data)
 
 
 def get_columns(group_by):
@@ -53,7 +62,7 @@ def get_data(filters, group_by):
 	)
 	groups = {}
 	for row in rows:
-		groups.setdefault(str(row.grp), []).append(row.first_response_seconds or 0)
+		groups.setdefault(group_key(row.grp), []).append(row.first_response_seconds or 0)
 
 	data = []
 	for group, seconds in groups.items():

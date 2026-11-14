@@ -17,6 +17,11 @@ FROM = "2026-03-01"
 TO = "2026-03-31"
 
 
+def ch(account_id):
+	"""How a channel group is shown: its title and its id (``_channel`` titles it ``Title <id>``)."""
+	return f"Title {account_id} ({account_id})"
+
+
 def _rows(result):
 	return result[1]
 
@@ -77,9 +82,9 @@ class TestReports(DialogBrainTestCase):
 	def test_first_response_by_channel_and_by_day(self):
 		self._frt_data()
 		_, rows = frt.execute({"from_date": FROM, "to_date": TO, "group_by": "Channel"})
-		a = _by(rows, "group", CH_A)
+		a = _by(rows, "group", ch(CH_A))
 		self.assertEqual((a["conversations"], a["answered"], a["not_answered"]), (5, 4, 1))
-		self.assertEqual(_by(rows, "group", CH_B)["conversations"], 1)
+		self.assertEqual(_by(rows, "group", ch(CH_B))["conversations"], 1)
 		_, rows = frt.execute({"from_date": FROM, "to_date": TO, "group_by": "Day"})
 		self.assertEqual([str(r["group"]) for r in rows], ["2026-03-01", "2026-03-02", "2026-03-03", "2026-03-04"])
 		d1 = _by(rows, "group", datetime(2026, 3, 1).date()) if not isinstance(rows[0]["group"], str) \
@@ -97,7 +102,7 @@ class TestReports(DialogBrainTestCase):
 		self.assertEqual([r["group"] for r in rows], [self.mgr_b])
 		_, rows = frt.execute({"from_date": FROM, "to_date": TO, "group_by": "Channel",
 			"assigned_to": self.mgr_a})
-		self.assertEqual([(r["group"], r["conversations"]) for r in rows], [(CH_A, 4)])
+		self.assertEqual([(r["group"], r["conversations"]) for r in rows], [(ch(CH_A), 4)])
 
 	def test_unanswered_lists_open_chats_waiting_for_us_oldest_first(self):
 		old = _conv(CH_A, title="old", last_message_direction="in", last_inbound_at="2020-01-01 10:00:00",
@@ -148,18 +153,38 @@ class TestReports(DialogBrainTestCase):
 			[c["fieldname"] for c in cols],
 			["group", "opened", "closed", "open_now", "unanswered_now", "inbound", "outbound", "by_ai"],
 		)
-		a = _by(rows, "group", CH_A)
+		a = _by(rows, "group", ch(CH_A))
 		self.assertEqual(
 			(a["opened"], a["closed"], a["open_now"], a["unanswered_now"], a["inbound"], a["outbound"], a["by_ai"]),
 			(2, 1, 1, 1, 2, 3, 2),
 		)
-		b = _by(rows, "group", CH_B)
+		b = _by(rows, "group", ch(CH_B))
 		self.assertEqual((b["opened"], b["closed"], b["open_now"], b["inbound"], b["outbound"]),
 			(0, 1, 0, 1, 0))
 		_, rows = by_channel.execute({"from_date": FROM, "to_date": TO, "group_by": "Manager"})
 		ma = _by(rows, "group", self.mgr_a)
 		self.assertEqual((ma["opened"], ma["closed"], ma["inbound"], ma["outbound"], ma["by_ai"]),
 			(2, 1, 2, 3, 2))
+
+	def test_channel_groups_show_the_title_and_a_missing_channel_is_named(self):
+		frappe.db.set_value("DB Channel", CH_B, "title", "")
+		_conv(CH_A, opened_at="2026-03-05 10:00:00", first_response_seconds=60)
+		_conv(CH_B, opened_at="2026-03-05 10:00:00", first_response_seconds=60)
+		orphan = _conv(CH_A, opened_at="2026-03-05 11:00:00", first_response_seconds=60)
+		frappe.db.set_value("DB Conversation", orphan, "channel", None)
+		_msg(orphan, direction="in", sent_at="2026-03-05 11:00:00")
+		args = {"from_date": FROM, "to_date": TO, "group_by": "Channel"}
+		for report in (frt, by_channel):
+			groups = sorted(r["group"] for r in _rows(report.execute(args)))
+			self.assertEqual(groups, sorted([ch(CH_A), CH_B, "No channel"]), report.__name__)
+			self.assertNotIn("None", groups)
+		previous = frappe.local.lang
+		try:
+			frappe.local.lang = "uk"
+			groups = {r["group"] for r in _rows(frt.execute(args))}
+			self.assertIn("Без каналу", groups)
+		finally:
+			frappe.local.lang = previous
 
 	def test_empty_period_returns_no_rows_not_an_error(self):
 		args = {"from_date": "2001-01-01", "to_date": "2001-01-31"}

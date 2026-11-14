@@ -39,3 +39,20 @@ def label_unassigned(rows):
 		if row.get("group") == "Unassigned":
 			row["group"] = _("Unassigned")
 	return rows
+
+
+def group_key(value):
+	"""The SQL group value as a dict key: ``None`` (a conversation without a channel) is ``""``."""
+	return "" if value is None else str(value)
+
+
+def label_channels(rows):
+	"""Channel groups are ids in SQL; show ``<title> (<id>)`` and a missing channel by name."""
+	titles = {c.name: c.title for c in frappe.get_all("DB Channel", fields=["name", "title"], limit_page_length=0)}
+	for row in rows:
+		channel = row.get("group")
+		if not channel:
+			row["group"] = _("No channel")
+		elif titles.get(channel) and titles[channel] != channel:
+			row["group"] = f"{titles[channel]} ({channel})"
+	return rows

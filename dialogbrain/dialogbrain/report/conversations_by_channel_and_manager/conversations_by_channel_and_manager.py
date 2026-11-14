@@ -1,7 +1,14 @@
 import frappe
 from frappe import _
 
-from dialogbrain.dialogbrain.report import assert_manager, group_label, label_unassigned, period
+from dialogbrain.dialogbrain.report import (
+	assert_manager,
+	group_key,
+	group_label,
+	label_channels,
+	label_unassigned,
+	period,
+)
 
 # group_by filter value -> SQL expression over `tabDB Conversation` aliased ``c`` (fixed here)
 GROUPS = {
@@ -15,7 +22,8 @@ def execute(filters=None):
 	assert_manager()
 	filters = frappe._dict(filters or {})
 	group_by = filters.group_by if filters.group_by in GROUPS else "Channel"
-	return get_columns(group_by), label_unassigned(get_data(filters, group_by))
+	data = get_data(filters, group_by)
+	return get_columns(group_by), label_channels(data) if group_by == "Channel" else label_unassigned(data)
 
 
 def get_columns(group_by):
@@ -42,7 +50,7 @@ def get_data(filters, group_by):
 
 	def merge(rows):
 		for row in rows:
-			item = groups.setdefault(str(row.grp), {"group": str(row.grp), **dict.fromkeys(FIELDS, 0)})
+			item = groups.setdefault(group_key(row.grp), {"group": group_key(row.grp), **dict.fromkeys(FIELDS, 0)})
 			for key in FIELDS:
 				item[key] += int(row.get(key) or 0)
 
