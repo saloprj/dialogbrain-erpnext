@@ -86,7 +86,9 @@ def ensure_agent_user() -> str:
 		)
 		user.flags.no_welcome_mail = True
 		user.insert(ignore_permissions=True)
-	frappe.db.set_single_value(SETTINGS, "erpnext_agent_user", name)
+	# Server-managed field: leave ``modified`` alone, or the Settings doc that Connect has
+	# open (and saves afterwards) fails with TimestampMismatchError.
+	frappe.db.set_single_value(SETTINGS, "erpnext_agent_user", name, update_modified=False)
 	return name
 
 

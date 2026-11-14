@@ -7,6 +7,29 @@ Omnichannel inbox that mirrors DialogBrain conversations into ERPNext.
 From the frappe_docker directory: `bash dialogbrain_erpnext/dev/install.sh`.
 Run tests: `sudo docker exec erpnext-backend-1 bench --site test.localhost run-tests --app dialogbrain`
 
+## Supported versions and tests
+
+| Frappe / ERPNext | Python | Node | MariaDB |
+|---|---|---|---|
+| v15 | 3.10+ (tested on 3.10) | 18+ | 10.6 |
+| v16 | 3.14 | 24+ | 11.8 |
+
+The same code runs on both; the few API differences are handled in
+`dialogbrain/compat.py`.
+
+- **v16:** the dev bench above (`erpnext-backend-1`), command as in Development.
+- **v15:** `dev/test-v15.sh` runs the whole suite on Frappe/ERPNext v15 in throwaway
+  containers (`mariadb:10.6`, `redis:7`, `frappe/erpnext:v15`, all named `dbx-v15-<pid>`,
+  on their own network, no published ports, removed on exit). The repo is copied into the
+  container read-only, so the run never writes into your checkout. The image ships
+  Python 3.11; to test on 3.10 the script rebuilds the bench virtualenv on a Python 3.10
+  from the host (`DBX_V15_PYTHON=/path/to/python3.10`, or found with
+  `uv python find 3.10`; get one with `uv python install 3.10`). Set
+  `DBX_V15_PIP_CACHE=<dir>` to keep downloaded wheels between runs. The exit status is
+  that of `bench run-tests`; the last lines of the test log are printed.
+- **CI:** `.github/workflows/ci.yml` runs the suite on every push and pull request for
+  both versions (v15 on Python 3.10, v16 on Python 3.14).
+
 ## Connecting to DialogBrain
 
 Open **DialogBrain Settings** (`/app/dialogbrain-settings`). There are two ways to connect.

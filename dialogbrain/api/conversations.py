@@ -164,7 +164,10 @@ def require_capability(name):
 
 
 def _plain(value):
-	return html_lib.unescape(strip_html(value or "")).strip()
+	# Strip again after unescaping: Frappe v15 sanitises stored HTML with bleach, which
+	# escapes disallowed tags (``&lt;script&gt;``) instead of dropping them like v16's nh3,
+	# and the plain text must not turn those back into markup.
+	return strip_html(html_lib.unescape(strip_html(value or ""))).strip()
 
 
 def _row(r):
@@ -736,7 +739,9 @@ def agent_status(conversation: str) -> dict:
 		return {"supported": True, "error": _("The conversation has no DialogBrain thread id")}
 	key = _agent_status_key(conversation)
 	for cache_key in (key, _agent_status_error_key(conversation)):
-		cached = frappe.cache().get_value(cache_key)
+		# expires=True: an expiring key must not be memoised in frappe.local.cache (Frappe
+		# v15 would keep the first miss for the rest of the request).
+		cached = frappe.cache().get_value(cache_key, expires=True)
 		if isinstance(cached, dict):
 			return cached
 	try:

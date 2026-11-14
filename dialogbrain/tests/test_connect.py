@@ -426,9 +426,10 @@ class TestConnect(DialogBrainTestCase):
 		from dialogbrain.sync.backfill import set_setting
 
 		doc = frappe.get_single(SETTINGS)
-		modified = frappe.db.get_single_value(SETTINGS, "modified")
+		# (Frappe v15's get_single_value refuses "modified": not a field of the doctype)
+		modified = doc.modified
 		set_setting("backfill_status", "running 1/2")
-		self.assertEqual(frappe.db.get_single_value(SETTINGS, "modified"), modified)
+		self.assertEqual(frappe.get_single(SETTINGS).modified, modified)
 		doc.backfill_days = 14
 		doc.save()  # no TimestampMismatchError
 		self.assertEqual(self._get("backfill_days"), 14)

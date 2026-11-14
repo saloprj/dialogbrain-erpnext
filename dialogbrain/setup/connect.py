@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.setup import agent_integration, agent_modes
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
@@ -168,7 +169,7 @@ def configure_webhook(doc, mode: str, client=None, hooks=None) -> None:
 
 @frappe.whitelist(methods=["POST"])
 def connect() -> dict:
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	return _connect(frappe.get_single(SETTINGS))
 
 
@@ -262,7 +263,7 @@ def _bind_instance(doc, workspace_id) -> None:
 @frappe.whitelist(methods=["POST"])
 def disconnect() -> None:
 	"""Stop syncing. The subscription is deleted; mirrored data stays."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
 	try:
 		client = _client(doc)
@@ -297,7 +298,7 @@ def disconnect() -> None:
 @frappe.whitelist(methods=["POST"])
 def resync() -> None:
 	"""Re-run the backfill (dedup'd job; also clears reconcile's failing-thread map)."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	if not frappe.db.get_single_value(SETTINGS, "connected"):
 		frappe.throw(_("Connect to DialogBrain first"))
 	enqueue_backfill()
@@ -308,7 +309,7 @@ def set_network_mode(mode: str) -> dict:
 	"""``private``: delete the webhook (reconcile polls every minute); ``public``: create it.
 	The webhook work happens in ``DialogBrainSettings.validate`` so a plain form save of
 	``network_mode`` behaves the same."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	if mode not in MODES:
 		frappe.throw(_("Network mode must be one of: {0}").format(", ".join(MODES)))
 	doc = frappe.get_single(SETTINGS)
@@ -338,7 +339,7 @@ def webhook_health() -> dict:
 	``failures`` = consecutive failed deliveries, newest first (DialogBrain pauses a
 	subscription after 3). A paused (or deleted) subscription is absent from the list.
 	"""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
 	if not doc.webhook_id:
 		status = PRIVATE_STATUS if doc.network_mode == "private" else "no webhook: run Connect"

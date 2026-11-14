@@ -49,6 +49,7 @@ from frappe.utils import get_datetime, now_datetime
 from frappe.utils.background_jobs import is_job_enqueued
 from frappe.utils.password import remove_encrypted_password
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.sync.backfill import (
 	BACKFILL_JOB_ID,
@@ -89,7 +90,7 @@ SETTINGS_FIELDS = (
 
 
 def _settings():
-	return frappe.db.get_value(SETTINGS, SETTINGS, list(SETTINGS_FIELDS), as_dict=True) or frappe._dict()
+	return compat.single_values(SETTINGS, SETTINGS_FIELDS)
 
 
 def _backfill_active(status) -> bool:
@@ -238,9 +239,7 @@ def reconcile() -> None:
 	"""One pass. The cursor (``last_reconcile_at``) advances when the global steps succeed
 	(webhook check, every ``search.threads`` page); a failing thread is recorded in
 	``reconcile_failures`` and retried from its own date on later passes (R13)."""
-	settings = frappe.db.get_value(
-		SETTINGS, SETTINGS, [*SETTINGS_FIELDS, "backfill_days", "reconcile_failures"], as_dict=True
-	) or frappe._dict()
+	settings = compat.single_values(SETTINGS, [*SETTINGS_FIELDS, "backfill_days", "reconcile_failures"])
 	if not settings.connected or _backfill_active(settings.backfill_status):
 		return
 	start = now_datetime()

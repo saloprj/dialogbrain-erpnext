@@ -16,6 +16,7 @@ import frappe
 import requests
 from frappe import _
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError, mask
 
 TIMEOUT = 20
@@ -208,7 +209,7 @@ def start() -> dict:
 	"""Begin "Connect with DialogBrain": returns the DialogBrain consent URL to open."""
 	from dialogbrain.setup import connect as conn
 
-	frappe.only_for(conn.ROLE)
+	compat.only_for(conn.ROLE)
 	doc = frappe.get_single(conn.SETTINGS)
 	if not doc.base_url:
 		frappe.throw(_("Set the DialogBrain base URL first"))

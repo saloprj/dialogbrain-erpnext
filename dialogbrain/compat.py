@@ -37,3 +37,38 @@ def sum_field(field: str, alias: str):
 	if frappe_major() >= 16:
 		return {"SUM": field, "as": alias}
 	return f"sum({field}) as {alias}"
+
+
+def only_for(roles) -> None:
+	"""``frappe.only_for(roles)``: raise ``frappe.PermissionError`` unless the user has one of
+	``roles`` (Administrator always passes).
+
+	Frappe v15's ``only_for`` returns early whenever ``frappe.flags.in_test`` is set, so on v15
+	the role check would not run under tests; this applies it there too (v16 has no bypass)."""
+	if frappe_major() >= 16:
+		frappe.only_for(roles)
+		return
+	if frappe.session.user == "Administrator":
+		return
+	if isinstance(roles, str):
+		roles = (roles,)
+	if set(roles).isdisjoint(frappe.get_roles()):
+		raise frappe.PermissionError
+
+
+def single_values(doctype: str, fields) -> "frappe._dict":
+	"""``frappe.db.get_value(doctype, doctype, fields, as_dict=True)`` for a Single, typed.
+
+	v16 casts Singles values by field type; v15 returns them as the raw strings stored in
+	``tabSingles`` (a Check of ``"0"`` is truthy there). Empty values stay ``None``."""
+	values = frappe.db.get_value(doctype, doctype, list(fields), as_dict=True) or frappe._dict()
+	if frappe_major() >= 16:
+		return values
+	from frappe.utils.data import cast
+
+	meta = frappe.get_meta(doctype)
+	for field, value in values.items():
+		df = meta.get_field(field)
+		if df and value is not None:
+			values[field] = cast(df.fieldtype, value)
+	return values

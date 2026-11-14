@@ -70,6 +70,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
+from dialogbrain import compat
 from dialogbrain.agent_api import MAX_ORDER_LINES
 from dialogbrain.client import DialogBrainError, DialogBrainTimeout
 
@@ -358,7 +359,9 @@ def clear_capability(name: str) -> None:
 	if not isinstance(caps, dict) or caps.get(name) is False:
 		return
 	caps[name] = False
-	frappe.db.set_single_value(SETTINGS, "agent_capabilities", json.dumps(caps, sort_keys=True))
+	frappe.db.set_single_value(
+		SETTINGS, "agent_capabilities", json.dumps(caps, sort_keys=True), update_modified=False
+	)
 
 
 def capabilities(client, tools=None) -> dict:
@@ -419,9 +422,7 @@ def register(doc, client, caps: dict, tools: set) -> dict:
 	if not site:
 		raise DialogBrainError("Public site URL is not set")
 	user = ensure_agent_user()
-	doc.erpnext_agent_user = user
-	# ensure_agent_user wrote the Single directly, bumping ``modified``: keep ``doc`` saveable
-	doc.modified = frappe.db.get_single_value(SETTINGS, "modified") or doc.modified
+	doc.erpnext_agent_user = user  # ensure_agent_user leaves ``modified`` alone: doc stays saveable
 	previous = _names(doc)
 	problems = []
 	iid = _verified_integration(client, cint(doc.integration_id) or None, site, tools)
@@ -724,7 +725,7 @@ def set_agent_writes(allow) -> dict:
 	  failure there only returns ``warning``;
 	* writes ON is stored only after DialogBrain was updated (and refused when the write
 	  tools' DialogBrain names are unknown); on failure nothing is stored."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	allow = 1 if cint(allow) else 0
 	doc = frappe.get_single(SETTINGS)
 	previous = cint(doc.allow_agent_writes)
