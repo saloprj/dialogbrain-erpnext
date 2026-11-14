@@ -6,6 +6,8 @@ Omnichannel inbox that mirrors DialogBrain conversations into ERPNext.
 
 From the frappe_docker directory: `bash dialogbrain_erpnext/dev/install.sh`.
 Run tests: `sudo docker exec erpnext-backend-1 bench --site test.localhost run-tests --app dialogbrain`
+After `bench build`, run `bench --site <site> clear-cache` (install.sh does): the cache keeps
+the old assets manifest and the inbox opens blank.
 
 The dev stand's frontend is also reachable from the DialogBrain stack as
 `http://erpnext-dev:8080` (network alias in `dev/compose.dialogbrain.yml`). For a DialogBrain
@@ -26,16 +28,24 @@ its agent and mode (read-only fields, plus a line at the top of the form).
 | **Off** | the trigger is disabled: the agent does not answer this channel |
 
 On the DB Channel form, the **DialogBrain agent** button group has **Copilot**, **Autopilot**
-and **Off** (the current mode is highlighted), **Choose agent...** (when several agents
-answer the channel) and **Refresh from DialogBrain**.
+and **Off** (when the channel has an agent to switch), **Choose agent…** and **Refresh from
+DialogBrain**. **Choose agent…** is always there but offers a choice only when several
+agents answer the channel; otherwise it says why there is nothing to choose. The current
+agent and mode are in the line at the top of the form.
 
 - **Who:** Chat Managers and System Managers only; others do not see the buttons and the
   server refuses the call.
 - **Shared trigger rule:** a channel is switched only when its trigger serves that channel
   alone. If the trigger also serves other channels, ERPNext does not switch it (that
   would change the other channels too) and says "The agent trigger also serves other
-  channels: change it in DialogBrain". If several agents answer one channel, use
-  **Choose agent...**.
+  channels: change it in DialogBrain". The same applies to a trigger that lists no channel
+  at all (it answers every channel, or every channel of some types): it is shown, never
+  switched. If several agents answer one channel, use **Choose agent…**.
+- **Another trigger also answers:** when the channel's own trigger is switched but another
+  enabled trigger (a second agent, a shared or an every-channel trigger) answers the same
+  channel, the form says "Another agent trigger also answers this channel: Off here does not
+  stop it". The switch still happens; to silence the channel, change the other trigger in
+  DialogBrain.
 - **Key:** the DialogBrain Connect key must belong to a member, admin or owner of the
   workspace; otherwise agents cannot be read ("connect with a member, admin or owner key").
 - **Refresh:** modes are read from DialogBrain every hour and when someone presses

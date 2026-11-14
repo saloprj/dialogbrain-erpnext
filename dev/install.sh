@@ -54,9 +54,13 @@ for site in test.localhost frontend; do
   bench --site "$site" migrate
 done
 
-# 6. assets (a recreated backend loses the dialogbrain entries of assets.json) and a
+# 6. assets (a recreated backend loses the dialogbrain entries of assets.json), the
+# sites' cache (it keeps the old assets manifest: the inbox would open blank) and a
 # frontend restart (nginx caches the backend's old address after a recreate)
 bench build --app dialogbrain
+for site in test.localhost frontend; do
+  bench --site "$site" clear-cache
+done
 sudo docker restart erpnext-frontend-1
 
 # 7. DialogBrain reaches this site at http://erpnext-dev:8080 (the frontend's alias on the
