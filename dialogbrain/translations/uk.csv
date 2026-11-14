@@ -103,6 +103,8 @@ Create a Lead from this conversation's contact?,Створити ліда з к�
 Customer,Клієнт,
 Customer data tools,Інструменти даних клієнтів,
 Customer data tools need an admin/owner DialogBrain API key,Інструментам даних клієнтів потрібен ключ API DialogBrain адміністратора або власника,
+Customer or Lead,Клієнт або лід,
+Customer or Lead Type,Тип: клієнт або лід,
 "Customer or lead name, phone, email","Ім'я клієнта або ліда, телефон, ел. пошта",
 DB Agent Call Log,Журнал викликів агента DialogBrain,
 DB Channel,Канал DialogBrain,
@@ -325,7 +327,7 @@ Size,Розмір,
 Status,Статус,
 Stop syncing with DialogBrain? Mirrored conversations stay in ERPNext.,Припинити синхронізацію з DialogBrain? Скопійовані розмови залишаться в ERPNext.,
 Stop the AI agent answering this conversation until you give it back,"Зупинити відповіді ШІ-агента в цій розмові, доки ви не повернете її",
-Suggestions,Підказки,DialogBrain
+Suggestions,Можливі збіги,DialogBrain
 Take over,Перехопити,
 Take over / give back,Перехопити / повернути,
 Taken over,Перехоплено,

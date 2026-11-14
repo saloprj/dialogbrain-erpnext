@@ -40,14 +40,14 @@
   {
    "fieldname": "party_type",
    "fieldtype": "Link",
-   "label": "Party Type",
+   "label": "Customer or Lead Type",
    "options": "DocType"
   },
   {
    "fieldname": "party",
    "fieldtype": "Dynamic Link",
    "in_list_view": 1,
-   "label": "Party",
+   "label": "Customer or Lead",
    "options": "party_type"
   },
   {
@@ -70,7 +70,7 @@
  ],
  "in_create": 1,
  "links": [],
- "modified": "2026-11-14 00:00:00.000000",
+ "modified": "2026-11-14 18:00:00.000000",
  "module": "DialogBrain",
  "name": "DB Agent Call Log",
  "owner": "Administrator",
