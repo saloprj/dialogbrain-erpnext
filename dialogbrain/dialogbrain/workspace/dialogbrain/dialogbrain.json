@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\": \"db_h1\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\">DialogBrain</span>\", \"col\": 12}}, {\"id\": \"db_s1\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Chats\", \"col\": 3}}, {\"id\": \"db_s2\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"DialogBrain Settings\", \"col\": 3}}]",
+ "content": "[{\"id\": \"db_h1\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\">DialogBrain</span>\", \"col\": 12}}, {\"id\": \"db_s1\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Chats\", \"col\": 3}}, {\"id\": \"db_s2\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"DialogBrain Settings\", \"col\": 3}}, {\"id\": \"db_r1\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"First Response Time\", \"col\": 3}}, {\"id\": \"db_r2\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Unanswered Conversations\", \"col\": 3}}, {\"id\": \"db_r3\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Conversations by Channel and Manager\", \"col\": 3}}]",
  "creation": "2026-11-13 20:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -12,7 +12,7 @@
  "is_hidden": 0,
  "label": "DialogBrain",
  "links": [],
- "modified": "2026-11-13 20:00:00.000000",
+ "modified": "2026-11-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "DialogBrain",
  "name": "DialogBrain",
@@ -45,6 +45,24 @@
    "label": "DialogBrain Settings",
    "link_to": "DialogBrain Settings",
    "type": "DocType",
+   "color": "Grey"
+  },
+  {
+   "label": "First Response Time",
+   "link_to": "First Response Time",
+   "type": "Report",
+   "color": "Grey"
+  },
+  {
+   "label": "Unanswered Conversations",
+   "link_to": "Unanswered Conversations",
+   "type": "Report",
+   "color": "Grey"
+  },
+  {
+   "label": "Conversations by Channel and Manager",
+   "link_to": "Conversations by Channel and Manager",
+   "type": "Report",
    "color": "Grey"
   }
  ],
