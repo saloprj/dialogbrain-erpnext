@@ -35,6 +35,7 @@ from dialogbrain.sync.upsert import (
 )
 
 SETTINGS = "DialogBrain Settings"
+DEFAULT_BACKFILL_DAYS = 30
 BACKFILL_JOB = "dialogbrain.sync.backfill.run_backfill"
 BACKFILL_JOB_ID = "dialogbrain_backfill"
 THREAD_PAGE = 50
@@ -218,7 +219,7 @@ def enqueue_backfill() -> None:
 
 def run_backfill() -> None:
 	"""Silently load ``backfill_days`` of history. Reruns are cheap (upsert by db_id)."""
-	days = frappe.db.get_single_value(SETTINGS, "backfill_days") or 30
+	days = frappe.db.get_single_value(SETTINGS, "backfill_days") or DEFAULT_BACKFILL_DAYS
 	since = utc_day(now_datetime() - timedelta(days=int(days)))
 	set_setting("backfill_status", "running 0/?")
 	commit()

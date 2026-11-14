@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 21:00:00.000000",
+ "modified": "2026-11-14 15:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -16,6 +16,7 @@
   "handle",
   "avatar_url",
   "db_contact_id",
+  "dialogbrain_instance",
   "party_type",
   "party",
   "contact",
@@ -98,6 +99,16 @@
    "fieldtype": "Data",
    "label": "Db Contact Id",
    "permlevel": 1
+  },
+  {
+   "fieldname": "dialogbrain_instance",
+   "fieldtype": "Data",
+   "label": "DialogBrain Instance",
+   "read_only": 1,
+   "permlevel": 1,
+   "search_index": 1,
+   "no_copy": 1,
+   "description": "Which DialogBrain instance + workspace this thread id belongs to (sha1 of base URL | workspace id, 16 hex). Agent tools identify a chat only when it matches the current connection."
   },
   {
    "fieldname": "party_type",

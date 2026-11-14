@@ -8,6 +8,7 @@ app_license = "mit"
 required_apps = ["erpnext"]
 
 after_install = "dialogbrain.install.after_install"
+before_uninstall = "dialogbrain.install.before_uninstall"
 
 permission_query_conditions = {
 	"DB Conversation": "dialogbrain.permissions.conversation_query",
@@ -25,9 +26,16 @@ has_permission = {
 	"DB Quick Reply": "dialogbrain.permissions.quick_reply_has_permission",
 }
 
+# The agent's call log is history: it never blocks deleting a Customer / Lead / chat
+# (final wave F6; honoured for Link and Dynamic Link fields on Frappe v15 and v16).
+ignore_links_on_delete = ["DB Agent Call Log"]
+
 scheduler_events = {
 	"cron": {"* * * * *": ["dialogbrain.sync.reconcile.tick"]},
-	"daily": ["dialogbrain.sync.maintenance.cleanup_webhook_log"],
+	"daily": [
+		"dialogbrain.sync.maintenance.cleanup_webhook_log",
+		"dialogbrain.sync.maintenance.cleanup_agent_call_log",
+	],
 }
 
 # Desk-wide: "Chats" unread badge, new-message sound, Customer / Lead "Chats" section.

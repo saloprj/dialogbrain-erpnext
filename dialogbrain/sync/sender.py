@@ -6,15 +6,61 @@ Never send twice
   re-submitted request returns the existing row and enqueues nothing.
 * :func:`deliver` first *claims* the row atomically (``pending`` -> ``unknown``, committed)
   and only then calls ``messages.send``, once. A second job, or a re-run after a killed
-  worker, finds ``unknown`` and sends nothing. There is no ``request_id`` passthrough in
-  DialogBrain yet, so an ambiguous outcome (read timeout, 502/504 from the gateway,
-  unexpected exception after the request left, a crash) leaves the row ``unknown``: the
-  webhook echo (``upsert_message`` echo matching accepts ``unknown``) or reconcile resolves
-  it. While the send is in flight the row is ``unknown`` with an empty ``error``.
+  worker, finds ``unknown`` and sends nothing. An ambiguous outcome (read timeout, any HTTP
+  status other than 400/401/403/404/422 — incl. 429/503/52x and a 2xx without JSON —,
+  unexpected exception after the request left, a crash) leaves the row ``unknown``: the webhook echo (``upsert_message`` echo matching accepts ``unknown``) or
+  reconcile resolves it. While the send is in flight the row is ``unknown`` with an empty
+  ``error``.
 * Every outcome write after the claim is conditional (row still ``unknown`` and no
   ``db_id``): an echo that completed the row during the send is never overwritten.
-* Only ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error, or
-  nothing was sent) can be retried, via :func:`retry_reply`.
+* ``failed`` rows without a ``db_id`` (DialogBrain answered with a definite error — a tool
+  error or HTTP 400/401/403/404/422 —, nothing was sent, or a connection error) can be
+  retried, via :func:`retry_reply`.
+* Before the attempt is stored, the row is re-read under lock: an echo or the sweep that
+  changed it during the upload ends the job without sending.
+
+``request_id`` (Plan 3 B4)
+--------------------------
+When DialogBrain has the ``request_id`` capability, every send carries
+``request_id`` = the reply's ``client_ref`` (hashed when it is not a valid id). DialogBrain
+caches a *successful* result under it for 24 h, so an ``unknown`` reply can then be retried
+too, with the same ``client_ref``. That is allowed only when:
+
+* the first attempt itself carried the ``request_id`` (``raw.send``, written and committed
+  before the call) and the capability is still there;
+* the first attempt was less than 23 h ago (:data:`REQUEST_ID_RETRY_WINDOW`, inside
+  DialogBrain's 24 h cache), checked again when the job runs;
+* the last attempt started more than :data:`RETRY_SETTLE_AFTER` ago: DialogBrain has no
+  in-flight marker, so a retry next to a still-running send would run concurrently.
+
+The retry re-sends the exact stored params (no new upload, so the same cache key). A
+``failed`` reply is retried the same way while its stored attempt is inside the window: the
+R11 sweep marks a reply it could not confirm ``failed``, and it may have been sent after all.
+Outside the window (or without the capability) the attempt is rebuilt (fresh upload) under
+a NEW ``request_id`` (``<ref>:r<n>``), so a surviving cache entry can never stand in for
+params that changed.
+
+After every answered send the echo is checked: DialogBrain with A1 returns the
+``request_id`` it used. None (e.g. a rolled-back DialogBrain): the attempt is marked
+``request_id_ignored`` (never re-sent as deduped) and the capability is cleared until the
+next Connect. An ambiguous outcome records its class in ``raw.send.outcome``
+(``timeout``/``http_5xx``/``crash``). The echo is checked only when a response body was
+read (``client.last_response_parsed``): a connection error says nothing about it. Its
+writes are committed at once.
+
+The claim stamps ``raw.claimed_at`` in its own commit, before any upload, on every path.
+The R11 sweep skips replies whose last attempt (``last_attempt_at``: the later of
+``claimed_at`` and ``raw.send.attempt_at``) is under 10 minutes old, re-checked under the
+row lock. A ``failed`` retry is refused within :data:`RETRY_SETTLE_AFTER` of that stamp
+unless deliver itself settled it after a definite outcome (``raw.last_outcome`` =
+``answered`` / ``not_sent``): such a failure is rebuilt at once under a new round id, since
+re-sending params DialogBrain rejected can't help. Only a sweep-failed (or connection-error)
+row reuses its stored attempt.
+Without the ``request_id`` capability (an older DialogBrain) there is no stored attempt: a
+retry after a connection error that did reach DialogBrain sends the reply a second time.
+Failures are never cached and the cache can be lost: a retry after a real failure sends
+again, as it should, and in the rare case of a lost cache entry it may send twice. Echo
+matching stays the second line of defence.
 * A row still ``pending`` after 2 minutes lost its job before the claim (queue restart,
   enqueue failure, worker death): the scheduler tick re-enqueues it
   (:func:`requeue_stale_replies`); the claim keeps that safe.
@@ -22,21 +68,24 @@ Never send twice
 Echo reconciliation (agrees with ``dialogbrain.sync.upsert``)
 ------------------------------------------------------------
 The pending row has ``sent_at`` = now, so an echo that arrives before the send response is
-merged into it by ``upsert_message`` (same text, +-120 s). On the response, the row gets
+merged into it by ``upsert_message`` (same text, +-120 s of ``sent_at`` or, for a
+retried reply, of its last attempt: ``raw.claimed_at`` / ``raw.send.attempt_at``). On the response, the row gets
 ``db_id = db_message_id``; if that ``db_id`` already belongs to another row (an echo that
 could not be matched), that row is folded into ours (``sent_by`` kept) and deleted. An echo
 arriving after the response finds the row by ``db_id``.
 """
 
+import hashlib
 import json
 import mimetypes
+import re
 from datetime import timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import now_datetime
+from frappe.utils import get_datetime, now_datetime
 
-from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
+from dialogbrain.client import REQUEST_IN_PROGRESS, DialogBrainClient, DialogBrainError, DialogBrainTimeout
 from dialogbrain.permissions import assert_can_access
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.upsert import (
@@ -47,12 +96,41 @@ from dialogbrain.sync.upsert import (
 )
 
 DELIVER_JOB = "dialogbrain.sync.sender.deliver"
-# The send may have happened: the gateway gave up (502/504), or DialogBrain failed after
-# the channel accepted the message (500).
-AMBIGUOUS_HTTP_STATUSES = (500, 502, 504)
+# The only HTTP statuses that say the send did NOT happen (final wave F2a): the request was
+# refused before the tool ran. Every other status (408, 429, 499, 5xx, 520-524, a 2xx
+# without a JSON body, …) may come after the channel accepted the message: ambiguous.
+DEFINITE_HTTP_STATUSES = (400, 401, 403, 404, 422)
 # A pending reply whose deliver job has not claimed it by then is re-enqueued (F3).
 STALE_PENDING_AFTER = timedelta(minutes=2)
 MAX_ERROR_LENGTH = 1000
+# Set by the R11 reconcile sweep on a reply it could not confirm (it may have been sent).
+UNCONFIRMED_ERROR = "Not confirmed by DialogBrain — check the chat before resending"
+# ``raw.last_outcome`` written by deliver when it settles a reply ``failed`` itself: the job is
+# over, and these failures are definite (nothing to dedupe). ``no_response`` (a connection
+# error) is failed but may have reached DialogBrain.
+DEFINITE_OUTCOMES = ("answered", "not_sent")
+# An ``unknown`` reply may be retried with its request_id only this long after its first
+# attempt: DialogBrain keeps the result of a send with a request_id for 24 h.
+REQUEST_ID_RETRY_WINDOW = timedelta(hours=23)
+# ...and only when its last attempt must be over: DialogBrain's send runs up to ~90 s
+# (75 s tool timeout + 15 s reconcile).
+RETRY_SETTLE_AFTER = timedelta(seconds=120)
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def request_id_for(client_ref) -> str:
+	"""DialogBrain accepts ``[A-Za-z0-9_.:-]``, at most 128 chars: the ``client_ref`` as is
+	when it fits, else a stable hash of it."""
+	ref = str(client_ref or "")
+	if _REQUEST_ID.match(ref):
+		return ref
+	return "erpnext-" + hashlib.sha256(ref.encode("utf-8")).hexdigest()[:48]
+
+
+def _has_request_id() -> bool:
+	from dialogbrain.setup.agent_integration import has_capability
+
+	return has_capability("request_id")
 
 
 # --- send -------------------------------------------------------------------
@@ -187,19 +265,109 @@ def create_reply(conversation, text, client_ref, file_urls=None, user=None) -> d
 	return {"name": doc.name, "delivery_status": doc.delivery_status}
 
 
+def _raw_dict(raw) -> dict:
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except ValueError:
+			return {}
+	return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _send_state(raw) -> "dict | None":
+	"""What the last attempt sent with a ``request_id`` (``raw.send``), or None. An attempt
+	whose ``request_id`` DialogBrain did not echo (``request_id_ignored``) counts as none:
+	DialogBrain did not dedupe it."""
+	state = _raw_dict(raw).get("send")
+	if (
+		isinstance(state, dict)
+		and state.get("request_id")
+		and isinstance(state.get("params"), dict)
+		and not state.get("request_id_ignored")
+	):
+		return state
+	return None
+
+
+def last_attempt_at(raw):
+	"""When the last attempt started: the later of ``raw.claimed_at`` (stamped by the claim,
+	before any upload, on every path) and ``raw.send.attempt_at``. None when never claimed."""
+	raw = _raw_dict(raw)
+	state = raw.get("send") if isinstance(raw.get("send"), dict) else {}
+	stamps = []
+	for value in (raw.get("claimed_at"), state.get("attempt_at")):
+		try:
+			if value:
+				stamps.append(get_datetime(value))
+		except Exception:  # noqa: BLE001 - unreadable: ignored
+			pass
+	return max(stamps) if stamps else None
+
+
+def _reusable(raw) -> "dict | None":
+	"""The stored attempt, when re-sending it exactly is deduped by DialogBrain: it carried
+	a ``request_id``, the first attempt is < 23 h old and the capability is still set."""
+	state = _send_state(raw)
+	if state and not _older_than(state.get("first_attempt_at"), REQUEST_ID_RETRY_WINDOW) and _has_request_id():
+		return state
+	return None
+
+
+def _older_than(value, age) -> bool:
+	try:
+		return get_datetime(value) <= now_datetime() - age
+	except Exception:  # noqa: BLE001 - unreadable timestamp: treat as too old
+		return True
+
+
+def unknown_retryable(delivery_status, db_id, raw) -> bool:
+	"""An ``unknown`` reply whose first attempt carried a ``request_id`` less than 23 h
+	ago, while DialogBrain still has the capability (the UI offers Retry on it)."""
+	if delivery_status != "unknown" or db_id:
+		return False
+	return bool(_reusable(raw))
+
+
+def _require_settled(raw) -> None:
+	"""DialogBrain has no in-flight marker: refuse a retry next to an attempt that may still
+	be running (started < :data:`RETRY_SETTLE_AFTER` ago)."""
+	at = last_attempt_at(raw)
+	if at and at > now_datetime() - RETRY_SETTLE_AFTER:
+		frappe.throw(_("This message may still be being sent. Try again in a minute."))
+
+
 def retry_reply(message: str) -> None:
-	"""Re-deliver a ``failed`` reply. Anything else (pending/unknown/sent), or a row that
-	already has a DialogBrain ``db_id`` (it was delivered), is refused."""
+	"""Re-deliver a ``failed`` reply, or an ``unknown`` one that :func:`unknown_retryable`
+	allows (DialogBrain dedupes it by ``request_id``). Anything else (pending/sent/other
+	unknown), or a row that already has a DialogBrain ``db_id`` (it was delivered), is
+	refused."""
 	conversation = frappe.db.get_value("DB Message", message, "conversation")
 	if not conversation:
 		frappe.throw(_("Message not found"), frappe.DoesNotExistError)
 	assert_can_access(conversation)
 	row = frappe.db.get_value(
-		"DB Message", message, ["delivery_status", "db_id"], as_dict=True, for_update=True
+		"DB Message", message, ["delivery_status", "db_id", "raw"], as_dict=True, for_update=True
 	)
-	if row.delivery_status != "failed" or row.db_id:
+	updates = {"delivery_status": "pending", "error": None}
+	raw = _raw_dict(row.raw)
+	if row.delivery_status == "failed" and not row.db_id:
+		definite = raw.get("last_outcome") in DEFINITE_OUTCOMES
+		if not definite:
+			# Failed by the sweep (or a connection error): it may have been sent, and with the
+			# sweep its deliver may even still run. Wait until the last attempt is over...
+			_require_settled(raw)
+		# ...then re-send the very same attempt, which DialogBrain dedupes if it did
+		# succeed. After a definite failure (DialogBrain answered with an error, or nothing
+		# was sent) or outside the window, the attempt is rebuilt under a new request_id.
+		if definite or not _reusable(row.raw):
+			if raw.pop("send", None) is not None:
+				raw["send_round"] = int(raw.get("send_round") or 0) + 1
+				updates["raw"] = json.dumps(raw)
+	elif unknown_retryable(row.delivery_status, row.db_id, row.raw):
+		_require_settled(raw)
+	else:
 		frappe.throw(_("Only failed messages can be retried"))
-	frappe.db.set_value("DB Message", message, {"delivery_status": "pending", "error": None})
+	frappe.db.set_value("DB Message", message, updates)
 	publish(conversation, "message_updated", {"message": message})
 	_enqueue(message)
 
@@ -228,13 +396,19 @@ def _claim(name):
 	row = frappe.db.get_value(
 		"DB Message",
 		name,
-		["name", "conversation", "text", "delivery_status", "db_id", "raw"],
+		["name", "conversation", "text", "delivery_status", "db_id", "raw", "client_ref"],
 		as_dict=True,
 		for_update=True,
 	)
 	if not row or row.delivery_status != "pending" or row.db_id:
 		return None
-	frappe.db.set_value("DB Message", name, {"delivery_status": "unknown", "error": None})
+	# Stamp the attempt in the same commit as the claim, before any (slow) upload: the R11
+	# sweep and the retry settle check key on it (``last_attempt_at``).
+	raw = _raw_dict(row.raw)
+	raw["claimed_at"] = str(now_datetime())
+	raw.pop("last_outcome", None)
+	row.raw = json.dumps(raw)
+	frappe.db.set_value("DB Message", name, {"delivery_status": "unknown", "error": None, "raw": row.raw})
 	_commit()
 	return row
 
@@ -255,12 +429,86 @@ def _settle(name, conversation, status, error=None):
 
 
 def _stored_file_urls(raw):
-	if isinstance(raw, str):
-		try:
-			raw = json.loads(raw)
-		except ValueError:
-			return []
-	return list((raw or {}).get("file_urls") or []) if isinstance(raw, dict) else []
+	return list(_raw_dict(raw).get("file_urls") or [])
+
+
+def _fresh_request_id(client_ref, raw) -> str:
+	"""``client_ref`` for the first attempt. An attempt rebuilt after its stored one could
+	no longer be reused (outside the 23 h window, capability gone, request_id ignored) gets
+	``<ref>:r<n>``: a surviving cache entry of an earlier attempt must never stand in for
+	params that changed (new upload ids)."""
+	base = request_id_for(client_ref)
+	n = int(_raw_dict(raw).get("send_round") or 0)
+	return f"{base[:100]}:r{n}" if n else base
+
+
+def _set_last_outcome(name, outcome) -> None:
+	raw = _raw_dict(frappe.db.get_value("DB Message", name, "raw"))
+	raw["last_outcome"] = outcome
+	frappe.db.set_value("DB Message", name, "raw", json.dumps(raw), update_modified=False)
+
+
+def _update_send_state(name, **fields) -> None:
+	raw = _raw_dict(frappe.db.get_value("DB Message", name, "raw"))
+	if isinstance(raw.get("send"), dict):
+		raw["send"].update(fields)
+		frappe.db.set_value("DB Message", name, "raw", json.dumps(raw), update_modified=False)
+
+
+def _outcome_class(exc) -> str:
+	if isinstance(exc, DialogBrainTimeout):
+		return "timeout"
+	if isinstance(exc, DialogBrainError) and exc.error_type == REQUEST_IN_PROGRESS:
+		return "in_progress"
+	if isinstance(exc, DialogBrainError) and exc.status:
+		return f"http_{exc.status}"
+	return "crash"
+
+
+def _check_echo(name, client, request_id) -> None:
+	"""DialogBrain with Part A1 echoes the request_id it used. No echo (e.g. a rolled-back
+	DialogBrain): it does not dedupe, so this attempt is never re-sent as deduped and the
+	capability is cleared until the next Connect: later sends behave as in Plan 1."""
+	echoed = getattr(client, "last_request_id", None)
+	if echoed == request_id:
+		return
+	_update_send_state(name, request_id_ignored=True)
+	from dialogbrain.setup.agent_integration import clear_capability
+
+	clear_capability("request_id")
+	_commit()  # durable before _record_sent, whose rollback must not discard it
+	frappe.log_error(
+		title="DialogBrain ignored request_id: capability cleared",
+		message=f"sent {request_id!r}, echoed {echoed!r}",
+		reference_doctype="DB Message",
+		reference_name=name,
+	)
+
+
+def _store_send_state(name, request_id, params, attachments, previous) -> bool:
+	"""Record (and commit) what is about to be sent with ``request_id``, before the call:
+	an ``unknown`` outcome can then be retried with exactly these params.
+
+	The row is re-read under lock first (final wave F2b): while the files uploaded, an echo
+	may have completed it (``db_id``) or the sweep failed it. Then it is no longer this
+	job's to send: False, the row is left as it is. The attempt is merged into the
+	*current* ``raw``, not the claim-time snapshot."""
+	row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id", "raw"], as_dict=True, for_update=True)
+	if not row or row.db_id or row.delivery_status != "unknown":
+		_commit()
+		return False
+	now = str(now_datetime())
+	raw = _raw_dict(row.raw)
+	raw["send"] = {
+		"request_id": request_id,
+		"params": params,
+		"attachments": attachments,
+		"first_attempt_at": (previous or {}).get("first_attempt_at") or now,
+		"attempt_at": now,
+	}
+	frappe.db.set_value("DB Message", name, "raw", json.dumps(raw))
+	_commit()
+	return True
 
 
 def _upload_files(client, file_urls):
@@ -302,34 +550,71 @@ def deliver(message_name: str) -> None:
 		"DB Conversation", msg.conversation, ["thread_id", "thread_ref", "channel"], as_dict=True
 	)
 
+	previous = _send_state(msg.raw)  # a retry of a stored attempt (unknown, or failed in the window)
+	if previous and not _reusable(msg.raw):
+		# DialogBrain may no longer dedupe it: sending again could deliver it twice.
+		_settle(message_name, msg.conversation, "unknown", _("Not sent again: DialogBrain can no longer recognise a repeat of this message"))
+		return
+
 	# Nothing has been sent until messages.send: any failure here is a plain failure.
 	try:
 		if not conv or not (conv.thread_id or conv.thread_ref):
 			raise DialogBrainError("The conversation has no DialogBrain thread id")
 		client = DialogBrainClient.from_settings()
-		attachments = _upload_files(client, _stored_file_urls(msg.raw))
-		params = _send_params(conv, msg.text, attachments)
+		if previous:  # the very same params: same DialogBrain cache key, no new upload
+			attachments = list(previous.get("attachments") or [])
+			params = previous["params"]
+		else:
+			attachments = _upload_files(client, _stored_file_urls(msg.raw))
+			params = _send_params(conv, msg.text, attachments)
+		send_kwargs = {}
+		if previous or _has_request_id():
+			request_id = previous["request_id"] if previous else _fresh_request_id(msg.client_ref, msg.raw)
+			if not _store_send_state(message_name, request_id, params, attachments, previous):
+				return  # completed (echo) or failed (sweep) meanwhile: not ours to send
+			send_kwargs["request_id"] = request_id
 	except Exception as e:  # noqa: BLE001 - recorded on the row, user can retry
-		_settle(message_name, msg.conversation, "failed", _error_text(e))
+		if _settle(message_name, msg.conversation, "failed", _error_text(e)):
+			_set_last_outcome(message_name, "not_sent")
 		return
 
 	try:
-		data = client.execute("messages.send", params)
+		data = client.execute("messages.send", params, **send_kwargs)
 	except DialogBrainError as e:
 		_commit()  # new snapshot: see what the echo did meanwhile
-		ambiguous = isinstance(e, DialogBrainTimeout) or e.status in AMBIGUOUS_HTTP_STATUSES
-		# ambiguous: stays "unknown" (claimed), only the error text is recorded
-		_settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
+		parsed = getattr(client, "last_response_parsed", False) is True
+		# The first call with this request_id is still running in DialogBrain (our earlier
+		# attempt timed out here but not there): its outcome is not known yet, and it is
+		# NOT a failure. Rebuilding the attempt under a new id would send the reply twice.
+		in_progress = parsed and e.error_type == REQUEST_IN_PROGRESS
+		# Definite: a tool error DialogBrain answered, or a 4xx refusal before the tool ran.
+		definite = not in_progress and ((parsed and not e.status) or e.status in DEFINITE_HTTP_STATUSES)
+		# Ambiguous: any other HTTP status (incl. a 2xx without JSON) or a read timeout.
+		# It stays "unknown" (claimed), only the error text is recorded.
+		ambiguous = in_progress or (not definite and (isinstance(e, DialogBrainTimeout) or bool(e.status)))
+		settled = _settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
+		if settled and not ambiguous:
+			# a connection error (no status, no response read) may have reached DialogBrain:
+			# its retry reuses the stored attempt after the settle wait
+			_set_last_outcome(message_name, "answered" if definite else "no_response")
+		if settled and send_kwargs:
+			if ambiguous:
+				_record_outcome(message_name, e)
+			elif parsed:  # DialogBrain answered (a tool error): it should have echoed
+				_check_echo(message_name, client, send_kwargs["request_id"])
 		return
 	except Exception as e:  # noqa: BLE001 - the request may have gone out: never resend
 		_commit()
-		_settle(message_name, msg.conversation, "unknown", _error_text(e))
+		if _settle(message_name, msg.conversation, "unknown", _error_text(e)) and send_kwargs:
+			_record_outcome(message_name, e)
 		frappe.log_error(
 			title="DialogBrain send: unexpected error", reference_doctype="DB Message", reference_name=message_name
 		)
 		return
 
 	_commit()  # new snapshot: _record_sent must see an echo committed during the send
+	if send_kwargs and getattr(client, "last_response_parsed", False) is True:
+		_check_echo(message_name, client, send_kwargs["request_id"])
 	save_point = "dialogbrain_record_sent"
 	frappe.db.savepoint(save_point)
 	try:
@@ -347,6 +632,14 @@ def deliver(message_name: str) -> None:
 		)
 		# db_id stays empty: the echo ("sent" is echo-matchable) or reconcile fills it
 		_settle(message_name, msg.conversation, "sent")
+
+
+def _record_outcome(name, exc) -> None:
+	"""Record (and log) the class of an ambiguous attempt. Retry stays allowed for every
+	class while the request_id dedupes it; this is for diagnosis only."""
+	outcome = _outcome_class(exc)
+	_update_send_state(name, outcome=outcome)
+	frappe.logger("dialogbrain").info(f"send {name}: ambiguous outcome {outcome}, retryable by request_id")
 
 
 def _record_sent(name, data, attachments):

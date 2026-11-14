@@ -35,8 +35,9 @@ would hide them from the probe). A subscription deleted at DialogBrain (activate
 is forgotten (id/secret cleared, status "missing … run Reconnect") without failing the
 pass, so the cursor keeps moving; reconcile then polls until the admin reconnects.
 
-Unconfirmed replies (ruling R11): outgoing rows still ``unknown`` without ``db_id`` and older
-than 10 minutes are resolved by reading their thread from the reply's day (echo matching
+Unconfirmed replies (ruling R11): outgoing rows still ``unknown`` without ``db_id``, older
+than 10 minutes and whose last send attempt (``raw.send.attempt_at``, Plan 3 B4) is not
+under 10 minutes old, are resolved by reading their thread from the reply's day (echo matching
 completes a reply that did arrive); whatever is still unknown after that successful read is
 marked ``failed`` (conditional write) so the manager can check the chat and resend.
 """
@@ -50,6 +51,7 @@ from frappe.utils.password import remove_encrypted_password
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.sync.backfill import (
+	DEFAULT_BACKFILL_DAYS,
 	BACKFILL_JOB_ID,
 	SETTINGS,
 	STATUS_LENGTH,
@@ -61,8 +63,8 @@ from dialogbrain.sync.backfill import (
 	utc_day,
 )
 from dialogbrain.sync.notify import publish
-from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id
-from dialogbrain.sync.sender import requeue_stale_replies
+from dialogbrain.sync.processor import MAX_ATTEMPTS, delivery_job_id, kick_drain
+from dialogbrain.sync.sender import UNCONFIRMED_ERROR, last_attempt_at, requeue_stale_replies
 from dialogbrain.sync.upsert import _s, find_conversation, rollback_to, to_system_datetime
 
 RECONCILE_JOB = "dialogbrain.sync.reconcile.reconcile"
@@ -73,11 +75,9 @@ INTERVALS = {"public": 300, "private": 60}
 # next 60 s tick sees 59.x s and every other minute is skipped.
 TICK_SLACK = 5
 PROBE_LIMIT = 10
-STUCK_AFTER = timedelta(minutes=10)
 UNCONFIRMED_AFTER = timedelta(minutes=10)
 MAX_THREAD_FAILURES = 5
 STATUS_TEXT_LENGTH = 1000
-UNCONFIRMED_ERROR = "Not confirmed by DialogBrain — check the chat before resending"
 WEBHOOK_MISSING_STATUS = "missing: the DialogBrain webhook was deleted — run Reconnect"
 SETTINGS_FIELDS = (
 	"connected",
@@ -120,27 +120,39 @@ def tick() -> None:
 
 
 def retry_webhook_logs() -> None:
-	"""Re-enqueue failed deliveries and ones stuck ``queued`` > 10 min (``attempts < 5``)."""
-	stuck_before = now_datetime() - STUCK_AFTER
-	names = frappe.db.sql(
+	"""Re-enqueue ``failed`` deliveries (``attempts < 5``, one job each: they are few) and
+	kick the drain of every lane that has a ``queued`` row. The drain is the only way a
+	queued row is processed; a kick is deduplicated while a drain runs, so the kick here
+	also closes the race between a drain's last empty select and a row committed just
+	after it (that row waits a minute, not ten)."""
+	rows = frappe.db.sql(
 		"""
-		select name from `tabDB Webhook Log`
-		where ifnull(attempts, 0) < %(max)s
-		  and (status = 'failed' or (status = 'queued' and received_at < %(stuck)s))
+		select name, ifnull(`lane`, 'short') as lane from `tabDB Webhook Log`
+		where status = 'failed' and ifnull(attempts, 0) < %(max)s
 		order by received_at
 		limit 500
 		""",
-		{"max": MAX_ATTEMPTS, "stuck": stuck_before},
-		pluck=True,
+		{"max": MAX_ATTEMPTS},
+		as_dict=True,
 	)
-	for name in names:
+	for row in rows:
 		frappe.enqueue(
 			PROCESS_JOB,
-			queue="short",
-			job_id=delivery_job_id(name),
+			queue=row.lane,  # a failed backfill row never jumps ahead of live traffic
+			job_id=delivery_job_id(row.name),
 			deduplicate=True,
-			log_name=name,
+			log_name=row.name,
 		)
+	lanes = frappe.db.sql(
+		"""
+		select distinct ifnull(`lane`, 'short') from `tabDB Webhook Log`
+		where status = 'queued' and ifnull(attempts, 0) < %(max)s
+		""",
+		{"max": MAX_ATTEMPTS},
+		pluck=True,
+	)
+	for lane in sorted(lanes):
+		kick_drain(lane)
 
 
 # --- reconcile ------------------------------------------------------------------
@@ -245,7 +257,7 @@ def reconcile() -> None:
 		return
 	start = now_datetime()
 	last = get_datetime(settings.last_reconcile_at) if settings.last_reconcile_at else start
-	floor = utc_day(start - timedelta(days=int(settings.backfill_days or 30)))
+	floor = utc_day(start - timedelta(days=int(settings.backfill_days or DEFAULT_BACKFILL_DAYS)))
 	since = max(utc_day(last - timedelta(days=1)), floor)
 	client = DialogBrainClient.from_settings()
 	global_ok = True
@@ -369,18 +381,40 @@ def _reconcile_thread(run, key, entry):
 # --- unconfirmed replies (R11) ----------------------------------------------------
 
 
+def _attempt_recent(raw, cutoff) -> bool:
+	"""B4: a retried reply keeps its old ``sent_at``; its last attempt (``raw.send``) may
+	still be in flight. Unreadable timestamps count as old."""
+	at = last_attempt_at(raw)
+	if not at:
+		return False
+	try:
+		return get_datetime(at) >= cutoff
+	except Exception:  # noqa: BLE001
+		return False
+
+
+def _unconfirmed(cutoff, conversation=None):
+	"""``unknown`` replies without ``db_id``, sent before ``cutoff`` and whose last
+	attempt is not recent: ``[(name, conversation, sent_at)]``."""
+	cond = " and conversation = %(conversation)s" if conversation else ""
+	rows = frappe.db.sql(
+		f"""
+		select name, conversation, sent_at, raw from `tabDB Message`
+		where direction = 'out' and delivery_status = 'unknown' and ifnull(db_id, '') = ''
+		  and sent_at < %(cutoff)s{cond}
+		""",
+		{"cutoff": cutoff, "conversation": conversation},
+	)
+	return [(n, c, t) for n, c, t, raw in rows if not _attempt_recent(raw, cutoff)]
+
+
 def _resolve_unconfirmed(run):
 	cutoff = now_datetime() - UNCONFIRMED_AFTER
-	rows = frappe.db.sql(
-		"""
-		select conversation, min(sent_at) from `tabDB Message`
-		where direction = 'out' and delivery_status = 'unknown' and ifnull(db_id, '') = ''
-		  and sent_at < %s
-		group by conversation
-		""",
-		cutoff,
-	)
-	for conversation, oldest in rows:
+	oldest_by_conv = {}
+	for _name, conversation, sent_at in _unconfirmed(cutoff):
+		if conversation not in oldest_by_conv or sent_at < oldest_by_conv[conversation]:
+			oldest_by_conv[conversation] = sent_at
+	for conversation, oldest in oldest_by_conv.items():
 		day = utc_day(oldest)
 		if conversation not in run.synced or run.synced[conversation] > day:
 			conv = frappe.db.get_value(
@@ -397,20 +431,14 @@ def _resolve_unconfirmed(run):
 
 
 def _fail_unconfirmed(conversation, cutoff):
-	names = frappe.get_all(
-		"DB Message",
-		filters={
-			"conversation": conversation,
-			"direction": "out",
-			"delivery_status": "unknown",
-			"db_id": ["is", "not set"],
-			"sent_at": ["<", cutoff],
-		},
-		pluck="name",
-	)
+	names = [name for name, _conv, _sent in _unconfirmed(cutoff, conversation)]
 	for name in names:
-		row = frappe.db.get_value("DB Message", name, ["delivery_status", "db_id"], as_dict=True, for_update=True)
+		row = frappe.db.get_value(
+			"DB Message", name, ["delivery_status", "db_id", "raw"], as_dict=True, for_update=True
+		)
 		if not row or row.delivery_status != "unknown" or row.db_id:
 			continue  # the history read (echo matching) completed it meanwhile
+		if _attempt_recent(row.raw, cutoff):
+			continue  # claimed again (a retry) since it was selected: re-checked under the lock
 		frappe.db.set_value("DB Message", name, {"delivery_status": "failed", "error": UNCONFIRMED_ERROR})
 		publish(conversation, "message_updated", {"message": name})

@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-14 12:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -9,6 +9,7 @@
   "draft_id",
   "conversation",
   "text",
+  "full_text",
   "created_at",
   "status"
  ],
@@ -30,6 +31,14 @@
    "fieldname": "text",
    "fieldtype": "Long Text",
    "label": "Text"
+  },
+  {
+   "default": "0",
+   "description": "The complete text was fetched from DialogBrain (agents.get_draft); the text is not cut.",
+   "fieldname": "full_text",
+   "fieldtype": "Check",
+   "label": "Full Text",
+   "read_only": 1
   },
   {
    "fieldname": "created_at",
