@@ -78,11 +78,14 @@ class FakeAgents:
 		self.agents = _agents()
 		self.calls = []
 		self.error = None
+		self.get_errors = {}
 
 	def execute(self, tool, params):
 		self.calls.append((tool, copy.deepcopy(params)))
 		if self.error:
 			raise self.error
+		if tool == "agents.get" and params["agent_id"] in self.get_errors:
+			raise self.get_errors[params["agent_id"]]
 		if tool == "agents.list":
 			rows = [
 				{
@@ -226,6 +229,30 @@ class TestAgentModes(_Base):
 			self.assertEqual(self.row(n).agent_mode_status, DENIED)
 		row = self.row("102")  # binding and mode untouched
 		self.assertEqual((row.agent_trigger_id, row.agent_mode), ("2", "autopilot"))
+
+	def test_one_agent_failing_leaves_its_channels_and_refreshes_the_rest(self):
+		agent_modes.sync(self.fake)
+		stored = self.row("101")
+		self.fake.get_errors[10] = DialogBrainError("HTTP 500", status=500)
+		self.fake.agents[11]["triggers"][0]["send_mode"] = "auto"  # trigger 4 -> autopilot
+		frappe.db.set_value("DB Channel", "104", {"agent_id": "11", "agent_name": "Support", "agent_trigger_id": "4"})
+		frappe.db.set_value("DB Channel", "102", "agent_mode_status", "kept")
+		agent_modes.sync(self.fake)
+		self.assertEqual(self.row("101"), stored)  # bound to the failed agent: untouched
+		self.assertEqual(self.row("102").agent_mode_status, "kept")
+		self.assertEqual(self.row("102").agent_mode, "autopilot")
+		row = self.row("104")  # agent 11 read: refreshed (trigger 5 of agent 10 is unknown now)
+		self.assertEqual((row.agent_trigger_id, row.agent_mode), ("4", "autopilot"))
+		self.assertEqual(self.row("105").agent_mode_status, SHARED)
+
+	def test_a_failing_agents_get_with_permission_denied_reads_nothing(self):
+		agent_modes.sync(self.fake)
+		self.fake.get_errors[10] = DialogBrainError("no", error_type="permission_denied")
+		with self.assertRaises(DialogBrainError):
+			agent_modes.sync(self.fake)
+		for n in range(101, 111):
+			self.assertEqual(self.row(n).agent_mode_status, DENIED)
+		self.assertEqual(self.row("102").agent_trigger_id, "2")
 
 	def test_hourly_swallows_errors_and_skips_a_disconnected_site(self):
 		with patch("dialogbrain.setup.agent_modes.DialogBrainClient.from_settings") as mk:

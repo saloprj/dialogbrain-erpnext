@@ -39,11 +39,25 @@ def mode_of(trigger: dict, agent: dict) -> str:
 def candidates(client) -> dict:
 	"""``{account_id: [{agent_id, agent_name, trigger_id, mode, exclusive}]}`` for the
 	incoming-message triggers of active, non-template agents."""
+	return _read(client)[0]
+
+
+def _read(client) -> tuple:
+	"""``(candidates, failed_agent_ids)``. An ``agents.get`` that fails (a 5xx, an agent
+	deleted since the list) skips that agent only; ``permission_denied`` and a failing
+	``agents.list`` raise: nothing can be read."""
 	found = {}
+	failed = set()
 	for listed in (client.execute("agents.list", {}) or {}).get("agents") or []:
 		if listed.get("is_template") or listed.get("status") != "active":
 			continue
-		agent = client.execute("agents.get", {"agent_id": listed.get("id")}) or {}
+		try:
+			agent = client.execute("agents.get", {"agent_id": listed.get("id")}) or {}
+		except DialogBrainError as exc:
+			if exc.error_type == "permission_denied":
+				raise
+			failed.add(str(listed.get("id")))
+			continue
 		for trigger in agent.get("triggers") or []:
 			if trigger.get("trigger_type") != TRIGGER_TYPE:
 				continue
@@ -58,7 +72,7 @@ def candidates(client) -> dict:
 						"exclusive": len(ids) == 1,
 					}
 				)
-	return found
+	return found, failed
 
 
 def _failure_text(exc: DialogBrainError) -> str:
@@ -104,7 +118,7 @@ def sync(client=None) -> dict:
 	``agent_mode_status`` (bindings and modes stay as they are) and the error is raised."""
 	client = client or DialogBrainClient.from_settings()
 	try:
-		found = candidates(client)
+		found, failed = _read(client)
 	except DialogBrainError as exc:
 		frappe.db.sql(
 			"update `tabDB Channel` set agent_mode_status = %s", (_failure_text(exc)[:500],)
@@ -113,9 +127,11 @@ def sync(client=None) -> dict:
 	counts = {"linked": 0, "ambiguous": 0, "none": 0}
 	now = now_datetime()
 	channels = frappe.get_all(
-		CHANNEL, fields=["name", "account_id", "agent_trigger_id", "agent_mode"], limit_page_length=0
+		CHANNEL, fields=["name", "account_id", "agent_id", "agent_trigger_id", "agent_mode"], limit_page_length=0
 	)
 	for channel in channels:
+		if channel.agent_id and str(channel.agent_id) in failed:
+			continue  # its agent could not be read this run: leave it as stored
 		values = _decide(channel, found.get(str(channel.account_id), []))
 		if values["agent_trigger_id"]:
 			counts["linked"] += 1
