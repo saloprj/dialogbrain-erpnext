@@ -5,5 +5,5 @@ dialogbrain.patches.v0_1.create_roles
 dialogbrain.patches.v0_1.recompute_unread_counts #2026-11-13-live-window
 dialogbrain.patches.v0_1.clear_inbound_delivery_status
 dialogbrain.patches.v0_1.fill_contact_keys_from_refs
-dialogbrain.patches.v0_1.add_agent_api_setup
+dialogbrain.patches.v0_1.add_agent_api_setup #2026-11-14-custom-field-module
 dialogbrain.patches.v0_1.set_conversation_instance

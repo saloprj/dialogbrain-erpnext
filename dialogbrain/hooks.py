@@ -8,6 +8,7 @@ app_license = "mit"
 required_apps = ["erpnext"]
 
 after_install = "dialogbrain.install.after_install"
+before_uninstall = "dialogbrain.install.before_uninstall"
 
 permission_query_conditions = {
 	"DB Conversation": "dialogbrain.permissions.conversation_query",
