@@ -2,9 +2,19 @@
 
 Final state: v16 657 tests + 14 translation tests OK; v15 (`dev/test-v15.sh`, Python 3.10) 671 tests OK. GitHub Actions is green on both versions (PR #6, run 43618415476, 2026-11-14).
 
+## Live check on the dev stand (2026-11-14, workspace 128, gateway run from the PR #5382 branch)
+Passed, in a browser:
+- A temporary agent with a trigger for livechat channel 201 was picked up by "Refresh from DialogBrain": the channel form showed the agent, mode Copilot and the warning "Another agent trigger also answers this channel: Off here does not stop it" (the workspace has catch-all triggers; 27 other channels read "also serves other channels").
+- Autopilot from the form menu: DialogBrain's trigger went to `send_mode: auto`; Off through the API: stored `off`. The conversation header chip followed ("AI: answers", then "AI: off").
+- Take over showed "Taken over" and the button "Give back to agent"; Give back restored "Take over".
+- Connect against that gateway: all capabilities detected, 6 tools registered for 30 agents.
+Afterwards the temporary agent was deleted, the original gateway and Public site URL were restored and the site reconnected (capabilities back to "problems": the original gateway has no PR #5382).
+Seen along the way: the PR branch is 58 commits behind main; while it ran, one of the DialogBrain frontend's own requests failed in the gateway (`ValueError: not enough values to unpack`), unrelated to this app.
+
 ## Still owed
-- Browser: the mode chip in the conversation header (the only bound channel on the dev stand has no conversations); Take over / Give back (needs a DialogBrain gateway with PR #5382); the navbar badge on v15.
+- Browser: the navbar badge on v15.
 - Check once on the bench how the glossary overrides (Customer, Lead, Draft, Note, Assign, Off, Connect, Conversation) read on ERPNext's own screens in uk/ru.
+- That the agent stays silent on a real inbound message while a conversation is taken over (checked by state only).
 
 ## What the first CI runs turned up
 - The runner's MariaDB client insists on TLS; the workflow writes `skip-ssl` into `~/.my.cnf`.

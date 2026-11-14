@@ -76,3 +76,4 @@ Dev stand notes:
 - A full test run on Frappe v15 / Python 3.10: `dev/test-v15.sh` (see README, "Supported versions and tests").
 - Dev stand alias: `erpnext-dev` on `dialogbrain_dialogbrain-network` is now in `dev/compose.dialogbrain.yml` and the documented way; `dev/install.sh` prints the DialogBrain-side steps (`SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev`, Public site URL `http://erpnext-dev:8080`).
 - Browser check of the inbox on the dev stand (2026-11-14): done for the list, reports, channel form and Ukrainian UI; Take over / Give back still not seen (dev gateway is not on PR #5382). Details: `2026-11-14-plan-4-followups.md`.
+- Take over / Give back seen in the browser on 2026-11-14 against a gateway run from the PR #5382 branch (see `2026-11-14-plan-4-followups.md`).
