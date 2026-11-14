@@ -36,6 +36,21 @@ class TestClient(DialogBrainTestCase):
 		)
 		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer db_live_x")
 
+	def test_a_persons_calls_say_as_operator_and_nothing_else_does(self):
+		"""DialogBrain treats a REST call as an automation unless it says ``as_operator``:
+		a manager's reply and the take-over switch are a person's, a sync read is not."""
+		ok = make_response(200, {"success": True, "data": {}})
+		for tool, flagged in (
+			("messages.send", True),
+			("threads.set_agent_paused", True),
+			("threads.get_agent_status", False),
+			("search.threads", False),
+			("agents.approve_draft", False),
+		):
+			with patch("requests.Session.request", return_value=ok) as req:
+				client().execute(tool, {})
+			self.assertEqual(req.call_args[1]["json"].get("as_operator"), True if flagged else None, tool)
+
 	def test_execute_passes_thread_id(self):
 		with patch("requests.Session.request", return_value=make_response(200, {"success": True, "data": []})) as req:
 			client().execute("messages.send", {"text": "x"}, thread_id="42")

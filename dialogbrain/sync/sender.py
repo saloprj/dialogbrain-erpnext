@@ -83,7 +83,7 @@ import frappe
 from frappe import _
 from frappe.utils import get_datetime, now_datetime
 
-from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
+from dialogbrain.client import REQUEST_IN_PROGRESS, DialogBrainClient, DialogBrainError, DialogBrainTimeout
 from dialogbrain.permissions import assert_can_access
 from dialogbrain.sync.notify import publish
 from dialogbrain.sync.upsert import (
@@ -456,6 +456,8 @@ def _update_send_state(name, **fields) -> None:
 def _outcome_class(exc) -> str:
 	if isinstance(exc, DialogBrainTimeout):
 		return "timeout"
+	if isinstance(exc, DialogBrainError) and exc.error_type == REQUEST_IN_PROGRESS:
+		return "in_progress"
 	if isinstance(exc, DialogBrainError) and exc.status:
 		return f"http_{exc.status}"
 	return "crash"
@@ -579,11 +581,15 @@ def deliver(message_name: str) -> None:
 	except DialogBrainError as e:
 		_commit()  # new snapshot: see what the echo did meanwhile
 		parsed = getattr(client, "last_response_parsed", False) is True
+		# The first call with this request_id is still running in DialogBrain (our earlier
+		# attempt timed out here but not there): its outcome is not known yet, and it is
+		# NOT a failure. Rebuilding the attempt under a new id would send the reply twice.
+		in_progress = parsed and e.error_type == REQUEST_IN_PROGRESS
 		# Definite: a tool error DialogBrain answered, or a 4xx refusal before the tool ran.
-		definite = (parsed and not e.status) or e.status in DEFINITE_HTTP_STATUSES
+		definite = not in_progress and ((parsed and not e.status) or e.status in DEFINITE_HTTP_STATUSES)
 		# Ambiguous: any other HTTP status (incl. a 2xx without JSON) or a read timeout.
 		# It stays "unknown" (claimed), only the error text is recorded.
-		ambiguous = not definite and (isinstance(e, DialogBrainTimeout) or bool(e.status))
+		ambiguous = in_progress or (not definite and (isinstance(e, DialogBrainTimeout) or bool(e.status)))
 		settled = _settle(message_name, msg.conversation, "unknown" if ambiguous else "failed", _error_text(e))
 		if settled and not ambiguous:
 			# a connection error (no status, no response read) may have reached DialogBrain:

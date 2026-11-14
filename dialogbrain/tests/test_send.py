@@ -972,6 +972,33 @@ class TestSend(DialogBrainTestCase):
 			self.assertNotEqual(raw.get("last_outcome"), "answered", str(exc))
 			self.assertEqual(raw["send"]["request_id"], f"cref-amb-{i}")
 
+	def test_a_call_still_running_in_dialogbrain_is_not_a_failure(self):
+		"""Our first attempt timed out here but is still running there; the retry is answered
+		``request_in_progress``. A tool error, but NOT a definite one: rebuilding the attempt
+		under a new request_id would send the reply twice."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-busy", file_urls=[self._offer_file()])["name"]
+		busy = DialogBrainError("A call with this request_id is still running.", error_type="request_in_progress")
+		self._deliver(name, self._raising(busy, upload_file=lambda *a, **k: 4242))
+		raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+		self.assertNotEqual(raw.get("last_outcome"), "answered")
+		self.assertEqual(raw["send"]["outcome"], "in_progress")
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self.assertTrue(has_capability("request_id"))
+		# the retry reuses the very same attempt, so DialogBrain can dedupe it
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._retry(name)
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-busy",
+		)
+
 	def test_non_definite_reply_is_retried_with_its_stored_attempt(self):
 		"""F2a: a 503 (or a 2xx without JSON) reuses the stored attempt after the settle
 		wait, so DialogBrain dedupes it if the first one went out."""

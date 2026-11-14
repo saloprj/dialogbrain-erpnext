@@ -14,6 +14,17 @@ def mask(secret: str) -> str:
 	return "db_…" + (secret or "")[-4:]
 
 
+# Calls a PERSON makes from ERPNext. DialogBrain treats a REST call with an API key as an
+# automation unless it says ``as_operator``: only then does a reply stand the AI agent
+# down in that conversation (like a reply typed in DialogBrain's own inbox), and only then
+# is the agent's pause switch allowed. An older DialogBrain ignores the field.
+OPERATOR_TOOLS = frozenset({"messages.send", "threads.set_agent_paused"})
+# DialogBrain's answer to a repeat that arrives while the first call with the same
+# ``request_id`` is still running: nothing was run twice, the first call's outcome is
+# still unknown. Retry later with the SAME request_id.
+REQUEST_IN_PROGRESS = "request_in_progress"
+
+
 class DialogBrainError(Exception):
 	"""``status``: HTTP status, if any. ``code``: DialogBrain's error code or text.
 	``error_type``: the tool's ``error_type`` (e.g. ``permission_denied``) when the
@@ -113,8 +124,13 @@ class DialogBrainClient:
 		``request_id`` (optional) is DialogBrain's idempotency key: a repeat of the same call
 		with the same id returns the first result instead of running again. DialogBrain
 		with that support echoes it at the top level of the response; the echo (or None)
-		is kept in ``self.last_request_id``. An older DialogBrain ignores the field."""
+		is kept in ``self.last_request_id``. An older DialogBrain ignores the field.
+
+		Tools in :data:`OPERATOR_TOOLS` are sent with ``as_operator``: the call is a person
+		acting in ERPNext, not an automation (see the constant)."""
 		body = {"tool_id": tool_id, "params": params, "mode": "auto", "skip_approval": True}
+		if tool_id in OPERATOR_TOOLS:
+			body["as_operator"] = True
 		if thread_id is not None:
 			body["thread_id"] = thread_id
 		if request_id is not None:
