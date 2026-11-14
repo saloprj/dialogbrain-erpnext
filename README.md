@@ -65,7 +65,7 @@ Managers only:
   customer, longest waiting first. Filters: channel, assigned to, minimum minutes waiting.
 - **Conversations by Channel and Manager:** opened and closed in the period, open and
   unanswered now, inbound and outbound messages, and how many were sent by AI. Filters:
-  period, group by (channel, manager or day).
+  period, group by (channel or manager).
 
 ## Languages
 
