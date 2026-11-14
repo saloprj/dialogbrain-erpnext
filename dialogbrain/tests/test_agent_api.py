@@ -93,6 +93,7 @@ class TestAgentApi(DialogBrainTestCase):
 		frappe.set_user("Administrator")
 		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel", LOG):
 			frappe.db.delete(dt)
+		_set_settings(dialogbrain_instance="aaaaaaaaaaaaaaaa")  # rows from _conv carry it
 		frappe.db.delete("Item Price", {"price_list": PRICE_LIST})
 		frappe.db.delete("Bin", {"item_code": ["like", "AGT-%"]})
 		self.agent = agent_api.ensure_agent_user()
@@ -525,6 +526,7 @@ class TestCustomerTools(DialogBrainTestCase):
 		frappe.set_user("Administrator")
 		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel", LOG):
 			frappe.db.delete(dt)
+		_set_settings(dialogbrain_instance="aaaaaaaaaaaaaaaa")  # rows from _conv carry it
 		frappe.db.delete("Sales Order", {"customer": ["like", "Agent %"]})
 		frappe.db.delete("Sales Invoice", {"customer": ["like", "Agent %"]})
 		frappe.db.delete("Item Price", {"price_list": PRICE_LIST})

@@ -46,6 +46,10 @@ _seq = [0]
 def _conv(channel, **fields):
 	_seq[0] += 1
 	doc = {"doctype": "DB Conversation", "thread_id": f"inbox-t{_seq[0]}", "channel": channel}
+	# stamped like a synced row (residual fix R1: an empty key is never identified)
+	from dialogbrain.instance import current_instance
+
+	doc["dialogbrain_instance"] = current_instance()
 	doc.update(fields)
 	return frappe.get_doc(doc).insert(ignore_permissions=True).name
 

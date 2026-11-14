@@ -25,6 +25,7 @@ THREAD = "4217"
 ORDER_PATH = "/api/method/dialogbrain.agent_api.order_status"
 FIND_PATH = "/api/method/dialogbrain.agent_api.find_customer"
 ORDER_BODY = b'{"order_no":"SAL-ORD-2026-00001"}'
+TEST_INSTANCE = "aaaaaaaaaaaaaaaa"
 
 # Worked examples DialogBrain's signer is pinned to (secret SECRET, timestamp TS, thread 4217).
 VECTOR_POST = "sha256=59a0edf857115d45b3fc7831edb6fa926ac74c59d42fc3b4055c2b3958e120b6"
@@ -71,7 +72,7 @@ class TestThreadContext(DialogBrainTestCase):
 		for dt in ("DB Message", "DB Conversation", "DB Channel User", "DB Channel"):
 			frappe.db.delete(dt)
 		set_secret()
-		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", None)
+		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", TEST_INSTANCE)
 		self.channel = _channel("ctx-ch", "telegram")
 		self.customer = _customer("Ctx Customer")
 		self.conv = _conv(self.channel, thread_id=THREAD, party_type="Customer", party=self.customer,
@@ -128,13 +129,22 @@ class TestThreadContext(DialogBrainTestCase):
 	def test_conversation_of_another_instance_is_not_identified(self):
 		"""Final wave F3b: the thread id of a chat stamped by another DialogBrain instance
 		(or workspace) may name a different chat here: treated as unknown."""
-		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", "aaaaaaaaaaaaaaaa")
 		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", "bbbbbbbbbbbbbbbb")
 		self.assertEqual(tc.resolve(make_request(headers=signed_headers()), now=TS), (None, tc.OTHER_INSTANCE))
-		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", None)
-		self.assertEqual(tc.resolve(make_request(headers=signed_headers()), now=TS), (None, tc.OTHER_INSTANCE))
-		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", "aaaaaaaaaaaaaaaa")
+		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", TEST_INSTANCE)
 		self.assertTrue(self.verify(make_request(headers=signed_headers())).identified)
+
+	def _resolve_with(self, settings_key, conv_key):
+		frappe.db.set_single_value(SETTINGS, "dialogbrain_instance", settings_key)
+		frappe.db.set_value("DB Conversation", self.conv, "dialogbrain_instance", conv_key)
+		return tc.resolve(make_request(headers=signed_headers()), now=TS)
+
+	def test_empty_instance_keys_never_match(self):
+		"""Residual fix R1: an empty key on either side is not identified, even when both
+		are empty."""
+		for settings_key, conv_key in ((None, None), (None, TEST_INSTANCE), (TEST_INSTANCE, None)):
+			self.assertEqual(self._resolve_with(settings_key, conv_key), (None, tc.OTHER_INSTANCE),
+							 (settings_key, conv_key))
 
 	def test_auto_verified_link_is_identified(self):
 		frappe.db.set_value("DB Conversation", self.conv, "link_source", "auto_verified")

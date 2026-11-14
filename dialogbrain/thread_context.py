@@ -132,7 +132,10 @@ def resolve(request=None, now=None) -> tuple[Context | None, str | None]:
 		return None, UNKNOWN_THREAD
 	from dialogbrain.instance import current_instance
 
-	if (conv.dialogbrain_instance or "") != (current_instance() or ""):
+	current = current_instance()
+	# An empty key on either side never matches: an unstamped chat (or a site with no
+	# stored instance) is not identified (residual fix R1).
+	if not current or not conv.dialogbrain_instance or conv.dialogbrain_instance != current:
 		return None, OTHER_INSTANCE
 	linked = bool(
 		conv.party_type in PARTY_TYPES and conv.party and frappe.db.exists(conv.party_type, conv.party)
