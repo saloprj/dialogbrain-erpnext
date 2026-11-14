@@ -34,13 +34,14 @@ def _types(trigger: dict) -> list:
 
 def _serves_type(types: list, channel_type) -> bool:
 	"""Whether a trigger limited to ``types`` (empty: no limit) can answer a channel of
-	``channel_type``. When unsure (unknown channel type, a related type such as
+	``channel_type`` (compared case-insensitively). When unsure (unknown channel type, a related type such as
 	``telegram`` / ``telegram_bot``) it counts as serving: a false warning is harmless, a
 	missing one makes "Off" look like off when it is not."""
 	if not types or not channel_type:
 		return True
-	ct = str(channel_type)
-	return any(t == ct or ct.startswith(t + "_") or t.startswith(ct + "_") for t in types)
+	ct = str(channel_type).lower()
+	lowered = [str(t).lower() for t in types]
+	return any(t == ct or ct.startswith(t + "_") or t.startswith(ct + "_") for t in lowered)
 
 
 def _another():

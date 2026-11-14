@@ -280,7 +280,9 @@ class TestAgentModes(_Base):
 			self.assertEqual(self.row(n).agent_mode_status, DENIED)
 		self.assertEqual(self.row("102").agent_trigger_id, "2")
 
-	def test_hourly_swallows_errors_and_skips_a_disconnected_site(self):
+	def test_hourly_syncs_a_connected_site_and_logs_failures_without_rewriting(self):
+		previous = frappe.db.get_single_value("DialogBrain Settings", "connected")
+		self.addCleanup(frappe.db.set_single_value, "DialogBrain Settings", "connected", previous)
 		frappe.db.set_single_value("DialogBrain Settings", "connected", 1)
 		with patch("dialogbrain.setup.agent_modes.DialogBrainClient.from_settings") as mk:
 			mk.side_effect = DialogBrainError("DialogBrain Settings: base URL and API key are required")
@@ -331,6 +333,14 @@ class TestAgentModes(_Base):
 		agent_modes.sync(self.fake)
 		self.assertEqual(self.row("107").agent_mode_status, NOBODY)
 		self.assertFalse(self.row("101").agent_mode_status)
+
+	def test_channel_types_compare_case_insensitively(self):
+		self.catch_all({"channel_types": ["Telegram"]})
+		frappe.db.set_value("DB Channel", "108", "channel_type", "TELEGRAM_BOT")
+		agent_modes.sync(self.fake)
+		self.assertEqual(self.row("107").agent_mode_status, SHARED)
+		self.assertEqual(self.row("108").agent_mode_status, SHARED)
+		self.assertFalse(agent_modes._serves_type(["WhatsApp"], "telegram"))
 
 	def test_a_catch_all_serves_a_channel_of_unknown_type(self):
 		self.catch_all({"channel_types": ["whatsapp"]})

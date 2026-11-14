@@ -64,10 +64,13 @@ const db_channel_agent = {
 			if (choices.length < 2) {
 				frm.reload_doc();
 				frappe.show_alert({
-					// no choice: the stored status says why (nobody, a shared or catch-all trigger)
-					message: choices.length
-						? __("Only one agent answers this channel")
-						: frappe.utils.escape_html(options.status || __("No agent answers this channel in DialogBrain")),
+					// no choice: a stored status says why (nobody, a shared or catch-all trigger,
+					// another trigger also answering); without one, the plain reason
+					message: options.status
+						? frappe.utils.escape_html(options.status)
+						: choices.length
+							? __("Only one agent answers this channel")
+							: __("No agent answers this channel in DialogBrain"),
 					indicator: "orange",
 				});
 				return;

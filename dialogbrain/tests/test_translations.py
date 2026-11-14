@@ -241,9 +241,15 @@ class TestTranslations(FrappeTestCase):
 			visible = visible_strings()
 			shared = ({s for s, _c in visible} | {row[0] for row in read_rows(lang)}) & set(other)
 			self.assertGreater(len(shared), 40, f"{lang}: suspiciously few shared keys, the check is vacuous")
-			collisions = sorted(
-				k for k in set(ours) & set(other) if ours[k] != other[k] and k not in GLOSSARY_OVERRIDES
+			# and the keys actually compared below are a real set on v15 and v16 alike
+			# (measured: v15 uk 17 / ru 17, v16 uk 34 / ru 31). "Off" is a glossary key both
+			# versions translate; v15 has no bare "Customer".
+			compared = set(ours) & set(other)
+			self.assertIn("Off", compared, f"{lang}: a glossary key is not compared")
+			self.assertGreaterEqual(
+				len(compared), 15, f"{lang}: only {len(compared)} keys compared, the check is vacuous"
 			)
+			collisions = sorted(k for k in compared if ours[k] != other[k] and k not in GLOSSARY_OVERRIDES)
 			self.assertEqual(
 				collisions,
 				[],
