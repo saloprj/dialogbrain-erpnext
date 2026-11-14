@@ -23,6 +23,8 @@ class DialogBrainSettings(Document):
 		) or frappe._dict()
 		for field in SERVER_FIELDS:
 			self.set(field, stored.get(field))
+		if frappe.utils.cint(stored.connected):
+			self._refuse_key_or_address_change()
 
 		mode = self.network_mode or "public"
 		url_changed = (stored.public_site_url or "") != (self.public_site_url or "")
@@ -46,3 +48,19 @@ class DialogBrainSettings(Document):
 					),
 					indicator="orange",
 				)
+
+	def _refuse_key_or_address_change(self):
+		"""Residual fix R2: while connected, a form save may not store another API key or
+		base URL (it would point sync and sends at another workspace before Reconnect's
+		workspace check). Server writes (``_server_save``, OAuth) never get here."""
+		stored_url = (frappe.db.get_single_value(self.doctype, "base_url") or "").strip().rstrip("/")
+		url_changed = stored_url != (self.base_url or "").strip().rstrip("/")
+		new_key = self.api_key or ""
+		key_changed = False
+		if not self.is_dummy_password(new_key):  # the form sends a masked value when unchanged
+			from frappe.utils.password import get_decrypted_password
+
+			stored_key = get_decrypted_password(self.doctype, self.name, "api_key", raise_exception=False) or ""
+			key_changed = new_key != stored_key
+		if url_changed or key_changed:
+			frappe.throw(frappe._("Disconnect first to change the DialogBrain key or address"))

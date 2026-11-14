@@ -29,6 +29,10 @@ Open **DialogBrain Settings** (`/app/dialogbrain-settings`). There are two ways 
      ERPNext receives cannot be used in your other workspaces.
    - A site that is already connected can reconnect only to the same workspace. To move
      to another workspace, Disconnect first.
+   - While the site is connected, the API key and the Base Url cannot be changed: press
+     **Disconnect** first.
+   - Changing the DialogBrain address makes the existing chats unidentified for the AI
+     agent until they are re-linked (synced again from the new address).
 2. **Connect with API key.** Expand the "Connect with API key" section, paste the base URL
    and a DialogBrain API key, save and press **Connect with API key**. Use this for
    `http` sites on a non-loopback host.
