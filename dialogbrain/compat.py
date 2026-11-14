@@ -53,7 +53,7 @@ def only_for(roles) -> None:
 	if isinstance(roles, str):
 		roles = (roles,)
 	if set(roles).isdisjoint(frappe.get_roles()):
-		raise frappe.PermissionError
+		frappe.throw(frappe._("Not permitted"), frappe.PermissionError)
 
 
 def single_values(doctype: str, fields) -> "frappe._dict":

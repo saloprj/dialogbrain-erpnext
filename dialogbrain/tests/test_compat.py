@@ -32,3 +32,22 @@ class TestCompat(DialogBrainTestCase):
 				compat.sum_field(bad, "total")
 		with self.assertRaises(ValueError):
 			compat.count_field("cnt; drop")
+
+	def test_only_for_on_v15_refuses_with_a_translated_message(self):
+		import frappe
+
+		user = "compat-only-for@example.com"
+		if not frappe.db.exists("User", user):
+			frappe.get_doc({"doctype": "User", "email": user, "first_name": "Compat"}).insert(ignore_permissions=True)
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.set_user(user)
+		with patch.object(compat.frappe, "__version__", "15.80.0"):
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				compat.only_for("System Manager")
+			self.assertEqual(str(ctx.exception), "Not permitted")
+			with patch.object(compat.frappe, "_", side_effect=lambda text, *a, **k: f"[{text}]"):
+				with self.assertRaises(frappe.PermissionError) as ctx:
+					compat.only_for(("System Manager",))
+			self.assertEqual(str(ctx.exception), "[Not permitted]")
+			frappe.set_user("Administrator")
+			compat.only_for("System Manager")  # no raise
