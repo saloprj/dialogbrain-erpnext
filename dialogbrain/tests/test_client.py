@@ -43,6 +43,7 @@ class TestClient(DialogBrainTestCase):
 		for tool, flagged in (
 			("messages.send", True),
 			("threads.set_agent_paused", True),
+			("integrations.set_thread_context", True),
 			("threads.get_agent_status", False),
 			("search.threads", False),
 			("agents.approve_draft", False),

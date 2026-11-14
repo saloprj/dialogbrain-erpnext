@@ -17,8 +17,9 @@ def mask(secret: str) -> str:
 # Calls a PERSON makes from ERPNext. DialogBrain treats a REST call with an API key as an
 # automation unless it says ``as_operator``: only then does a reply stand the AI agent
 # down in that conversation (like a reply typed in DialogBrain's own inbox), and only then
-# is the agent's pause switch allowed. An older DialogBrain ignores the field.
-OPERATOR_TOOLS = frozenset({"messages.send", "threads.set_agent_paused"})
+# are the agent's pause switch and the thread-context secret (set at Connect by an
+# administrator) allowed. An older DialogBrain ignores the field.
+OPERATOR_TOOLS = frozenset({"messages.send", "threads.set_agent_paused", "integrations.set_thread_context"})
 # DialogBrain's answer to a repeat that arrives while the first call with the same
 # ``request_id`` is still running: nothing was run twice, the first call's outcome is
 # still unknown. Retry later with the SAME request_id.
