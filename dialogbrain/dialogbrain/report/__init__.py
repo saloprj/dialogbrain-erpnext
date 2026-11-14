@@ -10,7 +10,7 @@ from dialogbrain.permissions import is_manager
 def assert_manager():
 	"""Reports are for Chat Manager / System Manager only, whatever path calls ``execute``."""
 	if not is_manager():
-		frappe.throw(_("Not permitted"), frappe.PermissionError)
+		frappe.throw(_("Not permitted", context="DialogBrain"), frappe.PermissionError)
 
 
 def period(filters):

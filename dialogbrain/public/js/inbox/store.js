@@ -382,12 +382,12 @@ function handleDraftResult(conv, draft, r, approving) {
 		dropDraft(conv, draft);
 		frappe.msgprint({ title: __("Draft"), indicator: "orange", message: esc(r.message) });
 	} else if (r.status === "unknown") {
-		frappe.msgprint({ title: __("Warning"), indicator: "orange", message: esc(r.message) });
+		frappe.msgprint({ title: __("Warning", null, "DialogBrain"), indicator: "orange", message: esc(r.message) });
 	} else {
 		dropDraft(conv, draft);
 		if (approving && !r.sent) {
 			frappe.msgprint({
-				title: __("Warning"),
+				title: __("Warning", null, "DialogBrain"),
 				indicator: "orange",
 				message: esc(r.message || __("The draft was approved but not sent.")),
 			});

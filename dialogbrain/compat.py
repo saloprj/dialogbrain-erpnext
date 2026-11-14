@@ -53,7 +53,7 @@ def only_for(roles) -> None:
 	if isinstance(roles, str):
 		roles = (roles,)
 	if set(roles).isdisjoint(frappe.get_roles()):
-		frappe.throw(frappe._("Not permitted"), frappe.PermissionError)
+		frappe.throw(frappe._("Not permitted", context="DialogBrain"), frappe.PermissionError)
 
 
 def single_values(doctype: str, fields) -> "frappe._dict":
@@ -77,8 +77,9 @@ def single_values(doctype: str, fields) -> "frappe._dict":
 def other_apps_translations(lang: str) -> dict:
 	"""Translations the installed apps other than dialogbrain provide for ``lang``.
 
-	Keys are the source text, or ``source:context`` for contextual rows. v15 reads CSV files
-	only, v16 also gettext MO files; ``get_translations_from_apps`` covers both when it is
+	Keys are the source text, or ``source:context`` for contextual rows. Old v15 releases read
+	CSV files only; recent v15 and v16 also read the compiled gettext MO files (a full
+	``bench build`` or ``compile-po-to-mo`` makes them); ``get_translations_from_apps`` covers both when it is
 	given the app list, and the CSV reader is the fallback for a Frappe without that argument."""
 	import frappe.translate as translate
 

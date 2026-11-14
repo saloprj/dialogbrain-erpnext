@@ -114,7 +114,7 @@ def _escape_like(text):
 
 def _require_read():
 	if not frappe.has_permission("DB Conversation", "read"):
-		frappe.throw(_("Not permitted"), frappe.PermissionError)
+		frappe.throw(_("Not permitted", context="DialogBrain"), frappe.PermissionError)
 
 
 def _can_see_channel(channel, user):

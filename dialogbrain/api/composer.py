@@ -40,7 +40,7 @@ TOOL_ERROR_MAX = 200
 
 def _require(doctype):
 	if not frappe.has_permission(doctype, "read"):
-		frappe.throw(_("Not permitted"), frappe.PermissionError)
+		frappe.throw(_("Not permitted", context="DialogBrain"), frappe.PermissionError)
 
 
 # --- notes ---------------------------------------------------------------------

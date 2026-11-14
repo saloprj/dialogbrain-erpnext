@@ -236,18 +236,17 @@ class TestTranslations(FrappeTestCase):
 			ours = {row_key(row[0], row[2]): row[1] for row in read_rows(lang)}
 			# sources this policy covers, i.e. that another app translates too: bare ones (our
 			# rows, or left to that app) are compared below, contextual ones carry a context
-			# because of it. Counted over sources so the guard holds on v15 too, whose
-			# dictionaries are far smaller than v16's (52 vs 74 at the time of writing).
+			# because of it (measured with compiled catalogs: v15 71, v16 74 / 71).
 			visible = visible_strings()
 			shared = ({s for s, _c in visible} | {row[0] for row in read_rows(lang)}) & set(other)
 			self.assertGreater(len(shared), 40, f"{lang}: suspiciously few shared keys, the check is vacuous")
 			# and the keys actually compared below are a real set on v15 and v16 alike
-			# (measured: v15 uk 17 / ru 17, v16 uk 34 / ru 31). "Off" is a glossary key both
-			# versions translate; v15 has no bare "Customer".
+			# (measured with compiled catalogs: v15 uk 24 / ru 24, v16 uk 28 / ru 24)
 			compared = set(ours) & set(other)
-			self.assertIn("Off", compared, f"{lang}: a glossary key is not compared")
+			for key in ("Customer", "Off"):  # glossary keys both versions translate
+				self.assertIn(key, compared, f"{lang}: the glossary key {key!r} is not compared")
 			self.assertGreaterEqual(
-				len(compared), 15, f"{lang}: only {len(compared)} keys compared, the check is vacuous"
+				len(compared), 20, f"{lang}: only {len(compared)} keys compared, the check is vacuous"
 			)
 			collisions = sorted(k for k in compared if ours[k] != other[k] and k not in GLOSSARY_OVERRIDES)
 			self.assertEqual(

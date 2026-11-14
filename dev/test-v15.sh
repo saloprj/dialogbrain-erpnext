@@ -177,6 +177,14 @@ in_bench "bench build --app dialogbrain" >"$LOG_DIR/build.log" 2>&1 \
 	|| { tail -n 80 "$LOG_DIR/build.log"; exit 1; }
 in_bench 'ls sites/assets/dialogbrain/dist/js/ | grep -E "\.bundle\..*\.js$"'
 
+# Translation catalogs exactly as CI does (.github/workflows/ci.yml): with the compiled
+# Frappe/ERPNext .mo files present, v15 reads their (version-15) wording, which the
+# translation tests compare ours with. A production install has them too: a full
+# `bench build` (no --app) compiles every app's catalogs on v15 as on v16.
+step "compile-po-to-mo"
+in_bench "if bench --site $SITE compile-po-to-mo --help >/dev/null 2>&1; then bench --site $SITE compile-po-to-mo; fi" \
+	>"$LOG_DIR/mo.log" 2>&1 || { tail -n 80 "$LOG_DIR/mo.log"; exit 1; }
+
 step "smoke: open the inbox (list_conversations, counters)"
 in_bench "bench --site $SITE execute dialogbrain.api.conversations.list_conversations && bench --site $SITE execute dialogbrain.api.conversations.counters"
 

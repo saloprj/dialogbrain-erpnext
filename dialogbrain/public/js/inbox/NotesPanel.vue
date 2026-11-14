@@ -1,6 +1,6 @@
 <template>
 	<div class="db-notes">
-		<div class="db-section-title">{{ __("Notes") }}</div>
+		<div class="db-section-title">{{ __("Notes", null, "DialogBrain") }}</div>
 		<div v-if="notes === null" class="db-muted">{{ __("Loading…") }}</div>
 		<div v-else-if="!notes.length" class="db-muted">{{ __("No notes yet") }}</div>
 		<div v-for="n in notes || []" :key="n.name" class="db-note">
