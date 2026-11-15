@@ -29,7 +29,7 @@ the webhook path.
 
 import frappe
 from frappe import _
-from frappe.utils import get_datetime, now_datetime
+from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
@@ -45,6 +45,8 @@ SWEEP_LIMIT = 30
 SWEEP_MAX_ERRORS = 2
 SWEEP_JOB = "dialogbrain.claims.sweep"
 SWEEP_JOB_ID = "dialogbrain_claims_sweep"
+# how DialogBrainClient words a failed connection and a body that is not its API's
+_NO_ANSWER = ("DialogBrain request failed", "DialogBrain returned a non-JSON", "Unexpected DialogBrain response")
 TAKEN = "This number is already assigned to another employee"
 SHARED = "This number is already connected as a shared channel. A manager can assign it to you"
 _FIELDS = [
@@ -122,7 +124,7 @@ def _release_provisional(claim, keep=None, confirmed=False) -> None:
 
 
 def _close(claim, status, account_id=None, keep=None, confirmed=False) -> None:
-	values = {"status": status, "resolved_at": now_datetime()}
+	values = {"status": status, "resolved_at": now_datetime(), "unconfirmed": 0 if confirmed else 1}
 	if account_id:
 		values["account_id"] = account_id
 	frappe.db.set_value(CLAIM, claim.name, values)
@@ -229,13 +231,27 @@ def on_new_channel(account_id, channel_type, external_ref=None) -> dict:
 	did not say which (no ``external_ref``); the sweep, started right away, settles it."""
 	opened = {"users": [], "restricted": 0}
 	channel_type = _type(channel_type)
-	if not channel_type or not frappe.db.exists(CLAIM, {"status": "open", "channel_type": channel_type}):
+	if not channel_type:
+		return opened
+	# open claims, and claims that ended in the last day without DialogBrain saying that
+	# their session did not connect (it may still be alive there and get scanned)
+	candidates = _open(channel_type) + frappe.get_all(
+		CLAIM,
+		filters={
+			"status": ["in", ["expired", "failed", "cancelled"]],
+			"unconfirmed": 1,
+			"channel_type": channel_type,
+			"resolved_at": [">", add_to_date(now_datetime(), seconds=-GIVE_UP_SECONDS)],
+		},
+		fields=_FIELDS,
+	)
+	if not candidates:
 		return opened
 	account_id = _s(account_id)
-	candidates = _open(channel_type)
 	match = next((c for c in candidates if external_ref and c.name == _s(external_ref)), None)
 	if match:
 		# upsert_channel inserts the row right after this (and announces it)
+		frappe.db.set_value(CLAIM, match.name, "status", "open")  # also one that ended unanswered
 		_close(match, "connected", account_id=account_id, keep=account_id, confirmed=True)
 		return {"users": [match.owner_user] if match.owner_user else [], "restricted": 0, "announce": True}
 	if not any(c.owner_user for c in candidates):
@@ -271,9 +287,9 @@ def tick() -> None:
 def unreachable(exc) -> bool:
 	"""DialogBrain itself did not answer (timeout, connection), as opposed to an error it
 	returned for this one call."""
-	if isinstance(exc, DialogBrainTimeout):
+	if isinstance(exc, DialogBrainTimeout) or getattr(exc, "status", None) in (502, 503, 504):
 		return True
-	return not any(getattr(exc, name, None) for name in ("status", "code", "error_type"))
+	return str(exc).startswith(_NO_ANSWER)
 
 
 def _settle(claim, client, now) -> bool:
@@ -303,7 +319,7 @@ def _settle(claim, client, now) -> bool:
 		return True
 	if status == "error":
 		close(claim.name, "failed", confirmed=True)
-	elif status == "expired":
+	elif status in ("expired", "cancelled"):
 		# DialogBrain's own word that the session ended without connecting (a connected one
 		# keeps answering ``connected``)
 		close(claim.name, "expired", confirmed=True)

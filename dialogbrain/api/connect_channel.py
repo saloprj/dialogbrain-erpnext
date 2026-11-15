@@ -25,7 +25,7 @@ from dialogbrain.permissions import INBOX_ROLES, is_manager
 CLAIM = "DB Channel Claim"
 KINDS = ("phone", "code", "password")
 # every other status is a step of a connection still in progress (the list of steps may grow)
-ENDED = ("connected", "expired", "error")
+ENDED = ("connected", "expired", "cancelled", "error")
 START_LIMIT = (10, 600)  # starts per user per seconds ("Start again" is a start)
 SUBMIT_LIMIT = (10, 600)  # submits per claim
 SECRET_MAX = 200
@@ -124,6 +124,8 @@ def _qr(value) -> dict:
 def _state(claim, data=None, status=None, result=None) -> dict:
 	data = data or {}
 	status = status or str(data.get("status") or "")
+	if status == "cancelled":
+		status = "expired"  # the same to the person: start again
 	expires = claim.get("expires_at")
 	left = int((get_datetime(expires) - now_datetime()).total_seconds()) if expires else 0
 	state = {
@@ -176,7 +178,7 @@ def _settle(claim, data) -> dict:
 		frappe.db.set_value(CLAIM, claim.name, "expires_at", claim.expires_at, update_modified=False)
 	if status == "connected" and data.get("account_id"):
 		return _state(claim, data, result=claims.resolve(claim.name, data))
-	if status == "expired":
+	if status in ("expired", "cancelled"):
 		claims.close(claim.name, "expired", confirmed=True)  # DialogBrain's own answer
 	elif status == "error":
 		claims.close(claim.name, "failed", confirmed=True)

@@ -15,7 +15,8 @@
   "account_id",
   "expires_at",
   "resolved_at",
-  "provisional_channels"
+  "provisional_channels",
+  "unconfirmed"
  ],
  "fields": [
   {
@@ -87,6 +88,14 @@
    "label": "Provisional Channels",
    "read_only": 1,
    "description": "Channels closed to this claim's owner until it is known which number the claim connected."
+  },
+  {
+   "fieldname": "unconfirmed",
+   "fieldtype": "Check",
+   "label": "Ended Without An Answer",
+   "read_only": 1,
+   "default": "0",
+   "description": "The claim ended while DialogBrain could not say whether its session connected."
   }
  ],
  "links": [],

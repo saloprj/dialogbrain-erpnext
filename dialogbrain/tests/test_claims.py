@@ -176,7 +176,7 @@ class TestClaims(DialogBrainTestCase):
 		self.assertEqual(claims.sweep(), 0)
 		self.assertEqual(self.fake.calls, [])
 		frappe.db.set_single_value(fk.SETTINGS, "connected", 1, update_modified=False)
-		self.fake.fail[claims.GET] = DialogBrainError("down")
+		self.fake.fail[claims.GET] = DialogBrainError("DialogBrain request failed: connection refused")
 		self.assertEqual(claims.sweep(), 0)
 		self.assertEqual(self.status(name), "open")  # no answer: nothing is decided
 
@@ -299,7 +299,46 @@ class TestClaims(DialogBrainTestCase):
 		self.fake.sessions["sess-2"] = {"status": "expired"}
 		claims.sweep()
 		self.assertEqual(self.status(later), "expired")
-		self.assertEqual((self.restricted(A1), self.restricted(A2)), (1, 0))
+		# the first claim ended unanswered less than a day ago: its session may still be
+		# alive, so A2 may be that number too, and both stay with the managers
+		self.assertEqual((self.restricted(A1), self.restricted(A2)), (1, 1))
+
+	def test_number_scanned_after_an_unanswered_close_is_not_open(self):
+		old = add_to_date(now_datetime(), seconds=-(claims.GRACE_SECONDS + 5))
+		name = fk.claim(self.agent, expires_at=old)
+		self.fake.fail[claims.GET] = DialogBrainError("too many requests", status=429)
+		claims.sweep()
+		self.assertEqual(self.status(name), "expired")
+		self.assertEqual(frappe.db.get_value(CLAIM, name, "unconfirmed"), 1)
+		# the session was alive all along; the employee scans now
+		upsert_channel(A1, "whatsapp")
+		self.assertEqual((fk.allowed(A1), self.restricted(A1)), ([], 1))
+		# with external_ref the same late number goes straight to its owner
+		upsert_channel(A2, "whatsapp", external_ref=name)
+		self.assertEqual((fk.allowed(A2), self.restricted(A2)), ([self.agent], 0))
+		self.assertEqual(self.status(name), "connected")
+
+	def test_a_confirmed_close_does_not_restrict_later_numbers(self):
+		name = fk.claim(self.agent)
+		self.fake.sessions["sess-1"] = {"status": "cancelled"}
+		claims.sweep()
+		self.assertEqual((self.status(name), frappe.db.get_value(CLAIM, name, "unconfirmed")), ("expired", 0))
+		upsert_channel(A1, "whatsapp")
+		self.assertEqual((fk.allowed(A1), self.restricted(A1)), ([], 0))
+
+	def test_unreachable_is_not_an_answer(self):
+		for exc, expected in (
+			(DialogBrainTimeout("DialogBrain request timed out: x"), True),
+			(DialogBrainError("DialogBrain request failed: connection refused"), True),
+			(DialogBrainError("DialogBrain HTTP 503: bad gateway", status=503), True),
+			(DialogBrainError("DialogBrain returned a non-JSON response", status=200), True),
+			(DialogBrainError("Unexpected DialogBrain response shape"), True),
+			(DialogBrainError("channels.connect_session.get failed"), False),
+			(DialogBrainError("session not found", code="not_found"), False),
+			(DialogBrainError("DialogBrain HTTP 429: slow down", status=429), False),
+			(DialogBrainError("no", error_type="permission_denied"), False),
+		):
+			self.assertEqual(claims.unreachable(exc), expected, str(exc))
 
 	def test_agents_list_only_their_channels(self):
 		from dialogbrain.permissions import channel_has_permission

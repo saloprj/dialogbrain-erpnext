@@ -114,6 +114,7 @@ The review of PR #10 found that the v2 rules could still open a personal number 
 - **Only DialogBrain's `expired` or `error` confirms "not connected".** A session that still answers with a waiting step (someone left at the login code or the password) keeps its claim open and its channels restricted, for up to a day. An error DialogBrain returns for one session (it no longer knows it) closes that claim unconfirmed after the grace period and does not stop the sweep. Only an unreachable DialogBrain stops it.
 - **Cancel re-reads the session after cancelling**, because it may have connected between the two calls.
 - **A Chat Agent lists only the channels whose chats they may see.** A channel's id and title are a phone number, so `DB Channel` now has the same permission query as conversations.
+- **A claim that ended without an answer still counts for a day.** A number of that type that appears within 24 hours is created "Managers only", because the session may still be alive in DialogBrain and get scanned.
 - **An existing open (shared) channel is not taken over** by an employee who scans it again. They are told a manager can assign it.
 
 ## Testing
@@ -141,6 +142,7 @@ Once David's branch is on dev, a live e2e check against dev DialogBrain. Until t
 3. `cancel` on a connected session does nothing. It never disconnects.
 4. `qr` is the raw QR string.
 5. A tool `channels.connect_session.options` returns the supported channels and, for each, its methods (qr, pairing_code, phone).
+7. `get` for a session that ended without connecting answers `status: expired` (after a cancel too), as a normal answer and not as an error, for at least 15 minutes after it ended. ERPNext treats only `expired` and `error` as proof that a session did not connect. Any other answer keeps the channels that appeared meanwhile for managers only.
 6. Rejections use clear error types: `billing_required`, `permission_denied` (key lacks EDIT), `unsupported_channel`, and `rate_limited`.
 
 ## Left to the builder

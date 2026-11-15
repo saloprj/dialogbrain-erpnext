@@ -171,6 +171,13 @@ class TestConnectChannel(DialogBrainTestCase):
 		self.assertEqual((self.row(first).status, self.row(second).status), ("expired", "failed"))
 		self.assertEqual(api.get(second)["status"], "error")
 
+	def test_cancelled_by_dialogbrain_reads_as_expired(self):
+		name = api.start("whatsapp")["claim"]
+		self.fake.sessions["sess-1"] = {"status": "cancelled"}
+		state = api.get(name)
+		self.assertEqual((state["status"], state["waiting"]), ("expired", False))
+		self.assertEqual(self.row(name).status, "expired")
+
 	def test_pairing_code_shown(self):
 		name = api.start("whatsapp", "pairing_code")["claim"]
 		self.fake.sessions["sess-1"] = {"status": "need_pairing_code", "pairing_code": "ABCD-1234"}
