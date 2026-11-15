@@ -72,7 +72,7 @@
   {
    "fieldname": "expires_at",
    "fieldtype": "Datetime",
-   "label": "Expires At",
+   "label": "Session Expires At",
    "read_only": 1
   },
   {

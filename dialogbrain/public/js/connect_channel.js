@@ -8,11 +8,8 @@ frappe.provide("frappe.dialogbrain");
 	const API = "dialogbrain.api.connect_channel.";
 	const POLL_MS = 3000;
 	const BACKOFF_MS = [6000, 12000];
-	const LABELS = () => ({
-		whatsapp: __("WhatsApp"),
-		telegram: __("Telegram"),
-		viber: __("Viber"),
-	});
+	// brand names: not translated
+	const LABELS = () => ({ whatsapp: "WhatsApp", telegram: "Telegram", viber: "Viber" });
 	const METHODS = () => ({
 		qr: __("Scan a QR code"),
 		pairing_code: __("Enter a code on the phone (no camera)"),
