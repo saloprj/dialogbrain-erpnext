@@ -79,11 +79,11 @@ One function, `claims.resolve(claim, state)`, is called from three places:
 Idempotency: the same `account_id` always means the same DB Channel row.
 
 ### Feature gates
-- The "Connect channel" button reads the stored tool catalog (`agent_tool_names`). That catalog is refreshed at Connect/Re-sync and **also in `agent_modes.hourly`**, so the button appears within an hour of David's deploy without an admin clicking Re-sync. When the tool is missing, the button is hidden.
-- Channels and methods come from the tool's input schema in the catalog: the `channel` enum, and the `method` enum or the `submit` kinds.
-  - Viber is offered only if the enum lists it.
-  - WhatsApp pairing code is offered only if the schema lists it. It is new work for David: DialogBrain has no `requestPairingCode` today.
-  - If no schema is available, only QR for WhatsApp and Telegram is offered.
+- The "Connect channel" button reads a stored copy of the gate (a new server-managed Settings field, `connect_channel_options`). It is refreshed at Connect/Re-sync and **also in `agent_modes.hourly`**, so the button appears within an hour of David's deploy without an admin clicking Re-sync. When the tool is missing, the button is hidden.
+- Channels and methods come from an optional tool, `channels.connect_session.options`, which returns `{channels: {whatsapp: [qr, pairing_code], telegram: [qr, phone], …}}`. The tool catalog carries no input schemas, so it cannot tell us this. The answer is stored with the gate and refreshed hourly.
+  - Viber is offered only if `options` lists it.
+  - WhatsApp pairing code is offered only if `options` lists it. It is new work for David: DialogBrain has no `requestPairingCode` today.
+  - If the `options` tool is absent, only QR for WhatsApp and Telegram is offered.
 
 ### Dialog
 It is a Frappe dialog with no new JS dependencies. It is opened from the Chats page menu and from the DB Channel list.
@@ -116,7 +116,7 @@ Unit tests use a fake `DialogBrainClient`.
 - Rate limits.
 - No phone, code or password in Error Log, including for an exception raised inside `submit`.
 - Cancel after connected sends nothing to DialogBrain.
-- Feature gates: no tool means no button, and the enum controls Viber and pairing.
+- Feature gates: no tool means no button, and `options` controls Viber and pairing.
 
 Once David's branch is on dev, a live e2e check against dev DialogBrain. Until then the feature stays hidden by the gate, so it can ship to prod safely.
 
@@ -125,7 +125,7 @@ Once David's branch is on dev, a live e2e check against dev DialogBrain. Until t
 2. `get` keeps answering `connected` with `account_id` for at least 10 minutes after the connection, so the sweep can catch it.
 3. `cancel` on a connected session does nothing. It never disconnects.
 4. `qr` is the raw QR string.
-5. The tool input schemas list the supported `channel` values and methods (pairing code and phone).
+5. A tool `channels.connect_session.options` returns the supported channels and, for each, its methods (qr, pairing_code, phone).
 6. Rejections use clear error types: `billing_required`, `permission_denied` (key lacks EDIT), `unsupported_channel`, and `rate_limited`.
 
 ## Left to the builder
