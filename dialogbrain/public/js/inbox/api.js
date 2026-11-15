@@ -33,6 +33,10 @@ export const api = {
 	markRead: (conversation) => call(CONV + "mark_read", { conversation }, "POST"),
 	assign: (conversation, user = null) => call(CONV + "assign", { conversation, user }, "POST"),
 	setStatus: (conversation, status) => call(CONV + "set_status", { conversation, status }, "POST"),
+	// Plan 3: only when the connected DialogBrain supports it (get_conversation permissions)
+	agentStatus: (conversation) => call(CONV + "agent_status", { conversation }),
+	takeOver: (conversation) => call(CONV + "take_over", { conversation }, "POST"),
+	giveBack: (conversation) => call(CONV + "give_back", { conversation }, "POST"),
 
 	listNotes: (conversation) => call(COMP + "list_notes", { conversation }),
 	addNote: (conversation, text) => call(COMP + "add_note", { conversation, text }, "POST"),
@@ -40,6 +44,7 @@ export const api = {
 	listQuickReplies: (conversation) => call(COMP + "list_quick_replies", { conversation }),
 	approveDraft: (draft, text = null) => call(COMP + "approve_draft", { draft, text }, "POST"),
 	rejectDraft: (draft) => call(COMP + "reject_draft", { draft }, "POST"),
+	getFullDraft: (draft) => call(COMP + "get_full_draft", { draft }, "POST"),
 
 	send: (conversation, text, client_ref, file_urls = null) =>
 		call(INBOX + "send", { conversation, text, client_ref, file_urls }, "POST"),

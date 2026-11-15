@@ -1,0 +1,96 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-11-14 00:00:00.000000",
+ "custom": 0,
+ "description": "One row per DialogBrain AI agent tool call (kept 30 days).",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "tool",
+  "thread_id",
+  "conversation",
+  "party_type",
+  "party",
+  "identified",
+  "result_count",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "tool",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tool",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "thread_id",
+   "fieldtype": "Data",
+   "label": "Thread Id"
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Conversation",
+   "options": "DB Conversation"
+  },
+  {
+   "fieldname": "party_type",
+   "fieldtype": "Link",
+   "label": "Party Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "party",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Party",
+   "options": "party_type"
+  },
+  {
+   "default": "0",
+   "fieldname": "identified",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Identified"
+  },
+  {
+   "fieldname": "result_count",
+   "fieldtype": "Int",
+   "label": "Result Count"
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  }
+ ],
+ "in_create": 1,
+ "links": [],
+ "modified": "2026-11-14 00:00:00.000000",
+ "module": "DialogBrain",
+ "name": "DB Agent Call Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Chat Manager"
+  }
+ ],
+ "read_only": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

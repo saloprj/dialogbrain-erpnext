@@ -14,11 +14,28 @@ def mask(secret: str) -> str:
 	return "db_…" + (secret or "")[-4:]
 
 
+# Calls a PERSON makes from ERPNext. DialogBrain treats a REST call with an API key as an
+# automation unless it says ``as_operator``: only then does a reply stand the AI agent
+# down in that conversation (like a reply typed in DialogBrain's own inbox), and only then
+# are the agent's pause switch and the thread-context secret (set at Connect by an
+# administrator) allowed. An older DialogBrain ignores the field.
+OPERATOR_TOOLS = frozenset({"messages.send", "threads.set_agent_paused", "integrations.set_thread_context"})
+# DialogBrain's answer to a repeat that arrives while the first call with the same
+# ``request_id`` is still running: nothing was run twice, the first call's outcome is
+# still unknown. Retry later with the SAME request_id.
+REQUEST_IN_PROGRESS = "request_in_progress"
+
+
 class DialogBrainError(Exception):
-	def __init__(self, message, status=None, code=None):
+	"""``status``: HTTP status, if any. ``code``: DialogBrain's error code or text.
+	``error_type``: the tool's ``error_type`` (e.g. ``permission_denied``) when the
+	``/execute`` response carries one (DialogBrain with Part A6), else None."""
+
+	def __init__(self, message, status=None, code=None, error_type=None):
 		super().__init__(message)
 		self.status = status
 		self.code = code
+		self.error_type = error_type
 
 
 class DialogBrainTimeout(DialogBrainError):
@@ -35,6 +52,8 @@ class DialogBrainClient:
 		self._api_key = api_key
 		self.timeout = timeout
 		self._session = requests.Session()
+		# ``request_id`` echoed by the last ``execute`` (DialogBrain with Part A1), else None
+		self.last_request_id = None
 
 	@classmethod
 	def from_settings(cls):
@@ -100,13 +119,34 @@ class DialogBrainClient:
 
 	# -- tools ---------------------------------------------------------
 
-	def execute(self, tool_id: str, params: dict, thread_id: str | None = None):
+	def execute(self, tool_id: str, params: dict, thread_id: str | None = None, request_id: str | None = None):
+		"""Run a tool; returns its ``data``.
+
+		``request_id`` (optional) is DialogBrain's idempotency key: a repeat of the same call
+		with the same id returns the first result instead of running again. DialogBrain
+		with that support echoes it at the top level of the response; the echo (or None)
+		is kept in ``self.last_request_id``. An older DialogBrain ignores the field.
+
+		Tools in :data:`OPERATOR_TOOLS` are sent with ``as_operator``: the call is a person
+		acting in ERPNext, not an automation (see the constant)."""
 		body = {"tool_id": tool_id, "params": params, "mode": "auto", "skip_approval": True}
+		if tool_id in OPERATOR_TOOLS:
+			body["as_operator"] = True
 		if thread_id is not None:
 			body["thread_id"] = thread_id
+		if request_id is not None:
+			body["request_id"] = request_id
+		self.last_request_id = None
+		# True once a response body was read (success or tool error): only then does a
+		# missing request_id echo mean DialogBrain ignored it. A connection error, timeout
+		# or HTTP error status leaves it False.
+		self.last_response_parsed = False
 		payload = self._json(self._request("POST", f"/api/tools/{tool_id}/execute", json=body))
 		if not isinstance(payload, dict):
 			raise DialogBrainError("Unexpected DialogBrain response shape")
+		self.last_response_parsed = True
+		echoed = payload.get("request_id")
+		self.last_request_id = echoed if isinstance(echoed, str) else None
 		if payload.get("requires_approval"):
 			raise DialogBrainError(
 				self._scrub(payload.get("message") or "approval required"), code="requires_approval"
@@ -115,7 +155,12 @@ class DialogBrainClient:
 			err = payload.get("error")
 			code = err.get("code") if isinstance(err, dict) else err
 			msg = err.get("message") if isinstance(err, dict) else err
-			raise DialogBrainError(self._scrub(msg or f"{tool_id} failed"), code=code)
+			error_type = payload.get("error_type")
+			raise DialogBrainError(
+				self._scrub(msg or f"{tool_id} failed"),
+				code=code,
+				error_type=error_type if isinstance(error_type, str) else None,
+			)
 		return payload.get("data")
 
 	def upload_file(self, filename: str, content: bytes, mime_type: "str | None" = None) -> int:

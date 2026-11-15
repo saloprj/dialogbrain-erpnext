@@ -11,6 +11,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.setup import agent_integration
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
 from dialogbrain.sync.upsert import upsert_channel
 
@@ -52,6 +53,15 @@ SERVER_FIELDS = (
 	"oauth_client_id",
 	"oauth_redirect_uri",
 	"oauth_base_url",
+	# agent tools (Plan 3); allow_agent_writes is the admin's switch, not server-managed
+	"erpnext_agent_user",
+	"integration_id",
+	"thread_context_secret",
+	"agent_capabilities",
+	"agent_tools_status",
+	"agent_tool_names",
+	# final wave F3: the DialogBrain instance + workspace of the last Connect
+	"dialogbrain_instance",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
@@ -175,10 +185,14 @@ def _connect(doc) -> dict:
 		workspace = client.execute("workspace.current", {}) or {}
 	except DialogBrainError:
 		frappe.throw(_("Invalid API key or DialogBrain unreachable"))
+	workspace_id = str(workspace.get("id") or "") or None
+	_refuse_workspace_switch(doc, workspace, workspace_id)
 
 	missing = []
+	tools = set()
 	try:
-		missing += sorted(REQUIRED_TOOLS - set(client.list_tools() or ()))
+		tools = set(client.list_tools() or ())
+		missing += sorted(REQUIRED_TOOLS - tools)
 	except DialogBrainError:
 		missing.append(_("tool catalog (GET /api/tools/catalog)"))
 	try:
@@ -194,7 +208,10 @@ def _connect(doc) -> dict:
 		upsert_channel(account.get("account_id"), account.get("channel"), account.get("display_name"))
 
 	configure_webhook(doc, mode, client, hooks)
-	doc.workspace_id = str(workspace.get("id") or "") or None
+	_bind_instance(doc, workspace_id)
+	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
+	agent_tools = agent_integration.on_connect(doc, client, tools)
+	doc.workspace_id = workspace_id
 	doc.workspace_name = workspace.get("name")
 	doc.connected = 1
 	doc.last_reconcile_at = now_datetime()
@@ -205,7 +222,35 @@ def _connect(doc) -> dict:
 		"channels": len(channels),
 		"network_mode": mode,
 		"warning": scheduler_warning(mode),
+		"agent_tools": agent_tools,
+		"agent_tools_ok": agent_integration.status_flag(doc) != "problems",
 	}
+
+
+def _refuse_workspace_switch(doc, workspace: dict, workspace_id) -> None:
+	"""R13 / final wave F3a: a connected site never moves to another workspace on a
+	reconnect (the OAuth path checks the same before it stores the new key)."""
+	if not doc.connected or not doc.workspace_id or workspace_id == str(doc.workspace_id):
+		return
+	current = str(doc.workspace_name or doc.workspace_id or "")[:100]
+	new = str(workspace.get("name") or workspace_id or "")[:100]
+	frappe.throw(_("This site is connected to {0}. Disconnect first to switch to {1}.").format(current, new))
+
+
+def _bind_instance(doc, workspace_id) -> None:
+	"""Store the instance key (DialogBrain base URL + workspace) on ``doc`` (not saved).
+
+	When it differs from the stored one, the site now talks to another DialogBrain (or
+	workspace): the old integration id, context secret and tool names belong to that one
+	and are cleared before registering (final wave F3d)."""
+	from dialogbrain.instance import instance_key
+
+	key = instance_key(doc.base_url, workspace_id)
+	if doc.dialogbrain_instance and key != doc.dialogbrain_instance:
+		doc.integration_id = None
+		doc.thread_context_secret = None
+		doc.agent_tool_names = None
+	doc.dialogbrain_instance = key
 
 
 @frappe.whitelist(methods=["POST"])
@@ -213,9 +258,20 @@ def disconnect() -> None:
 	"""Stop syncing. The subscription is deleted; mirrored data stays."""
 	frappe.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
+	try:
+		client = _client(doc)
+	except frappe.ValidationError:
+		client = None
+	# Agent tools: the agent user's key is revoked (local) and the integration is
+	# switched off for every DialogBrain agent (best effort); its endpoints stay.
+	warning = agent_integration.on_disconnect(doc, client)
+	if warning:
+		frappe.msgprint(warning, indicator="orange")
 	if doc.webhook_id:
 		try:
-			_delete_webhook(_client(doc), doc.webhook_id)
+			if client is None:
+				raise frappe.ValidationError(_("DialogBrain Settings: base URL and API key are required"))
+			_delete_webhook(client, doc.webhook_id)
 		except (DialogBrainError, frappe.ValidationError) as exc:
 			# Disconnect anyway: the receiver ignores deliveries while disconnected, and
 			# the next Connect removes a leftover subscription for the same URL.

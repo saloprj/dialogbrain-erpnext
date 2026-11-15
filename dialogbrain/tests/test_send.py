@@ -39,10 +39,31 @@ def _process_echo(**message_overrides):
 	process_event(ECHO["event"], data)
 
 
-def _mock_client(execute=None, upload_file=None):
+def _mock_client(execute=None, upload_file=None, echo=True, answered_errors=True):
+	"""``echo``: like DialogBrain with Part A1, the client reports the request_id it got
+	back (``last_request_id``); False = an older DialogBrain that ignores it.
+	``last_response_parsed``: a response body was read (a success, or a tool error without
+	an HTTP status when ``answered_errors``); False for a connection error / timeout / 5xx."""
 	client = MagicMock()
+	client.last_request_id = None
+	client.last_response_parsed = False
 	if execute is not None:
-		client.execute.side_effect = execute
+
+		def run(*a, **k):
+			client.last_request_id = None
+			client.last_response_parsed = False
+			try:
+				result = execute(*a, **k)
+			except DialogBrainError as e:
+				if answered_errors and not e.status and not isinstance(e, DialogBrainTimeout):
+					client.last_response_parsed = True
+					client.last_request_id = k.get("request_id") if echo else None
+				raise
+			client.last_response_parsed = True
+			client.last_request_id = k.get("request_id") if echo else None
+			return result
+
+		client.execute.side_effect = run
 	if upload_file is not None:
 		client.upload_file.side_effect = upload_file
 	return client
@@ -53,6 +74,7 @@ class TestSend(DialogBrainTestCase):
 		frappe.set_user("Administrator")
 		for dt in ("DB Message Attachment", "DB Message", "DB Conversation", "DB Channel User", "DB Channel"):
 			frappe.db.delete(dt)
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", None)  # Plan 1 baseline
 		self.agent = _user("send-agent@example.com", "Chat Agent")
 		self.other = _user("send-other@example.com", "Chat Agent")
 		frappe.get_doc(
@@ -548,3 +570,547 @@ class TestSend(DialogBrainTestCase):
 				retry(name)
 		finally:
 			frappe.set_user("Administrator")
+
+	# --- request_id (Plan 3 B4) -------------------------------------------------
+
+	def _caps(self, **caps):
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", json.dumps(caps))
+
+	def _send_state(self, name):
+		raw = frappe.db.get_value("DB Message", name, "raw")
+		raw = json.loads(raw) if isinstance(raw, str) else (raw or {})
+		return raw.get("send")
+
+	def _age_attempt(self, name, first=None, last=None):
+		"""Move the stored first / last send attempt into the past."""
+		raw = frappe.db.get_value("DB Message", name, "raw")
+		raw = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+		from frappe.utils import now_datetime
+
+		now = now_datetime()
+		if first is not None:
+			raw["send"]["first_attempt_at"] = str(now - first)
+		if last is not None:  # the claim stamp and the stored attempt both
+			raw["send"]["attempt_at"] = str(now - last)
+			raw["claimed_at"] = str(now - last)
+		frappe.db.set_value("DB Message", name, "raw", json.dumps(raw))
+
+	def _timeout_client(self, upload_file=None):
+		return _mock_client(
+			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainTimeout("read timeout")),
+			upload_file=upload_file,
+		)
+
+	def _retry(self, name):
+		from dialogbrain.api.inbox import retry
+
+		frappe.set_user(self.agent)
+		try:
+			with patch("frappe.enqueue") as enqueue:
+				retry(name)
+		finally:
+			frappe.set_user("Administrator")
+		return enqueue
+
+	def test_send_body_has_no_request_id_without_capability(self):
+		self._caps(request_id=False)
+		name = self._send()["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		self.assertEqual(client.execute.call_args.kwargs, {})
+		self.assertIsNone(self._send_state(name))
+
+	def test_send_body_carries_client_ref_as_request_id_with_capability(self):
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-rid-1")["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		client.execute.assert_called_once_with(
+			"messages.send", {"thread_id": THREAD_ID, "text": LONG_TEXT}, request_id="cref-rid-1"
+		)
+		state = self._send_state(name)
+		self.assertEqual(state["request_id"], "cref-rid-1")
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "sent")
+
+	def test_odd_client_ref_is_hashed_into_a_valid_request_id(self):
+		import re
+
+		self._caps(request_id=True)
+		name = self._send(client_ref="weird ref / ü")["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		rid = client.execute.call_args.kwargs["request_id"]
+		self.assertRegex(rid, re.compile(r"^[A-Za-z0-9_.:-]{1,128}$"))
+
+	def test_unknown_retried_with_capability_resends_same_params_and_request_id(self):
+		self._caps(request_id=True)
+		file_doc = frappe.get_doc(
+			{"doctype": "File", "file_name": "offer.txt", "content": b"offer", "is_private": 0}
+		).insert(ignore_permissions=True)
+		name = self._send(client_ref="cref-unknown", file_urls=[file_doc.file_url])["name"]
+		self._deliver(name, self._timeout_client(upload_file=lambda *a, **k: 4242))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+		self._age_attempt(name, last=timedelta(minutes=5))
+
+		enqueue = self._retry(name)
+		enqueue.assert_called_once()
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "pending")
+
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()  # the first upload is reused: same params, same cache key
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-unknown",
+		)
+		msg = frappe.get_doc("DB Message", name)
+		self.assertEqual(msg.delivery_status, "sent")
+		self.assertEqual([a.file_id for a in msg.attachments], ["4242"])
+
+	def test_unknown_retry_refused_without_capability(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._caps(request_id=False)
+		with self.assertRaises(frappe.ValidationError):
+			self._retry(name)
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+
+	def test_unknown_retry_refused_when_first_attempt_had_no_request_id(self):
+		self._caps(request_id=False)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		self._caps(request_id=True)  # DialogBrain upgraded since: the first send has no cache entry
+		with self.assertRaises(frappe.ValidationError):
+			self._retry(name)
+
+	def test_unknown_retry_refused_after_23_hours(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		self._age_attempt(name, first=timedelta(hours=23, minutes=1), last=timedelta(minutes=5))
+		with self.assertRaises(frappe.ValidationError):
+			self._retry(name)
+		self._age_attempt(name, first=timedelta(hours=22, minutes=59))
+		self._retry(name)
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "pending")
+
+	def test_unknown_retry_refused_while_first_attempt_may_still_run(self):
+		"""DialogBrain caches only a finished send: a retry next to a still-running first
+		attempt would run concurrently, so it waits until that attempt must be over."""
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._retry(name)
+		self.assertIn("minute", str(cm.exception))
+
+	def test_unknown_with_db_id_never_retried(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		self._age_attempt(name, last=timedelta(minutes=5))
+		frappe.db.set_value("DB Message", name, "db_id", "555")
+		with self.assertRaises(frappe.ValidationError):
+			self._retry(name)
+
+	def test_deliver_does_not_resend_stored_attempt_past_the_window(self):
+		"""The window is checked again when the job runs (a requeued job can run late)."""
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._retry(name)
+		self._age_attempt(name, first=timedelta(hours=24))
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		client.execute.assert_not_called()
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+
+	def _offer_file(self):
+		return frappe.get_doc(
+			{"doctype": "File", "file_name": "offer.txt", "content": b"offer", "is_private": 0}
+		).insert(ignore_permissions=True).file_url
+
+	def _failing_client(self, upload_file=None):
+		return _mock_client(
+			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("thread not found", code="NOT_FOUND")),
+			upload_file=upload_file,
+		)
+
+	def _sweep_fail(self, name):
+		"""What the R11 sweep does to a reply it could not confirm."""
+		from dialogbrain.sync.reconcile import UNCONFIRMED_ERROR
+
+		frappe.db.set_value("DB Message", name, {"delivery_status": "failed", "error": UNCONFIRMED_ERROR})
+
+	def test_failed_retry_inside_window_resends_identical_params_and_request_id(self):
+		"""Fix round 1: a failed row (the R11 sweep's "not confirmed") may have been sent
+		after all; only the identical params hit DialogBrain's cache entry."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-f", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._timeout_client(upload_file=lambda *a, **k: 4242))
+		self._sweep_fail(name)
+		self._age_attempt(name, last=timedelta(minutes=15))
+		self._retry(name)
+		self.assertEqual(self._send_state(name)["request_id"], "cref-f")
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-f",
+		)
+
+	def test_failed_retry_after_an_answered_failure_rebuilds_at_once(self):
+		"""Fix round 2: DialogBrain answered with a definite error (e.g. attachment
+		rejected): re-sending the same params can't help, so a new round, no settle wait."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-def", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._failing_client(upload_file=lambda *a, **k: 4242))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+		self._retry(name)  # immediately: the deliver that failed is over
+		self.assertIsNone(self._send_state(name))
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_called_once()
+		self.assertEqual(client.execute.call_args.kwargs["request_id"], "cref-def:r1")
+
+	def test_swept_failed_retry_within_the_settle_window_is_refused(self):
+		"""Fix round 2: a failed row whose attempt started < 2 min ago may still be in
+		flight (raced sweep): a Retry would start a second concurrent deliver."""
+		for caps in (True, False):  # also the Plan 1 path
+			self._caps(request_id=caps)
+			name = self._send(client_ref=f"cref-settle-{caps}")["name"]
+			self._deliver(name, self._timeout_client())
+			self._sweep_fail(name)
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._retry(name)
+			self.assertIn("minute", str(cm.exception))
+			self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+
+	def test_sweep_during_the_upload_phase_leaves_the_row_alone(self):
+		"""Fix round 2: the claim stamps the attempt before the (slow) uploads, so the sweep
+		does not fail a retried row with an old sent_at while its files upload."""
+		from frappe.utils import now_datetime
+
+		from dialogbrain.sync.reconcile import UNCONFIRMED_AFTER, _fail_unconfirmed
+
+		for caps in (True, False):
+			self._caps(request_id=caps)
+			name = self._send(client_ref=f"cref-up-{caps}", file_urls=[self._offer_file()])["name"]
+			frappe.db.set_value("DB Message", name, "sent_at", now_datetime() - timedelta(minutes=30))
+			seen = []
+
+			def upload(*a, _name=name, **k):
+				_fail_unconfirmed(self.conv, now_datetime() - UNCONFIRMED_AFTER)
+				seen.append(frappe.db.get_value("DB Message", _name, "delivery_status"))
+				return 4242
+
+			self._deliver(name, _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=upload))
+			self.assertEqual(seen, ["unknown"])
+			self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "sent")
+
+	def test_connect_error_does_not_clear_the_capability(self):
+		"""Fix round 2: no response was read, so a missing echo means nothing."""
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, _mock_client(
+			execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("DialogBrain request failed: DNS")),
+			answered_errors=False,
+		))
+		self.assertTrue(has_capability("request_id"))
+		self.assertFalse(self._send_state(name).get("request_id_ignored"))
+
+	def test_echo_check_is_committed_before_recording(self):
+		"""Fix round 2: request_id_ignored and the cleared capability are durable before
+		_record_sent, whose rollback must not discard them."""
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		seen = []
+		with patch("dialogbrain.sync.sender._commit") as commit, patch("frappe.log_error"):
+			commit.side_effect = lambda: seen.append(
+				(bool((self._send_state(name) or {}).get("request_id_ignored")), has_capability("request_id"))
+			)
+			self._deliver(name, _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), echo=False))
+		self.assertEqual(seen[-1], (True, False))
+
+	def test_failed_retry_outside_window_rebuilds_params_with_a_new_request_id(self):
+		"""Past 23 h DialogBrain may have dropped the entry: the attempt is rebuilt (fresh
+		upload) under a NEW request_id, so a surviving old entry can never stand in for a
+		message whose params changed."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-old", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._failing_client(upload_file=lambda *a, **k: 4242))
+		self._age_attempt(name, first=timedelta(hours=24))
+		self._retry(name)
+		self.assertIsNone(self._send_state(name))
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_called_once()
+		args, kwargs = client.execute.call_args
+		self.assertEqual(args[1]["attachments"], [9999])
+		self.assertNotEqual(kwargs["request_id"], "cref-old")
+		self.assertTrue(kwargs["request_id"].startswith("cref-old"))
+
+	def test_failed_retry_without_capability_is_plan_1(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._failing_client())
+		self._caps(request_id=False)
+		self._retry(name)
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(name, client)
+		self.assertEqual(client.execute.call_args.kwargs, {})
+
+	def test_ignored_request_id_clears_the_capability(self):
+		"""DialogBrain did not echo the request_id (e.g. rolled back): it does not dedupe,
+		so the capability is cleared and the row is never retried as unknown."""
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self._caps(request_id=True, agent_pause=True)
+		name = self._send()["name"]
+		with patch("frappe.log_error"):
+			self._deliver(name, _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), echo=False))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "sent")
+		self.assertTrue(self._send_state(name)["request_id_ignored"])
+		self.assertFalse(has_capability("request_id"))
+		self.assertTrue(has_capability("agent_pause"))
+		other = self._send(client_ref="cref-next")["name"]
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND))
+		self._deliver(other, client)
+		self.assertEqual(client.execute.call_args.kwargs, {})
+
+	def test_ignored_request_id_on_a_failure_is_not_reused(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		with patch("frappe.log_error"):
+			self._deliver(name, _mock_client(
+				execute=lambda *a, **k: (_ for _ in ()).throw(DialogBrainError("bad", code="x")), echo=False
+			))
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self.assertFalse(has_capability("request_id"))  # an answered tool error without echo
+		self._caps(request_id=True)  # even if it comes back
+		self._retry(name)
+		self.assertIsNone(self._send_state(name))
+
+	def test_ambiguous_outcome_class_is_recorded(self):
+		self._caps(request_id=True)
+		cases = (
+			(DialogBrainTimeout("read timeout"), "timeout"),
+			(DialogBrainError("HTTP 504", status=504), "http_504"),
+			(DialogBrainError("HTTP 502", status=502), "http_502"),
+			(DialogBrainError("HTTP 500", status=500), "http_500"),
+			(RuntimeError("boom"), "crash"),
+		)
+		for i, (exc, outcome) in enumerate(cases):
+			name = self._send(client_ref=f"cref-o{i}")["name"]
+
+			def raise_(*a, _exc=exc, **k):
+				raise _exc
+
+			with patch("frappe.log_error"):
+				self._deliver(name, _mock_client(execute=raise_))
+			self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+			self.assertEqual(self._send_state(name)["outcome"], outcome)
+
+	def test_messages_say_when_unknown_can_be_retried(self):
+		from dialogbrain.api.conversations import get_messages
+
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._deliver(name, self._timeout_client())
+
+		def flag():
+			rows = {m["name"]: m for m in get_messages(self.conv)["rows"]}
+			return rows[name]["can_retry"]
+
+		self.assertTrue(flag())
+		self._caps(request_id=False)
+		self.assertFalse(flag())
+
+	# --- final wave F2: double-send paths ----------------------------------------
+
+	def _raising(self, exc, **kw):
+		def raise_(*a, **k):
+			raise exc
+
+		return _mock_client(execute=raise_, **kw)
+
+	def test_only_tool_errors_and_client_http_errors_are_definite(self):
+		"""F2a: a parsed tool error and HTTP 400/401/403/404/422 are definite failures
+		(``failed``, ``answered``). Anything else may have been sent: never ``answered``."""
+		self._caps(request_id=True)
+		definite = [DialogBrainError("bad", code="x")] + [
+			DialogBrainError(f"HTTP {s}", status=s) for s in (400, 401, 403, 404, 422)
+		]
+		for i, exc in enumerate(definite):
+			name = self._send(client_ref=f"cref-def-{i}")["name"]
+			self._deliver(name, self._raising(exc))
+			raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+			self.assertEqual(
+				(frappe.db.get_value("DB Message", name, "delivery_status"), raw.get("last_outcome")),
+				("failed", "answered"),
+				str(exc),
+			)
+		ambiguous = [DialogBrainError(f"HTTP {s}", status=s) for s in (408, 409, 429, 499, 501, 503, 520, 522, 524)]
+		ambiguous.append(DialogBrainError("DialogBrain returned a non-JSON response", status=200))
+		for i, exc in enumerate(ambiguous):
+			name = self._send(client_ref=f"cref-amb-{i}")["name"]
+			with patch("frappe.log_error"):
+				self._deliver(name, self._raising(exc))
+			raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+			self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown", str(exc))
+			self.assertNotEqual(raw.get("last_outcome"), "answered", str(exc))
+			self.assertEqual(raw["send"]["request_id"], f"cref-amb-{i}")
+
+	def test_a_call_still_running_in_dialogbrain_is_not_a_failure(self):
+		"""Our first attempt timed out here but is still running there; the retry is answered
+		``request_in_progress``. A tool error, but NOT a definite one: rebuilding the attempt
+		under a new request_id would send the reply twice."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-busy", file_urls=[self._offer_file()])["name"]
+		busy = DialogBrainError("A call with this request_id is still running.", error_type="request_in_progress")
+		self._deliver(name, self._raising(busy, upload_file=lambda *a, **k: 4242))
+		raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "unknown")
+		self.assertNotEqual(raw.get("last_outcome"), "answered")
+		self.assertEqual(raw["send"]["outcome"], "in_progress")
+		from dialogbrain.setup.agent_integration import has_capability
+
+		self.assertTrue(has_capability("request_id"))
+		# the retry reuses the very same attempt, so DialogBrain can dedupe it
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._retry(name)
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-busy",
+		)
+
+	def test_non_definite_reply_is_retried_with_its_stored_attempt(self):
+		"""F2a: a 503 (or a 2xx without JSON) reuses the stored attempt after the settle
+		wait, so DialogBrain dedupes it if the first one went out."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-503", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._raising(DialogBrainError("HTTP 503", status=503), upload_file=lambda *a, **k: 4242))
+		with self.assertRaises(frappe.ValidationError):
+			self._retry(name)  # settle wait
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._retry(name)
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-503",
+		)
+
+	def test_no_response_row_reuses_its_stored_attempt_after_the_settle_wait(self):
+		"""F2c: a connection error (``no_response``) may have reached DialogBrain."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-nr", file_urls=[self._offer_file()])["name"]
+		self._deliver(name, self._raising(
+			DialogBrainError("DialogBrain request failed: reset"), answered_errors=False,
+			upload_file=lambda *a, **k: 4242,
+		))
+		raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+		self.assertEqual((frappe.db.get_value("DB Message", name, "delivery_status"), raw["last_outcome"]),
+			("failed", "no_response"))
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._retry(name)
+		self.assertIn("minute", str(cm.exception))
+		self._age_attempt(name, last=timedelta(minutes=5))
+		self._retry(name)
+		self.assertEqual(self._send_state(name)["request_id"], "cref-nr")
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 9999)
+		self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_called_once_with(
+			"messages.send",
+			{"thread_id": THREAD_ID, "text": LONG_TEXT, "attachments": [4242]},
+			request_id="cref-nr",
+		)
+
+	def test_store_send_state_aborts_when_an_echo_completed_the_row_during_upload(self):
+		"""F2b: the row is re-read under lock before the attempt is stored; an echo that
+		completed it during the (slow) upload means it was sent: do not send again."""
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-race", file_urls=[self._offer_file()])["name"]
+
+		def upload(*a, **k):
+			frappe.db.set_value("DB Message", name, {"db_id": "777", "delivery_status": "sent"})
+			return 4242
+
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=upload)
+		self._deliver(name, client)
+		client.execute.assert_not_called()
+		self.assertEqual(
+			tuple(frappe.db.get_value("DB Message", name, ["db_id", "delivery_status"])), ("777", "sent")
+		)
+
+	def test_store_send_state_aborts_when_the_row_left_unknown(self):
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-race2", file_urls=[self._offer_file()])["name"]
+
+		def upload(*a, **k):
+			self._sweep_fail(name)
+			return 4242
+
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=upload)
+		self._deliver(name, client)
+		client.execute.assert_not_called()
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+
+	def test_store_send_state_merges_into_the_current_raw(self):
+		self._caps(request_id=True)
+		name = self._send(client_ref="cref-merge", file_urls=[self._offer_file()])["name"]
+
+		def upload(*a, **k):
+			raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+			raw["written_meanwhile"] = 1
+			frappe.db.set_value("DB Message", name, "raw", json.dumps(raw))
+			return 4242
+
+		self._deliver(name, self._timeout_client(upload_file=upload))
+		raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
+		self.assertEqual(raw.get("written_meanwhile"), 1)
+		self.assertEqual(raw["send"]["request_id"], "cref-merge")
+
+	def _set_sent_at(self, name, ago):
+		from frappe.utils import now_datetime
+
+		frappe.db.set_value("DB Message", name, "sent_at", now_datetime() - ago, update_modified=False)
+
+	def test_echo_of_a_retry_hours_later_matches_by_its_attempt_time(self):
+		"""F2d: the echo of a retried reply comes ~now, hours after ``sent_at``: it is
+		matched within ±120 s of the attempt (``claimed_at`` / ``send.attempt_at``)."""
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._set_sent_at(name, timedelta(hours=3))
+		self._deliver(name, self._timeout_client())  # the (re)attempt is claimed now
+		_process_echo()
+		rows = self._rows()
+		self.assertEqual(len(rows), 1)
+		self.assertEqual((rows[0].name, rows[0].db_id, rows[0].delivery_status), (name, "27771418", "sent"))
+
+	def test_echo_far_from_both_sent_at_and_attempt_is_not_matched(self):
+		self._caps(request_id=True)
+		name = self._send()["name"]
+		self._set_sent_at(name, timedelta(hours=3))
+		self._deliver(name, self._timeout_client())
+		self._age_attempt(name, last=timedelta(minutes=30))
+		_process_echo()
+		self.assertEqual(len(self._rows()), 2)

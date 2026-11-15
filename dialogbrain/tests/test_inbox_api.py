@@ -46,6 +46,10 @@ _seq = [0]
 def _conv(channel, **fields):
 	_seq[0] += 1
 	doc = {"doctype": "DB Conversation", "thread_id": f"inbox-t{_seq[0]}", "channel": channel}
+	# stamped like a synced row (residual fix R1: an empty key is never identified)
+	from dialogbrain.instance import current_instance
+
+	doc["dialogbrain_instance"] = current_instance()
 	doc.update(fields)
 	return frappe.get_doc(doc).insert(ignore_permissions=True).name
 
@@ -78,6 +82,7 @@ class TestInboxApi(DialogBrainTestCase):
 		frappe.db.delete("DB Conversation")
 		frappe.db.delete("DB Channel User")
 		frappe.db.delete("DB Channel")
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", None)  # Plan 1 baseline
 		self.agent_a = _user("inbox-agent-a@example.com", "Chat Agent")
 		self.agent_b = _user("inbox-agent-b@example.com", "Chat Agent")
 		self.mgr = _user("inbox-mgr@example.com", "Chat Manager")
@@ -605,3 +610,175 @@ class TestInboxApi(DialogBrainTestCase):
 		self.assertEqual(_names(lc({"name": []})), {self.a_open_mine, self.a_open_unassigned})
 		with self.assertRaises(frappe.ValidationError):
 			lc({"name": [{"x": 1}]})
+
+	# --- take over / give back (Plan 3 B4) ---------------------------------------------
+
+	def _caps(self, **caps):
+		import json
+
+		frappe.db.set_single_value("DialogBrain Settings", "agent_capabilities", json.dumps(caps))
+
+	def _agent_call(self, fn, conversation, result=None, error=None):
+		from unittest.mock import MagicMock
+
+		client = MagicMock()
+		if error is not None:
+			client.execute.side_effect = error
+		else:
+			client.execute.return_value = result
+		with patch("dialogbrain.api.conversations.DialogBrainClient") as cls, patch(
+			"dialogbrain.api.conversations.publish"
+		) as pub:
+			cls.from_settings.return_value = client
+			out = fn(conversation)
+		return client, pub, out
+
+	def test_take_over_pauses_agent_and_sets_override(self):
+		self._caps(agent_pause=True)
+		thread = frappe.db.get_value("DB Conversation", self.a_open_mine, "thread_id")
+		frappe.set_user(self.agent_a)
+		client, pub, out = self._agent_call(
+			api.take_over, self.a_open_mine,
+			result={"thread_id": 5, "paused": True, "paused_at": "2026-11-14T10:00:00+00:00"},
+		)
+		client.execute.assert_called_once_with("threads.set_agent_paused", {"thread_id": thread, "paused": True})
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "agent_override"), "human")
+		self.assertEqual(out["agent_override"], "human")
+		self.assertEqual(out["agent"], {"paused": True, "paused_by": "operator", "paused_at": "2026-11-14T10:00:00+00:00"})
+		self.assertEqual(pub.call_args[0][:2], (self.a_open_mine, "conversation"))
+
+	def test_give_back_resumes_agent_and_sets_override(self):
+		self._caps(agent_pause=True)
+		frappe.db.set_value("DB Conversation", self.a_open_mine, "agent_override", "human")
+		frappe.set_user(self.agent_a)
+		client, pub, out = self._agent_call(
+			api.give_back, self.a_open_mine, result={"thread_id": 5, "paused": False, "paused_at": None}
+		)
+		self.assertEqual(client.execute.call_args[0][1]["paused"], False)
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "agent_override"), "agent")
+		self.assertEqual(out["agent"]["paused"], False)
+		pub.assert_called_once()
+
+	def test_take_over_by_channel_ref_when_thread_id_unknown(self):
+		self._caps(agent_pause=True)
+		frappe.db.set_value("DB Conversation", self.a_open_mine, {"thread_id": None, "thread_ref": "telegram:42"})
+		frappe.set_user(self.agent_a)
+		client, _, _ = self._agent_call(api.take_over, self.a_open_mine, result={"paused": True})
+		self.assertEqual(client.execute.call_args[0][1]["thread_id"], "telegram:42")
+
+	def test_take_over_needs_access(self):
+		self._caps(agent_pause=True)
+		frappe.set_user(self.agent_a)  # channel B is restricted to agent_b
+		for fn in (api.take_over, api.give_back, api.agent_status):
+			with self.assertRaises(frappe.PermissionError):
+				self._agent_call(fn, self.b_open, result={"paused": True})
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.b_open, "agent_override"), "default")
+
+	def test_take_over_without_capability_is_a_clear_error(self):
+		self._caps(agent_pause=False)
+		frappe.set_user(self.agent_a)
+		for fn in (api.take_over, api.give_back):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				client, _, _ = self._agent_call(fn, self.a_open_mine, result={"paused": True})
+			self.assertIn("doesn't support this yet", str(cm.exception))
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "agent_override"), "default")
+
+	def test_take_over_dialogbrain_error_changes_nothing(self):
+		from dialogbrain.client import DialogBrainError
+
+		self._caps(agent_pause=True)
+		frappe.set_user(self.agent_a)
+		with patch("frappe.log_error"), self.assertRaises(frappe.ValidationError) as cm:
+			self._agent_call(
+				api.take_over, self.a_open_mine,
+				error=DialogBrainError("needs the member role db_live_secret0000", error_type="permission_denied"),
+			)
+		self.assertNotIn("db_live_secret0000", str(cm.exception))
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.a_open_mine, "agent_override"), "default")
+
+	def test_agent_status(self):
+		self._caps(agent_pause=True)
+		frappe.set_user(self.agent_a)
+		client, _, out = self._agent_call(
+			api.agent_status, self.a_open_mine,
+			result={"thread_id": 5, "paused": True, "paused_by": None, "paused_at": "2026-11-14T10:00:00+00:00"},
+		)
+		client.execute.assert_called_once()
+		self.assertEqual(client.execute.call_args[0][0], "threads.get_agent_status")
+		self.assertEqual(
+			out, {"supported": True, "paused": True, "paused_by": None, "paused_at": "2026-11-14T10:00:00+00:00"}
+		)
+
+	def test_agent_status_without_capability_or_with_dialogbrain_down(self):
+		from dialogbrain.client import DialogBrainError
+
+		self._caps(agent_pause=False)
+		frappe.set_user(self.agent_a)
+		client, _, out = self._agent_call(api.agent_status, self.a_open_mine, result={})
+		self.assertEqual(out, {"supported": False})
+		client.execute.assert_not_called()
+		self._caps(agent_pause=True)
+		_, _, out = self._agent_call(api.agent_status, self.a_open_mine, error=DialogBrainError("HTTP 503", status=503))
+		self.assertTrue(out["supported"])
+		self.assertTrue(out["error"])
+
+	def test_get_conversation_exposes_capabilities(self):
+		self._caps(agent_pause=True, full_drafts=False, request_id=True)
+		frappe.set_user(self.agent_a)
+		perms = api.get_conversation(self.a_open_mine)["permissions"]
+		self.assertEqual((perms["agent_pause"], perms["full_drafts"]), (True, False))
+
+	def test_agent_status_uses_a_short_timeout_and_a_10s_cache(self):
+		self._caps(agent_pause=True)
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+		frappe.set_user(self.agent_a)
+		state = {"paused": True, "paused_by": "operator", "paused_at": "2026-11-14T10:00:00+00:00"}
+		client, _, first = self._agent_call(api.agent_status, self.a_open_mine, result=state)
+		self.assertEqual(client.timeout, 3)
+		client2, _, second = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client2.execute.assert_not_called()
+		self.assertEqual(second, first)
+		# a take-over / give-back clears it
+		self._agent_call(api.give_back, self.a_open_mine, result={"paused": False})
+		client3, _, third = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client3.execute.assert_called_once()
+		self.assertFalse(third["paused"])
+		frappe.cache().delete_value(f"dialogbrain_agent_status:{self.a_open_mine}")
+
+	def _clear_status_cache(self):
+		for prefix in ("dialogbrain_agent_status", "dialogbrain_agent_status_error"):
+			frappe.cache().delete_value(f"{prefix}:{self.a_open_mine}")
+
+	def test_agent_status_errors_are_cached_30s_under_their_own_key(self):
+		"""Final wave F6: a DialogBrain that is down is not asked again on every open
+		(each ask can take the whole timeout); a take over / give back clears it."""
+		from dialogbrain.client import DialogBrainError
+
+		self._caps(agent_pause=True)
+		self._clear_status_cache()
+		self.addCleanup(self._clear_status_cache)
+		frappe.set_user(self.agent_a)
+		cache = frappe.cache()
+		with patch.object(cache, "set_value", wraps=cache.set_value) as spy:
+			client, _, first = self._agent_call(api.agent_status, self.a_open_mine, error=DialogBrainError("down"))
+		self.assertEqual(client.timeout, 3)
+		self.assertTrue(first["error"])
+		(key, value), kwargs = spy.call_args
+		self.assertEqual((key, kwargs), (f"dialogbrain_agent_status_error:{self.a_open_mine}", {"expires_in_sec": 30}))
+		client2, _, second = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client2.execute.assert_not_called()
+		self.assertEqual(second, first)
+		# a take-over / give-back clears it
+		self._agent_call(api.give_back, self.a_open_mine, result={"paused": False})
+		client3, _, third = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": False})
+		client3.execute.assert_called_once()
+		self.assertFalse(third["paused"])
+
+	def test_agent_status_without_thread_is_an_error_result(self):
+		self._caps(agent_pause=True)
+		frappe.db.set_value("DB Conversation", self.a_open_mine, {"thread_id": None, "thread_ref": None})
+		frappe.set_user(self.agent_a)
+		client, _, out = self._agent_call(api.agent_status, self.a_open_mine, result={"paused": True})
+		client.execute.assert_not_called()
+		self.assertTrue(out["supported"])
+		self.assertTrue(out["error"])

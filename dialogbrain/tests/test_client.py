@@ -36,10 +36,42 @@ class TestClient(DialogBrainTestCase):
 		)
 		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer db_live_x")
 
+	def test_a_persons_calls_say_as_operator_and_nothing_else_does(self):
+		"""DialogBrain treats a REST call as an automation unless it says ``as_operator``:
+		a manager's reply and the take-over switch are a person's, a sync read is not."""
+		ok = make_response(200, {"success": True, "data": {}})
+		for tool, flagged in (
+			("messages.send", True),
+			("threads.set_agent_paused", True),
+			("integrations.set_thread_context", True),
+			("threads.get_agent_status", False),
+			("search.threads", False),
+			("agents.approve_draft", False),
+		):
+			with patch("requests.Session.request", return_value=ok) as req:
+				client().execute(tool, {})
+			self.assertEqual(req.call_args[1]["json"].get("as_operator"), True if flagged else None, tool)
+
 	def test_execute_passes_thread_id(self):
 		with patch("requests.Session.request", return_value=make_response(200, {"success": True, "data": []})) as req:
 			client().execute("messages.send", {"text": "x"}, thread_id="42")
 		self.assertEqual(req.call_args[1]["json"]["thread_id"], "42")
+
+	def test_execute_sends_request_id_and_records_the_echo(self):
+		body = {"success": True, "data": {"id": 1}, "request_id": "erp-abc"}
+		with patch("requests.Session.request", return_value=make_response(200, body)) as req:
+			c = client()
+			data = c.execute("workspace.current", {}, request_id="erp-abc")
+		self.assertEqual(data, {"id": 1})
+		self.assertEqual(req.call_args[1]["json"]["request_id"], "erp-abc")
+		self.assertEqual(c.last_request_id, "erp-abc")
+
+	def test_execute_without_request_id_sends_none_and_old_servers_echo_nothing(self):
+		with patch("requests.Session.request", return_value=make_response(200, {"success": True, "data": 1})) as req:
+			c = client()
+			c.execute("workspace.current", {})
+		self.assertNotIn("request_id", req.call_args[1]["json"])
+		self.assertIsNone(c.last_request_id)
 
 	def test_execute_returns_data(self):
 		body = load_fixture("search_threads")
@@ -54,6 +86,21 @@ class TestClient(DialogBrainTestCase):
 				client().execute("messages.send", {})
 		self.assertEqual(cm.exception.code, "Thread not found")
 		self.assertIsNone(cm.exception.status)
+
+	def test_execute_error_exposes_error_type(self):
+		body = {"success": False, "error": "needs the admin role", "error_type": "permission_denied"}
+		with patch("requests.Session.request", return_value=make_response(200, body)):
+			with self.assertRaises(DialogBrainError) as cm:
+				client().execute("integrations.set_thread_context", {})
+		self.assertEqual(cm.exception.error_type, "permission_denied")
+
+	def test_execute_error_without_error_type_is_none(self):
+		body = {"success": False, "error": "Thread not found"}
+		with patch("requests.Session.request", return_value=make_response(200, body)):
+			with self.assertRaises(DialogBrainError) as cm:
+				client().execute("messages.send", {})
+		self.assertIsNone(cm.exception.error_type)
+		self.assertIsNone(DialogBrainError("x").error_type)
 
 	def test_execute_raises_on_http_401(self):
 		with patch("requests.Session.request", return_value=make_response(401, {"detail": {"code": "INVALID_API_KEY", "message": "Invalid API key"}})):

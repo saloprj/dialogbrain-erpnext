@@ -410,6 +410,27 @@ export async function approveDraft(conv, draft, text = null) {
 	}
 }
 
+/** Plan 3: replace a draft's cut text with the full one before it is edited. Resolves to
+ * the updated draft, or null (superseded in DialogBrain, or an error Frappe showed). */
+export async function fetchFullDraft(conv, draft) {
+	let r;
+	try {
+		r = await api.getFullDraft(draft);
+	} catch (e) {
+		return null;
+	}
+	if (!r || r.status !== "pending") {
+		handleDraftResult(conv, draft, r, false);
+		return null;
+	}
+	const d = (store.drafts[conv] || []).find((x) => x.name === draft);
+	if (d) {
+		d.text = r.text;
+		d.truncated = false;
+	}
+	return d || { name: draft, text: r.text, truncated: false };
+}
+
 export async function rejectDraft(conv, draft) {
 	try {
 		const r = await api.rejectDraft(draft);

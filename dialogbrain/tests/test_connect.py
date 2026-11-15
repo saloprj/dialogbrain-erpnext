@@ -121,9 +121,13 @@ class TestConnect(DialogBrainTestCase):
 	def test_connect_happy_path_public(self):
 		client, result, enqueue = self._connect()
 
+		agent_tools = result.pop("agent_tools")
+		self.assertFalse(result.pop("agent_tools_ok"))
 		self.assertEqual(
 			result, {"workspace": "Test User", "channels": 8, "network_mode": "public", "warning": None}
 		)
+		# this key has no integration tools: reported, not fatal (test_agent_integration)
+		self.assertIn("not registered", agent_tools)
 		client.create_webhook.assert_called_once_with(HOOK_URL, EVENTS)
 		self.assertEqual(self._get("webhook_id"), "41")
 		secret = frappe.get_single(SETTINGS).get_password("webhook_secret")
@@ -350,6 +354,59 @@ class TestConnect(DialogBrainTestCase):
 		self.assertEqual(self._get("reconcile_status"), "1 thread failing")
 		self.assertEqual(frappe.get_single(SETTINGS).get_password("webhook_secret"), SECRET)
 		self.assertEqual(self._get("backfill_days"), 7)
+
+	# --- residual fix R2: key / address locked while connected --------------------------
+
+	def _stored_key(self):
+		return frappe.get_single(SETTINGS).get_password("api_key", raise_exception=False)
+
+	def test_form_save_of_a_new_key_while_connected_is_refused(self):
+		self._connect()
+		doc = frappe.get_single(SETTINGS)
+		doc.api_key = "db_live_otherworkspacekey0000"
+		with self.assertRaises(frappe.ValidationError) as cm:
+			doc.save()
+		self.assertIn("Disconnect first to change the DialogBrain key or address", str(cm.exception))
+		self.assertEqual(self._stored_key(), "db_live_testkey000000000000")
+
+	def test_form_save_of_a_new_address_while_connected_is_refused(self):
+		self._connect()
+		doc = frappe.get_single(SETTINGS)
+		doc.base_url = "https://api.other.example.com"
+		with self.assertRaises(frappe.ValidationError):
+			doc.save()
+		self.assertEqual(self._get("base_url"), "https://api.example.com")
+
+	def test_form_save_with_the_masked_key_while_connected_is_fine(self):
+		self._connect()
+		doc = frappe.get_single(SETTINGS)
+		self.assertTrue(doc.is_dummy_password(doc.api_key))  # what the form sends back
+		doc.backfill_days = 9
+		doc.save()
+		self.assertEqual(self._get("backfill_days"), 9)
+		self.assertEqual(self._stored_key(), "db_live_testkey000000000000")
+		doc = frappe.get_single(SETTINGS)
+		doc.api_key = "db_live_testkey000000000000"  # the same key typed again
+		doc.base_url = "https://api.example.com"
+		doc.save()
+
+	def test_form_save_of_a_new_key_while_disconnected_is_allowed(self):
+		doc = frappe.get_single(SETTINGS)
+		doc.api_key = "db_live_otherworkspacekey0000"
+		doc.base_url = "https://api.other.example.com"
+		doc.save()
+		self.assertEqual(self._stored_key(), "db_live_otherworkspacekey0000")
+		self.assertEqual(self._get("base_url"), "https://api.other.example.com")
+
+	def test_server_writes_may_still_change_the_key_while_connected(self):
+		"""The OAuth callback stores its new key with ``_server_save``."""
+		from dialogbrain.setup.connect import _server_save
+
+		self._connect()
+		doc = frappe.get_single(SETTINGS)
+		doc.api_key = "db_live_fromoauth000000000000"
+		_server_save(doc)
+		self.assertEqual(self._stored_key(), "db_live_fromoauth000000000000")
 
 	def test_form_save_changing_mode_reconfigures_webhook(self):
 		client, _, _ = self._connect()
