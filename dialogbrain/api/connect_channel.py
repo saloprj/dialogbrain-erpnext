@@ -24,7 +24,8 @@ from dialogbrain.permissions import INBOX_ROLES, is_manager
 
 CLAIM = "DB Channel Claim"
 KINDS = ("phone", "code", "password")
-WAITING = ("waiting_scan", "scanned", "need_code", "need_password", "need_pairing_code", "waiting_confirm")
+# every other status is a step of a connection still in progress (the list of steps may grow)
+ENDED = ("connected", "expired", "error")
 START_LIMIT = (10, 600)  # starts per user per seconds ("Start again" is a start)
 SUBMIT_LIMIT = (10, 600)  # submits per claim
 SECRET_MAX = 200
@@ -42,6 +43,10 @@ FAILED = "DialogBrain did not answer. Try again"
 
 
 # --- helpers ----------------------------------------------------------------
+
+
+def _waiting(status) -> bool:
+	return bool(status) and status not in ENDED
 
 
 def _require_role() -> None:
@@ -100,7 +105,9 @@ def _qr(value) -> dict:
 	import pyqrcode
 
 	buffer = io.BytesIO()
-	pyqrcode.create(value, error="M").svg(buffer, scale=5, quiet_zone=3, xmldecl=False, background="#ffffff")
+	pyqrcode.create(value, error="M").svg(
+		buffer, scale=5, quiet_zone=3, xmldecl=False, background="#ffffff", omithw=True
+	)  # omithw: a viewBox instead of a fixed size, so the page can scale it
 	return {"qr_svg": buffer.getvalue().decode("utf-8")}
 
 
@@ -113,14 +120,14 @@ def _state(claim, data=None, status=None, result=None) -> dict:
 		"claim": claim.name,
 		"channel_type": claim.channel_type,
 		"status": status,
-		"waiting": status in WAITING,
+		"waiting": _waiting(status),
 		"expires_in": max(left, 0),
 		"pairing_code": None,
 		"error": None,
 		"channel": None,
 		"message": None,
 	}
-	if status in WAITING:
+	if _waiting(status):
 		state.update(_qr(data.get("qr")))
 		code = data.get("pairing_code")
 		state["pairing_code"] = str(code)[:20] if code else None
@@ -278,7 +285,7 @@ def cancel(claim: str) -> dict:
 		if str(data.get("status") or "") == "connected" and data.get("account_id"):
 			claims.resolve(row.name, data)
 			return {"ok": True}
-		if str(data.get("status") or "") in WAITING:
+		if _waiting(str(data.get("status") or "")):
 			client.execute(connect_gate.CANCEL, {"session_id": row.session_id})
 	except DialogBrainError:
 		pass  # the session ends by itself in a few minutes

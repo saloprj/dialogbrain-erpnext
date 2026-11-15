@@ -173,6 +173,34 @@ delete the keys named `ERPNext — <host> MCP` in DialogBrain → Settings → D
 reconnect creates a new key with that name; while the site is connected, the newest one
 is in use.
 
+## Connecting a channel from ERPNext
+
+An employee can link their own WhatsApp or Telegram number without a DialogBrain login:
+**Chats → menu → Connect channel**, or the **Connect channel** button on the DB Channel list.
+
+- **Who:** Chat Agent, Chat Manager and System Manager. An agent connects only their own
+  number. A manager can also connect a number for an employee, or as a shared number.
+- **How:** scan a QR code; or, where DialogBrain offers it, enter a pairing code on the phone
+  (WhatsApp) or sign in with the phone number, the login code and the two-step password
+  (Telegram). A connection that is not finished in a few minutes expires; start it again.
+- **Whose chats:** the new channel is assigned to its owner (the channel's **Allowed users**),
+  so only that employee and the managers see its chats. A shared number has no allowed users
+  and every agent sees it. A manager can change this later on the DB Channel form. This
+  holds even if the browser is closed right after the scan: the assignment is finished on
+  the server within about a minute.
+- **In DialogBrain** the account belongs to the workspace of the site's API key, not to the
+  employee. "Only the owner and managers" is an ERPNext rule.
+- The phone number, the login code and the password are passed to DialogBrain once and are
+  never stored or logged in ERPNext.
+
+This needs a DialogBrain server with the `channels.connect_session.*` tools and a key with
+edit rights in the workspace. Until the server has them, the dialog says so and nothing else
+changes; the app checks every hour, and at Connect / Re-sync. Disconnecting a number is done
+in DialogBrain.
+
+To look at the dialog without a real DialogBrain, `dev/fake_connect_server.py` plays the
+server's part on a dev site (see the file's header).
+
 ## AI agent and ERPNext data
 
 After you connect, DialogBrain's AI agents can look things up in ERPNext while they answer

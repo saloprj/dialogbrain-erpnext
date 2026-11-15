@@ -20,14 +20,20 @@ frappe.provide("frappe.dialogbrain");
 	const call = (method, args) =>
 		frappe.call({ method: API + method, type: "POST", args: args || {}, silent: true }).then((r) => r.message);
 
+	// text only: a server message is shown with .text(), never as markup
+	const plain = (html) => new DOMParser().parseFromString(String(html), "text/html").body.textContent || "";
+
+	// The server's own sentence (frappe.throw) when there is one, else a general one.
 	const errorText = (err) => {
+		const body = (err && err.responseJSON) || err || {};
 		try {
-			const messages = JSON.parse((err && err._server_messages) || "[]");
+			const messages = JSON.parse(body._server_messages || "[]");
 			const first = messages.length ? JSON.parse(messages[0]) : null;
-			if (first && first.message) return frappe.utils.strip_html(first.message);
+			if (first && first.message) return plain(first.message);
 		} catch (e) {
 			// fall through
 		}
+		if (Array.isArray(err && err.messages) && err.messages.length) return plain(err.messages[0]);
 		return __("DialogBrain did not answer. Try again");
 	};
 
@@ -288,7 +294,7 @@ frappe.provide("frappe.dialogbrain");
 			} else if (state.pairing_code) {
 				note(__("On the phone open {0} → Linked devices → Link with phone number, and enter this code:", [name]));
 				$('<div class="dialogbrain-connect-code"></div>').text(state.pairing_code).appendTo(live);
-			} else if (state.status === "need_pairing_code" || (this.method !== "qr" && !state.qr_svg && !state.qr_image)) {
+			} else if (state.status === "need_pairing_code" || state.status === "need_phone" || (this.method !== "qr" && !state.qr_svg && !state.qr_image)) {
 				note(__("Enter the phone number of the account, with the country code."));
 				this.input("phone", __("Phone number"), "tel");
 			} else if (state.qr_svg || state.qr_image) {
