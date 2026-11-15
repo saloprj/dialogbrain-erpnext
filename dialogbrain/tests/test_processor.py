@@ -684,16 +684,24 @@ class TestProcessor(DialogBrainTestCase):
 		)
 		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
 
-	def test_message_deleted_unknown_conversation_falls_back_only_on_unique_id(self):
+	def test_message_deleted_in_a_named_but_unknown_chat_marks_nothing(self):
+		"""The event names a chat that is not mirrored: its message cannot be here, so a
+		row with the same id belongs to another chat (Telegram counts ids per chat)."""
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)  # telegram:7000001, unique on the account
+		process_event(
+			"message.deleted",
+			{"channel": "telegram", "account_id": "155", "thread_id": "telegram:telegram:999999",
+			 "message_ids": ["telegram:7000001"]},
+		)
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+
+	def test_message_deleted_without_a_thread_falls_back_only_on_unique_id(self):
 		from dialogbrain.sync.processor import process_event
 
 		_process(GROUP)
-		event = {
-			"channel": "telegram",
-			"account_id": "155",
-			"thread_id": "telegram:telegram:999999",  # never mirrored
-			"message_ids": ["telegram:7000001"],
-		}
+		event = {"channel": "telegram", "account_id": "155", "message_ids": ["telegram:7000001"]}
 		# the id exists in a second chat of the same account -> ambiguous, untouched
 		_process(INBOUND, message_id="telegram:7000001")
 		process_event("message.deleted", copy.deepcopy(event))

@@ -195,9 +195,10 @@ def _on_message_deleted(data):
 		names = frappe.get_all(
 			"DB Message", filters={"conversation": conversation, "message_id": ["in", ids]}, pluck="name"
 		)
-	elif channel:
-		# Conversation unknown: an id counts only when exactly one row of this
-		# account carries it (otherwise it could be another chat's message).
+	elif channel and not ref:
+		# No chat named: an id counts only when exactly one row of this account carries
+		# it (otherwise it could be another chat's message). A chat that is named but not
+		# mirrored has none of its messages here: nothing to mark.
 		rows = frappe.get_all(
 			"DB Message",
 			filters={
