@@ -198,6 +198,8 @@ def upsert_channel(
 			}
 		)
 	)
+	if owners:
+		claims.announce(account_id)
 	return account_id
 
 

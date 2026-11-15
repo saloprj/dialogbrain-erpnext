@@ -116,9 +116,15 @@ def close(claim_name, status) -> None:
 # --- resolve ----------------------------------------------------------------
 
 
-def _after_connect(channel) -> None:
-	"""The inbox learns about the channel now; its agent mode is read in the background."""
-	frappe.publish_realtime("dialogbrain_channel_connected", {"channel": channel}, after_commit=True)
+def announce(channel) -> None:
+	"""Tell the inboxes of the people who may see ``channel`` that it exists now; its agent
+	mode is read in the background (the hourly job would get to it anyway)."""
+	from dialogbrain.sync.notify import REALTIME_PREFIX, realtime_users
+
+	for user in realtime_users(channel):
+		frappe.publish_realtime(
+			REALTIME_PREFIX + "channel_connected", {"channel": channel}, user=user, after_commit=True
+		)
 	try:
 		frappe.enqueue(
 			"dialogbrain.setup.agent_modes.sync",
@@ -128,7 +134,7 @@ def _after_connect(channel) -> None:
 			deduplicate=True,
 		)
 	except Exception:
-		pass  # the hourly job reads it
+		pass
 
 
 def resolve(claim_name, state: dict) -> dict:
@@ -167,7 +173,7 @@ def resolve(claim_name, state: dict) -> dict:
 
 	if claim.status != "connected":
 		_close(claim, "connected", account_id=account_id, keep=channel)
-		_after_connect(channel)
+		announce(channel)
 	return {"channel": channel, "assigned": assigned, "message": message}
 
 
@@ -214,9 +220,8 @@ def on_new_channel(account_id, channel_type, external_ref=None, client=None) -> 
 				match = claim
 				break
 	if match:
-		# upsert_channel inserts the row right after this; resolve() would insert it too.
+		# upsert_channel inserts the row right after this (and announces it).
 		_close(match, "connected", account_id=account_id, keep=account_id)
-		_after_connect(account_id)
 		return [match.owner_user] if match.owner_user else []
 
 	# Not matched yet: closed for the owners of the open claims until they are settled.

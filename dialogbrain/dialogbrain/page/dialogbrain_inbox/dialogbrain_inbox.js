@@ -34,6 +34,9 @@ function setupSoundMenu(page) {
 	const db = frappe.dialogbrain || {};
 	if (!db.soundEnabled || !db.setSoundEnabled) return;
 	page.clear_menu();
+	if (db.connect_channel && db.connect_channel.canConnect()) {
+		page.add_menu_item(__("Connect channel"), () => db.connect_channel.open());
+	}
 	const on = db.soundEnabled();
 	page.add_menu_item(on ? __("Mute new-message sound") : __("Unmute new-message sound"), () => {
 		db.setSoundEnabled(!on);

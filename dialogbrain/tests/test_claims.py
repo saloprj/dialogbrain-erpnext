@@ -88,9 +88,13 @@ class TestClaims(DialogBrainTestCase):
 		with patch("dialogbrain.claims.frappe.publish_realtime") as publish:
 			claims.resolve(name, {"account_id": A1})
 			claims.resolve(name, {"account_id": A1})
-		ours = [c for c in publish.call_args_list if c.args[:1] == ("dialogbrain_channel_connected",)]
-		self.assertEqual(len(ours), 1)
-		self.assertEqual((ours[0].args[1], ours[0].kwargs), ({"channel": A1}, {"after_commit": True}))
+		ours = [c for c in publish.call_args_list if c.args[:1] == ("dialogbrain:channel_connected",)]
+		users = [c.kwargs["user"] for c in ours]
+		self.assertEqual(len(users), len(set(users)))  # once per person
+		self.assertIn(self.agent, users)
+		self.assertIn(self.manager, users)
+		self.assertNotIn(self.other, users)
+		self.assertTrue(all(c.args[1] == {"channel": A1} and c.kwargs["after_commit"] for c in ours))
 
 	# --- sweep: nobody is polling ---
 

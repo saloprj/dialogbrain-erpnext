@@ -116,3 +116,43 @@
 .dialogbrain-chats-navbar .dialogbrain-chats-label {
 	flex: 0 0 auto;
 }
+
+/* "Connect channel" dialog */
+.dialogbrain-connect-note {
+	margin: 0 0 var(--margin-sm);
+}
+.dialogbrain-connect-qr {
+	display: flex;
+	justify-content: center;
+	margin: var(--margin-md) 0;
+}
+.dialogbrain-connect-qr svg,
+.dialogbrain-connect-qr img {
+	width: min(260px, 70vw);
+	height: auto;
+	background: #fff;
+	border-radius: var(--border-radius-md);
+}
+.dialogbrain-connect-code {
+	font-family: var(--font-family-monospace, monospace);
+	font-size: 28px;
+	font-weight: 600;
+	letter-spacing: 4px;
+	text-align: center;
+	margin: var(--margin-md) 0;
+	user-select: all;
+}
+.dialogbrain-connect-input {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--margin-sm);
+	align-items: center;
+	margin: var(--margin-sm) 0 var(--margin-md);
+}
+.dialogbrain-connect-input label {
+	flex: 1 0 100%;
+	margin: 0;
+}
+.dialogbrain-connect-input input {
+	flex: 1 1 180px;
+}
