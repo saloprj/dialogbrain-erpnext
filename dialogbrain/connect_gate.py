@@ -65,11 +65,12 @@ def stored_value(client, tools=None) -> "str | None":
 
 
 def refresh(client=None) -> "dict | None":
-	"""Re-read and store. A failing read keeps the previous value."""
-	client = client or DialogBrainClient.from_settings()
+	"""Re-read and store. A failing read (DialogBrain down, no key) keeps the previous value:
+	the hourly agent-mode sync already reports an unreachable DialogBrain."""
 	try:
+		client = client or DialogBrainClient.from_settings()
 		found = read(client)
-	except DialogBrainError:
+	except Exception:
 		return options()
 	frappe.db.set_single_value(
 		SETTINGS, FIELD, json.dumps(found, sort_keys=True) if found else None, update_modified=False
