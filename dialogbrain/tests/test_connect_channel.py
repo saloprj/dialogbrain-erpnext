@@ -229,6 +229,22 @@ class TestConnectChannel(DialogBrainTestCase):
 		api.cancel(waiting)  # again: nothing more
 		self.assertEqual(len(self.fake.of(connect_gate.CANCEL)), 1)
 
+	def test_cancel_racing_a_connection_keeps_the_number(self):
+		name = api.start("whatsapp")["claim"]
+		real = self.fake.execute
+
+		def execute(tool_id, params, **kwargs):
+			if tool_id == connect_gate.CANCEL:  # connected a moment before: cancel is a no-op
+				self.fake.calls.append((tool_id, dict(params)))
+				self.fake.connect("sess-1", A1)
+				return {"ok": True}
+			return real(tool_id, params, **kwargs)
+
+		with patch.object(self.fake, "execute", side_effect=execute):
+			api.cancel(name)
+		self.assertEqual(self.row(name).status, "connected")
+		self.assertEqual(fk.allowed(A1), [self.agent])
+
 	def test_cancel_when_dialogbrain_is_unreachable_decides_nothing(self):
 		from dialogbrain import claims
 

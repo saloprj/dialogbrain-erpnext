@@ -194,6 +194,8 @@ An employee can link their own WhatsApp or Telegram number without a DialogBrain
   DialogBrain says it was nobody's (a number connected in DialogBrain itself). If DialogBrain
   could not be asked, it stays for managers only: choose its allowed users, or untick the
   box, on the DB Channel form.
+- A Chat Agent sees, in the DB Channel list too, only the channels whose chats they may
+  see (a channel's name is a phone number).
 - A number that is already a shared channel is not taken away from the other agents when
   one of them scans it again; a manager assigns it.
 - **In DialogBrain** the account belongs to the workspace of the site's API key, not to the

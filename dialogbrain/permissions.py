@@ -87,6 +87,19 @@ def _channel_in(column, user):
 	return f"{column} in ({', '.join(frappe.db.escape(c) for c in channels)})"
 
 
+def channel_query(user=None):
+	"""A Chat Agent lists only the channels whose chats they may see: a channel's id and
+	title are a phone number, also for a number that is someone else's or managers-only."""
+	return _channel_in("`tabDB Channel`.`name`", user)
+
+
+def channel_has_permission(doc, ptype=None, user=None, **kwargs):
+	user = user or frappe.session.user
+	if doc is None:
+		return True
+	return _can_see_channel(doc if isinstance(doc, str) else _doc_get(doc, "name"), user)
+
+
 def conversation_query(user=None):
 	return _channel_in("`tabDB Conversation`.`channel`", user)
 

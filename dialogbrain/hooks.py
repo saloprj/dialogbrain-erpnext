@@ -26,6 +26,7 @@ after_install = "dialogbrain.install.after_install"
 before_uninstall = "dialogbrain.install.before_uninstall"
 
 permission_query_conditions = {
+	"DB Channel": "dialogbrain.permissions.channel_query",
 	"DB Conversation": "dialogbrain.permissions.conversation_query",
 	"DB Message": "dialogbrain.permissions.message_query",
 	"DB Draft": "dialogbrain.permissions.draft_query",
@@ -34,6 +35,7 @@ permission_query_conditions = {
 }
 
 has_permission = {
+	"DB Channel": "dialogbrain.permissions.channel_has_permission",
 	"DB Conversation": "dialogbrain.permissions.conversation_has_permission",
 	"DB Message": "dialogbrain.permissions.message_has_permission",
 	"DB Draft": "dialogbrain.permissions.draft_has_permission",

@@ -111,6 +111,9 @@ The review of PR #10 found that the v2 rules could still open a personal number 
 - **Cancel decides nothing when DialogBrain cannot be asked.** The claim stays open for the sweep.
 - **A start that times out keeps its claim open**, without a session id. The claim and the session id are committed as soon as they exist.
 - **The sweep is a background job** started by the tick and by `upsert_channel`. It uses a 5 s timeout, takes the claims nearest to expiry first, stops after two unanswered calls, and one failing claim does not stop the rest. A claim past its grace period is asked about once more before it is closed.
+- **Only DialogBrain's `expired` or `error` confirms "not connected".** A session that still answers with a waiting step (someone left at the login code or the password) keeps its claim open and its channels restricted, for up to a day. An error DialogBrain returns for one session (it no longer knows it) closes that claim unconfirmed after the grace period and does not stop the sweep. Only an unreachable DialogBrain stops it.
+- **Cancel re-reads the session after cancelling**, because it may have connected between the two calls.
+- **A Chat Agent lists only the channels whose chats they may see.** A channel's id and title are a phone number, so `DB Channel` now has the same permission query as conversations.
 - **An existing open (shared) channel is not taken over** by an employee who scans it again. They are told a manager can assign it.
 
 ## Testing

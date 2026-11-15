@@ -32,7 +32,7 @@ from frappe import _
 from frappe.utils import get_datetime, now_datetime
 
 from dialogbrain import compat
-from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
 from dialogbrain.connect_gate import GET
 
 CLAIM = "DB Channel Claim"
@@ -268,6 +268,14 @@ def tick() -> None:
 		enqueue_sweep()
 
 
+def unreachable(exc) -> bool:
+	"""DialogBrain itself did not answer (timeout, connection), as opposed to an error it
+	returned for this one call."""
+	if isinstance(exc, DialogBrainTimeout):
+		return True
+	return not any(getattr(exc, name, None) for name in ("status", "code", "error_type"))
+
+
 def _settle(claim, client, now) -> bool:
 	"""Ask DialogBrain about one open claim. True when it got connected."""
 	past = _age_past_expiry(claim, now)
@@ -279,20 +287,30 @@ def _settle(claim, client, now) -> bool:
 		return False
 	try:
 		state = client.execute(GET, {"session_id": claim.session_id}) or {}
-	except DialogBrainError:
-		if past > GIVE_UP_SECONDS:
-			close(claim.name, "expired")  # not confirmed: its channels stay restricted
-		raise
+	except DialogBrainError as exc:
+		if unreachable(exc):
+			if past > GIVE_UP_SECONDS:
+				close(claim.name, "expired")  # not confirmed: its channels stay restricted
+			raise
+		# DialogBrain answered, but not about the session (it no longer knows it, the key
+		# lost its rights...): this claim's problem only, and no proof that it did not connect
+		if past > GRACE_SECONDS:
+			close(claim.name, "expired")
+		return False
 	status = _s(state.get("status"))
 	if status == "connected" and _s(state.get("account_id")):
 		resolve(claim.name, state)
 		return True
 	if status == "error":
 		close(claim.name, "failed", confirmed=True)
-	elif status == "expired" or past > GRACE_SECONDS:
-		# DialogBrain answered and the session is not connected (a connected one keeps
-		# answering ``connected``)
+	elif status == "expired":
+		# DialogBrain's own word that the session ended without connecting (a connected one
+		# keeps answering ``connected``)
 		close(claim.name, "expired", confirmed=True)
+	elif past > GIVE_UP_SECONDS:
+		close(claim.name, "expired")
+	# any other status: the session is still alive in DialogBrain (someone may be typing a
+	# login code in another tab, or left at the password step); it can still connect
 	return False
 
 
@@ -300,7 +318,7 @@ def sweep(client=None) -> int:
 	"""Settle open claims nobody is polling. Returns how many got connected.
 
 	Bounded: a short timeout per call, the claims nearest to expiry first, and it stops
-	when DialogBrain does not answer. One failing claim does not stop the others."""
+	when DialogBrain is unreachable. One failing claim does not stop the others."""
 	if not frappe.db.exists(CLAIM, {"status": "open"}):
 		return 0
 	if not compat.single_values(SETTINGS, ["connected"]).connected:
@@ -315,7 +333,7 @@ def sweep(client=None) -> int:
 		frappe.db.savepoint(save_point)
 		try:
 			connected += bool(_settle(claim, client, now))
-		except DialogBrainError:
+		except DialogBrainError:  # unreachable (see _settle): the rest would wait in vain too
 			errors += 1
 			if errors >= SWEEP_MAX_ERRORS:
 				break

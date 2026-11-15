@@ -6,7 +6,7 @@ import frappe
 from frappe.utils import add_to_date, now_datetime
 
 from dialogbrain import claims
-from dialogbrain.client import DialogBrainError
+from dialogbrain.client import DialogBrainError, DialogBrainTimeout
 from dialogbrain.sync.upsert import upsert_channel
 from dialogbrain.tests import connect_fakes as fk
 from dialogbrain.tests.utils import DialogBrainTestCase
@@ -120,12 +120,47 @@ class TestClaims(DialogBrainTestCase):
 	def test_sweep_asks_before_closing_an_old_claim(self):
 		old = add_to_date(now_datetime(), seconds=-(claims.GRACE_SECONDS + 5))
 		late = fk.claim(self.agent, expires_at=old)  # connected, but the sweep came late
-		dead = fk.claim(self.other, session_id="sess-2", expires_at=old)
+		alive = fk.claim(self.other, session_id="sess-2", expires_at=old)
 		self.fake.connect("sess-1", A1)
-		self.fake.sessions["sess-2"] = {"status": "waiting_scan"}
+		self.fake.sessions["sess-2"] = {"status": "need_password"}  # left at the 2FA step
+		upsert_channel(A2, "whatsapp")
 		claims.sweep()
-		self.assertEqual((self.status(late), self.status(dead)), ("connected", "expired"))
+		self.assertEqual((self.status(late), self.status(alive)), ("connected", "open"))
 		self.assertEqual(fk.allowed(A1), [self.agent])
+		self.assertEqual(self.restricted(A2), 1)  # a live session can still connect as A2
+		self.fake.connect("sess-2", A2)
+		claims.sweep()
+		self.assertEqual((fk.allowed(A2), self.restricted(A2)), ([self.other], 0))
+
+	def test_sweep_gives_up_on_a_session_alive_for_a_day(self):
+		old = add_to_date(now_datetime(), seconds=-(claims.GIVE_UP_SECONDS + 5))
+		name = fk.claim(self.agent, expires_at=old)
+		self.fake.sessions["sess-1"] = {"status": "need_code"}
+		upsert_channel(A1, "whatsapp")
+		claims.sweep()
+		self.assertEqual((self.status(name), self.restricted(A1)), ("expired", 1))
+
+	def test_a_tool_error_is_one_claims_problem(self):
+		old = add_to_date(now_datetime(), seconds=-(claims.GRACE_SECONDS + 5))
+		lost = [fk.claim(self.other, session_id=f"sess-lost-{i}", expires_at=old) for i in range(3)]
+		fresh = fk.claim(self.other, session_id="sess-lost-new")
+		good = fk.claim(self.agent, session_id="sess-1")
+		upsert_channel(A2, "whatsapp")
+		self.fake.connect("sess-1", A1)
+		real = self.fake.execute
+
+		def execute(tool_id, params, **kwargs):
+			if str(params.get("session_id", "")).startswith("sess-lost"):
+				self.fake.calls.append((tool_id, dict(params)))
+				raise DialogBrainError("session not found", code="not_found")
+			return real(tool_id, params, **kwargs)
+
+		with patch.object(self.fake, "execute", side_effect=execute):
+			self.assertEqual(claims.sweep(), 1)
+		self.assertEqual(self.status(good), "connected")
+		self.assertEqual({self.status(n) for n in lost}, {"expired"})
+		self.assertEqual(self.status(fresh), "open")
+		self.assertEqual(self.restricted(A2), 1)  # "not found" is no proof it did not connect
 
 	def test_sweep_closes_sessions_dialogbrain_ended(self):
 		gone = fk.claim(self.agent, session_id="sess-gone")
@@ -148,7 +183,7 @@ class TestClaims(DialogBrainTestCase):
 	def test_sweep_stops_when_dialogbrain_does_not_answer(self):
 		for i in range(6):
 			fk.claim(self.agent, session_id=f"sess-{i}")
-		self.fake.fail[claims.GET] = DialogBrainError("down")
+		self.fake.fail[claims.GET] = DialogBrainTimeout("down")
 		claims.sweep()
 		self.assertEqual(len(self.fake.of(claims.GET)), claims.SWEEP_MAX_ERRORS)
 
@@ -265,6 +300,26 @@ class TestClaims(DialogBrainTestCase):
 		claims.sweep()
 		self.assertEqual(self.status(later), "expired")
 		self.assertEqual((self.restricted(A1), self.restricted(A2)), (1, 0))
+
+	def test_agents_list_only_their_channels(self):
+		from dialogbrain.permissions import channel_has_permission
+
+		upsert_channel(A1, "whatsapp", check_claims=False)
+		claims._set_allowed(A1, [self.other])
+		fk.claim(self.agent)
+		upsert_channel(A2, "whatsapp")  # managers only
+		upsert_channel(fk.PREFIX + "3", "whatsapp", check_claims=False)  # shared
+		seen = {}
+		for user in (self.agent, self.other, self.manager):
+			frappe.set_user(user)
+			seen[user] = set(frappe.get_list("DB Channel", filters={"name": ["like", fk.PREFIX + "%"]}, pluck="name"))
+		frappe.set_user("Administrator")
+		self.assertEqual(seen[self.agent], {fk.PREFIX + "3"})
+		self.assertEqual(seen[self.other], {A1, fk.PREFIX + "3"})
+		self.assertEqual(seen[self.manager], {A1, A2, fk.PREFIX + "3"})
+		self.assertFalse(channel_has_permission(frappe.get_doc("DB Channel", A2), user=self.agent))
+		self.assertFalse(channel_has_permission(A1, user=self.agent))
+		self.assertTrue(channel_has_permission(A1, user=self.other))
 
 	def test_shared_claims_do_not_close_a_channel(self):
 		fk.claim(None, requested_by=self.manager)

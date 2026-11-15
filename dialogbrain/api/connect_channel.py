@@ -307,6 +307,13 @@ def cancel(claim: str) -> dict:
 			return {"ok": True}
 		if _waiting(str(data.get("status") or "")):
 			client.execute(connect_gate.CANCEL, {"session_id": row.session_id})
+			# it may have connected between the two calls (cancel does nothing then)
+			data = client.execute(connect_gate.GET, {"session_id": row.session_id}) or {}
+			if str(data.get("status") or "") == "connected" and data.get("account_id"):
+				claims.resolve(row.name, data)
+				return {"ok": True}
+			if _waiting(str(data.get("status") or "")):
+				return {"ok": True}  # still alive in DialogBrain: the sweep settles it
 	except DialogBrainError:
 		# Not known whether it connected: the claim stays open and the background sweep
 		# settles it. Closing it here could leave a just-connected number without its owner.
