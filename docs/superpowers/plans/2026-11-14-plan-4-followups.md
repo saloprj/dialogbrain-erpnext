@@ -40,3 +40,29 @@ Seen along the way: the PR branch is 58 commits behind main; while it ran, one o
 - `agent_options` writes behind a read-like name; `_reason` duplicates `_agent_reason`; no `opened_at` index for reports; by-channel report hides groups with only current-state counts.
 - uk «Створено о» for "Created At" (Frappe v16 wording) reads oddly as a column label; bound `:title="'…'"` literals are not covered by the Vue literal test.
 - Some commits carry Sonnet/Opus co-author trailers (written by subagents).
+
+## Pre-merge review of the whole stack (2026-11-15)
+Three independent reviewers read the code at the tip (sync core, inbox, agent tools). Six serious defects, all reproduced by a failing test and fixed before the merge:
+- `message.deleted` could mark a message of another chat (ids are unique per chat only). An event that names a chat marks nothing outside it; the account-wide search is left for events with no chat, and only for a unique id.
+- Connecting to a different DialogBrain server merged its threads into the mirrored rows. Connect now refuses while chats of another instance (or never-stamped ones) are present, unless the admin confirms "same server and workspace at a new address"; a confirmed Connect re-stamps rows of the old key and drops verified party links, manual ones included, to `auto_unverified`.
+- A Chat Manager could change a conversation's party link or thread id through the form or the REST API and so release another customer's data to the agent. `DBConversation.validate` now refuses changes to identity and link fields except for System Manager and the app's own sync.
+- Agent draft orders ignored the customer's price list.
+- "Approve" on an AI draft always failed (the browser sends `text=""`); `approve_draft` has an explicit `edited` flag.
+- A reply with tag-like text (`Ivan <ivan@example.com>`) reached the customer altered. Message, draft and note text, the list preview and the delivery error are Code fields with `ignore_xss_filter`: stored and sent as typed, escaped or sanitised wherever shown. Sync refuses `<`/`>` in keys and contact fields.
+Also fixed: quick-reply `{customer_name}` needs read access to the party; an `auto_verified` link is downgraded when the phone stops matching exactly one party; the OAuth state is checked before it is consumed; a non-numeric stored trigger id gets the "refresh" message.
+
+Left open by that review:
+- A webhook body can be replayed once its delivery id leaves the 14-day log.
+- Any Chat Agent can read DB Channel rows (metadata, allowed users) through `/api/resource`.
+- Orders, invoices and totals shown to the agent cover every company; draft orders use the channel's company.
+- Take over / agent status on a conversation of a previous instance sends its thread id to the current one.
+- `create_lead` in a chat with an unverified Lead link returns that Lead's name.
+- A late `handoff.requested` (conversation mirrored after 5 retries) is lost.
+- Leftover rows of a third instance make every later Connect ask the same-server question until they are deleted.
+- Not checked: whether `/api/resource` on the child tables (DB Message Attachment, DB Channel User) applies the parent's permission conditions.
+
+## DialogBrain PR #5382: independent review (2026-11-15)
+- Critical, fixed on the PR branch: a member below admin could re-point an existing integration (by id or by name, or through a path like `/https://host/x`) at another host with its auth, signing secret and `send_thread_context` kept. `add_endpoints` now refuses an origin change, an unreadable address, a non-http_openapi integration, and filling an empty address on a row that has credentials or the flag; `call_tool` refuses any request off the integration's origin before auth or signing.
+- The run's thread is looked up by id only.
+- Open on the DialogBrain side: REST callers can skip the `agents.*` role gate by sending `metadata.ai_agent_id` (already on main; affects `get_draft`, `list_drafts`, `approve_draft`); `integrations.set_auth` has no admin check; on shared hosts "same origin" is not "same owner" (path prefix, `../` in path parameters); the realtime token mint URL is not origin-checked; `request_id` does not stop a second run after a timeout for tools without reconcile (`messages.press_button`, `calls.make`).
+
