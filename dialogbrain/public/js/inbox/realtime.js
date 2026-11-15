@@ -29,6 +29,8 @@ import {
 	patchRow,
 	inboxActive,
 	markSelectedReadIfUnread,
+	loadList,
+	loadListMeta,
 } from "./store.js";
 
 const DEBOUNCE_MS = 300;
@@ -152,12 +154,19 @@ function onDraft(d) {
 	if (d && isOpen(d.conversation)) debounced("drafts:" + d.conversation, () => loadDrafts(d.conversation));
 }
 
+function onChannelConnected() {
+	loadListMeta();
+	loadList();
+}
+
 const HANDLERS = {
 	"dialogbrain:conversation": onConversation,
 	"dialogbrain:message": onMessage,
 	"dialogbrain:message_updated": onMessageUpdated,
 	"dialogbrain:message_removed": onMessageRemoved,
 	"dialogbrain:draft": onDraft,
+	// a number was connected from ERPNext: the channel filter and the list learn about it
+	"dialogbrain:channel_connected": onChannelConnected,
 };
 
 /** Subscribe; returns the unsubscribe function (call it when the page is destroyed). */

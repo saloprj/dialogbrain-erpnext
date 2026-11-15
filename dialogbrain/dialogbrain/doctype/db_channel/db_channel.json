@@ -18,6 +18,7 @@
   "agent_mode_status",
   "agent_mode_synced_at",
   "enabled",
+  "restricted",
   "allowed_users"
  ],
  "fields": [
@@ -101,6 +102,13 @@
    "fieldtype": "Table",
    "label": "Allowed Users",
    "options": "DB Channel User"
+  },
+  {
+   "fieldname": "restricted",
+   "fieldtype": "Check",
+   "label": "Managers only",
+   "default": "0",
+   "description": "Only managers see this channel's chats, until allowed users are chosen. Set when a number appears while an employee is connecting one and it is not yet known whose it is."
   }
  ],
  "links": [],

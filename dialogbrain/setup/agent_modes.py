@@ -221,3 +221,9 @@ def hourly() -> None:
 		sync()
 	except Exception:
 		frappe.log_error(title="DialogBrain: hourly agent mode sync failed")
+	try:
+		from dialogbrain import connect_gate
+
+		connect_gate.refresh()
+	except Exception:
+		frappe.log_error(title="DialogBrain: hourly connect-channel gate refresh failed")

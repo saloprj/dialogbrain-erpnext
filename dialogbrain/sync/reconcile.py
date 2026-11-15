@@ -109,6 +109,7 @@ def tick() -> None:
 		return
 	retry_webhook_logs()
 	requeue_stale_replies()
+	_sweep_claims()
 	if _backfill_active(settings.backfill_status):
 		if is_job_enqueued(BACKFILL_JOB_ID):
 			return  # reconcile would re-notify what backfill is loading silently
@@ -118,6 +119,18 @@ def tick() -> None:
 	if last and (now_datetime() - get_datetime(last)).total_seconds() < interval - TICK_SLACK:
 		return
 	frappe.enqueue(RECONCILE_JOB, queue="long", timeout=3600, job_id=RECONCILE_JOB_ID, deduplicate=True)
+
+
+def _sweep_claims() -> None:
+	"""Numbers being connected from ERPNext whose browser tab is gone still get their owner
+	(``dialogbrain.claims``). One indexed lookup here; the calls to DialogBrain run in a
+	background job, never in the tick."""
+	try:
+		from dialogbrain import claims
+
+		claims.tick()
+	except Exception:
+		frappe.log_error(title="DialogBrain: channel claim sweep failed")
 
 
 def retry_webhook_logs() -> None:

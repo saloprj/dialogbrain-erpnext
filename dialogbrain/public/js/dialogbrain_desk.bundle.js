@@ -1,8 +1,11 @@
 // DialogBrain desk-wide pieces (loaded on every desk page through app_include_js):
 //   * a "Chats" item with the unread badge in the sidebar band and the dock,
 //   * a short sound on a new inbound message while the inbox is not in focus,
-//   * the "Chats" section of the Customer and Lead forms (see public/js/party_chats.js).
+//   * the "Chats" section of the Customer and Lead forms (see public/js/party_chats.js),
+//   * the "Connect channel" dialog (public/js/connect_channel.js).
 // Badge and sound only for Chat Agent / Chat Manager / System Manager.
+
+import "./connect_channel.js";
 
 frappe.provide("frappe.dialogbrain");
 

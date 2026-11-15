@@ -35,7 +35,8 @@
   "agent_capabilities",
   "agent_tools_status",
   "agent_tool_names",
-  "thread_context_secret"
+  "thread_context_secret",
+  "connect_channel_options"
  ],
  "fields": [
   {
@@ -225,6 +226,14 @@
    "label": "Thread Context Secret",
    "read_only": 1,
    "description": "Set by Connect. Lets ERPNext check which chat an agent call comes from. Do not share it."
+  },
+  {
+   "fieldname": "connect_channel_options",
+   "fieldtype": "Long Text",
+   "label": "Connect Channel Options",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Channels and methods DialogBrain can connect from ERPNext (JSON). Empty: not supported."
   }
  ],
  "links": [],

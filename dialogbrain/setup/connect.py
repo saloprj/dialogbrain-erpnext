@@ -10,7 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from dialogbrain import compat
+from dialogbrain import compat, connect_gate
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 from dialogbrain.setup import agent_integration, agent_modes
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
@@ -61,6 +61,8 @@ SERVER_FIELDS = (
 	"agent_capabilities",
 	"agent_tools_status",
 	"agent_tool_names",
+	# connect a channel from ERPNext: what DialogBrain supports (connect_gate)
+	"connect_channel_options",
 	# final wave F3: the DialogBrain instance + workspace of the last Connect
 	"dialogbrain_instance",
 )
@@ -304,6 +306,7 @@ def _connect(doc, confirm_same_server=False) -> dict:
 	except Exception:
 		frappe.log_error(title="DialogBrain: agent modes not read at Connect")
 	configure_webhook(doc, mode, client, hooks)
+	doc.connect_channel_options = connect_gate.stored_value(client, tools)
 	_bind_instance(doc, workspace_id)
 	if restamp:
 		_restamp_conversations(doc.dialogbrain_instance, old_key)
@@ -382,6 +385,7 @@ def disconnect() -> None:
 	doc.webhook_id = None
 	doc.webhook_secret = None
 	doc.webhook_status = "disconnected"
+	doc.connect_channel_options = None
 	doc.connected = 0
 	_server_save(doc)
 
