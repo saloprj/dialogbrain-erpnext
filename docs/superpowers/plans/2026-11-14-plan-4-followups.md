@@ -66,3 +66,12 @@ Left open by that review:
 - The run's thread is looked up by id only.
 - Open on the DialogBrain side: REST callers can skip the `agents.*` role gate by sending `metadata.ai_agent_id` (already on main; affects `get_draft`, `list_drafts`, `approve_draft`); `integrations.set_auth` has no admin check; on shared hosts "same origin" is not "same owner" (path prefix, `../` in path parameters); the realtime token mint URL is not origin-checked; `request_id` does not stop a second run after a timeout for tools without reconcile (`messages.press_button`, `calls.make`).
 
+
+## Webhook drain (PR #5) reviewed at the merged tip (2026-11-15)
+No serious errors. Left open:
+- `sync/reconcile.py` tick: the per-row enqueue for failed webhook rows is unguarded; if it raises (queue full, Redis down) the tick stops before the drain kicks, stale-reply requeue and reconcile.
+- A webhook row whose drain was killed 5 times stays `queued` with `attempts=5` and no error until cleanup; mark it `failed`.
+- The drain's 600 s budget is checked only between 100-row batches; a slow batch can pass the 900 s job timeout.
+- An Error Log written from the after-commit kick is never committed but sets the 5-minute suppression key.
+- `patches/v0_1/set_webhook_log_lane.py` uses `json_extract` (no Postgres).
+- Not verified: whether DialogBrain sends edit events with `skip_push=true` for old messages (they would be dropped as history); `Job.worker_name` on the RQ version of Frappe v15.
