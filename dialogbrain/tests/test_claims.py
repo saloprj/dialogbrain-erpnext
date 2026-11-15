@@ -139,6 +139,7 @@ class TestClaims(DialogBrainTestCase):
 		upsert_channel(A1, "whatsapp")
 		claims.sweep()
 		self.assertEqual((self.status(name), self.restricted(A1)), ("expired", 1))
+		self.assertEqual(self.fake.of(claims.CANCEL), [{"session_id": "sess-1"}])
 
 	def test_a_tool_error_is_one_claims_problem(self):
 		old = add_to_date(now_datetime(), seconds=-(claims.GRACE_SECONDS + 5))
@@ -306,7 +307,7 @@ class TestClaims(DialogBrainTestCase):
 	def test_number_scanned_after_an_unanswered_close_is_not_open(self):
 		old = add_to_date(now_datetime(), seconds=-(claims.GRACE_SECONDS + 5))
 		name = fk.claim(self.agent, expires_at=old)
-		self.fake.fail[claims.GET] = DialogBrainError("too many requests", status=429)
+		self.fake.fail[claims.GET] = DialogBrainError("session not found", code="not_found")
 		claims.sweep()
 		self.assertEqual(self.status(name), "expired")
 		self.assertEqual(frappe.db.get_value(CLAIM, name, "unconfirmed"), 1)
@@ -335,10 +336,17 @@ class TestClaims(DialogBrainTestCase):
 			(DialogBrainError("Unexpected DialogBrain response shape"), True),
 			(DialogBrainError("channels.connect_session.get failed"), False),
 			(DialogBrainError("session not found", code="not_found"), False),
-			(DialogBrainError("DialogBrain HTTP 429: slow down", status=429), False),
+			(DialogBrainError("DialogBrain HTTP 429: slow down", status=429), True),
+			(DialogBrainError("DialogBrain HTTP 401: bad key", status=401), True),
+			(DialogBrainError("DialogBrain HTTP 404: no such session", status=404), False),
 			(DialogBrainError("no", error_type="permission_denied"), False),
 		):
 			self.assertEqual(claims.unreachable(exc), expected, str(exc))
+
+	def test_a_channel_without_a_type_may_be_any_claims_number(self):
+		fk.claim(self.agent, channel_type="telegram")
+		upsert_channel(A1, None)
+		self.assertEqual((fk.allowed(A1), self.restricted(A1)), ([], 1))
 
 	def test_agents_list_only_their_channels(self):
 		from dialogbrain.permissions import channel_has_permission

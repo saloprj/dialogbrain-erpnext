@@ -33,7 +33,7 @@ from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
-from dialogbrain.connect_gate import GET
+from dialogbrain.connect_gate import CANCEL, GET
 
 CLAIM = "DB Channel Claim"
 CHANNEL = "DB Channel"
@@ -231,20 +231,17 @@ def on_new_channel(account_id, channel_type, external_ref=None) -> dict:
 	did not say which (no ``external_ref``); the sweep, started right away, settles it."""
 	opened = {"users": [], "restricted": 0}
 	channel_type = _type(channel_type)
-	if not channel_type:
-		return opened
 	# open claims, and claims that ended in the last day without DialogBrain saying that
-	# their session did not connect (it may still be alive there and get scanned)
-	candidates = _open(channel_type) + frappe.get_all(
-		CLAIM,
-		filters={
-			"status": ["in", ["expired", "failed", "cancelled"]],
-			"unconfirmed": 1,
-			"channel_type": channel_type,
-			"resolved_at": [">", add_to_date(now_datetime(), seconds=-GIVE_UP_SECONDS)],
-		},
-		fields=_FIELDS,
-	)
+	# their session did not connect (it may still be alive there and get scanned). An event
+	# that does not say its channel type may be any claim's number.
+	ended = {
+		"status": ["in", ["expired", "failed", "cancelled"]],
+		"unconfirmed": 1,
+		"resolved_at": [">", add_to_date(now_datetime(), seconds=-GIVE_UP_SECONDS)],
+	}
+	if channel_type:
+		ended["channel_type"] = channel_type
+	candidates = _open(channel_type or None) + frappe.get_all(CLAIM, filters=ended, fields=_FIELDS)
 	if not candidates:
 		return opened
 	account_id = _s(account_id)
@@ -287,7 +284,9 @@ def tick() -> None:
 def unreachable(exc) -> bool:
 	"""DialogBrain itself did not answer (timeout, connection), as opposed to an error it
 	returned for this one call."""
-	if isinstance(exc, DialogBrainTimeout) or getattr(exc, "status", None) in (502, 503, 504):
+	# 401/403/429: the key or the rate limit, not this session; every other call would get
+	# the same, and none of them says anything about a session
+	if isinstance(exc, DialogBrainTimeout) or getattr(exc, "status", None) in (401, 403, 429, 502, 503, 504):
 		return True
 	return str(exc).startswith(_NO_ANSWER)
 
@@ -324,6 +323,10 @@ def _settle(claim, client, now) -> bool:
 		# keeps answering ``connected``)
 		close(claim.name, "expired", confirmed=True)
 	elif past > GIVE_UP_SECONDS:
+		try:  # still waiting after a day: end it there too, so it cannot be scanned later
+			client.execute(CANCEL, {"session_id": claim.session_id})
+		except DialogBrainError:
+			pass
 		close(claim.name, "expired")
 	# any other status: the session is still alive in DialogBrain (someone may be typing a
 	# login code in another tab, or left at the password step); it can still connect
