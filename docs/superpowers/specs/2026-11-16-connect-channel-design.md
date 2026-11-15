@@ -1,6 +1,6 @@
 # Connect a channel from ERPNext — short design
 
-Status: draft v2 2026-11-16, revised after an outside review. Waiting for Denys's approval.
+Status: approved by Denys 2026-11-16 (v2, revised after an outside review).
 
 Depends on DialogBrain `channels.connect_session.*`, which David is building and which is not on DialogBrain main yet. The contract items we need from him are listed at the end.
 
