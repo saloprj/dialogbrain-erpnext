@@ -91,3 +91,16 @@ def other_apps_translations(lang: str) -> dict:
 		for app in apps:
 			merged.update(translate.get_translations_from_csv(lang, app) or {})
 		return merged
+
+
+def rate_limited(key: str, limit: int, seconds: int) -> bool:
+	"""Count one more use of ``key``; True when that is over ``limit`` within ``seconds``.
+
+	A plain redis counter: ``frappe.rate_limiter.rate_limit(user_based=...)`` is not in every
+	v15 release, and it limits per endpoint, not per our own key (a claim, a user)."""
+	cache = frappe.cache()
+	name = cache.make_key(f"dialogbrain_rl:{key}")
+	count = cache.incr(name)
+	if count == 1:
+		cache.expire(name, seconds)
+	return count > limit

@@ -14,7 +14,8 @@
   "status",
   "account_id",
   "expires_at",
-  "resolved_at"
+  "resolved_at",
+  "provisional_channels"
  ],
  "fields": [
   {
@@ -79,6 +80,13 @@
    "fieldtype": "Datetime",
    "label": "Resolved At",
    "read_only": 1
+  },
+  {
+   "fieldname": "provisional_channels",
+   "fieldtype": "Small Text",
+   "label": "Provisional Channels",
+   "read_only": 1,
+   "description": "Channels closed to this claim's owner until it is known which number the claim connected."
   }
  ],
  "links": [],

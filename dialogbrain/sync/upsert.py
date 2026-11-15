@@ -154,7 +154,20 @@ def key_value(value):
 # --- channel ----------------------------------------------------------------
 
 
-def upsert_channel(account_id: str, channel_type: str, title: "str | None" = None) -> str:
+def upsert_channel(
+	account_id: str,
+	channel_type: str,
+	title: "str | None" = None,
+	*,
+	external_ref: "str | None" = None,
+	check_claims: bool = True,
+) -> str:
+	"""Create or refresh a DB Channel.
+
+	A channel that is new here may be a number an employee is connecting right now
+	(``dialogbrain.claims``): it is then created with its owner in ``allowed_users`` and
+	never open to every agent. ``external_ref`` is the claim name when DialogBrain sends it
+	back; ``check_claims=False`` is for the claim code itself."""
 	account_id = _s(account_id)
 	if not account_id:
 		raise ValueError("DialogBrain channel account_id is required")
@@ -169,6 +182,11 @@ def upsert_channel(account_id: str, channel_type: str, title: "str | None" = Non
 		if updates:
 			frappe.db.set_value("DB Channel", account_id, updates)
 		return account_id
+	owners = []
+	if check_claims:
+		from dialogbrain import claims
+
+		owners = claims.on_new_channel(account_id, channel_type, external_ref=external_ref)
 	_insert(
 		frappe.get_doc(
 			{
@@ -176,6 +194,7 @@ def upsert_channel(account_id: str, channel_type: str, title: "str | None" = Non
 				"account_id": account_id,
 				"channel_type": channel_type,
 				"title": title or f"{channel_type or 'channel'} {account_id}",
+				"allowed_users": [{"user": user} for user in owners],
 			}
 		)
 	)
