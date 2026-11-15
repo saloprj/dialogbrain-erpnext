@@ -1,19 +1,32 @@
+# DEV ONLY — do not use in production.
 # Override: mounts the dialogbrain app into the bench containers.
 # Run from /home/denys/projects/erpnext (paths relative to pwd.yml).
 services:
   backend:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-short:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   queue-long:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # D1: DialogBrain presigned file URLs point at http://minio:9000 (alias on this network).
+    networks:
+      - frappe_network
+      - dialogbrain
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
   scheduler:
@@ -26,3 +39,18 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./dialogbrain_erpnext:/home/frappe/frappe-bench/apps/dialogbrain
+  frontend:
+    volumes:
+      # D2: built bundles reach nginx directly (backend's assets/dialogbrain is a symlink
+      # into the app, which the frontend container does not have).
+      - ./dialogbrain_erpnext/dialogbrain/public:/home/frappe/frappe-bench/sites/assets/dialogbrain:ro
+      # D3: the stock template forces `Origin: <scheme>://${FRAPPE_SITE_NAME_HEADER}` on
+      # /socket.io while Host stays $host, so Frappe realtime rejects every connection
+      # with "Invalid origin". Same template without that line.
+      - ./dialogbrain_erpnext/dev/nginx/frappe.conf.template:/templates/nginx/frappe.conf.template:ro
+
+networks:
+  # D1: the dev DialogBrain stack's network, so the media proxy can reach `minio`.
+  dialogbrain:
+    name: dialogbrain_dialogbrain-network
+    external: true

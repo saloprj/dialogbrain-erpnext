@@ -15,5 +15,7 @@ def on_doctype_update():
 	frappe.db.add_index("DB Conversation", ["assigned_to", "status"], "assigned_to_status_index")
 	frappe.db.add_index("DB Conversation", ["phone"], "phone_index")
 	frappe.db.add_index("DB Conversation", ["email"], "email_index")
+	# the customer card and party lookups filter by the linked party
+	frappe.db.add_index("DB Conversation", ["party_type", "party"], "party_type_party_index")
 	# a channel ref identifies one thread per channel account (see dialogbrain.sync.upsert)
 	frappe.db.add_unique("DB Conversation", ["channel", "thread_ref"], "channel_thread_ref_unique")

@@ -9,13 +9,25 @@ REALTIME_PREFIX = "dialogbrain:"
 
 
 def publish(conversation: str, kind: str, payload: dict) -> None:
-	"""Send ``dialogbrain:<kind>`` to every user permitted on the conversation's channel."""
+	"""Send ``dialogbrain:<kind>`` to :func:`realtime_users` of the conversation's channel."""
 	channel = frappe.db.get_value("DB Conversation", conversation, "channel")
 	if not channel:
 		return
 	payload = {"conversation": conversation, **(payload or {})}
-	for user in permitted_users(channel):
+	for user in realtime_users(channel):
 		frappe.publish_realtime(REALTIME_PREFIX + kind, payload, user=user, after_commit=True)
+
+
+def realtime_users(channel: str) -> list:
+	"""Realtime recipients (Ruling R9): the channel's permitted users plus every enabled user
+	with an explicit System Manager role, who can see every conversation anyway. Notification
+	Log recipients (:func:`recipients`) stay on :func:`permitted_users`."""
+	system_managers = frappe.db.sql_list(
+		"""SELECT u.name FROM `tabUser` u
+		JOIN `tabHas Role` hr ON hr.parent = u.name AND hr.parenttype = 'User'
+		WHERE u.enabled = 1 AND hr.role = 'System Manager' AND u.name != 'Guest'"""
+	)
+	return sorted(set(permitted_users(channel)) | set(system_managers))
 
 
 def recipients(conversation: str, reason: str) -> list:

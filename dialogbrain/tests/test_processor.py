@@ -66,6 +66,15 @@ def _logs(conversation):
 	)
 
 
+
+def _system_managers():
+	return set(
+		frappe.db.sql_list(
+			"""SELECT u.name FROM `tabUser` u JOIN `tabHas Role` hr ON hr.parent = u.name
+			AND hr.parenttype = 'User' WHERE u.enabled = 1 AND hr.role = 'System Manager'"""
+		)
+	)
+
 class TestProcessor(DialogBrainTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -697,10 +706,30 @@ class TestProcessor(DialogBrainTestCase):
 		ours = [c for c in pub.call_args_list if str(c.args[0] if c.args else c.kwargs.get("event")).startswith("dialogbrain:")]
 		self.assertTrue(ours)
 		users = {c.kwargs["user"] for c in ours}
-		self.assertEqual(users, {self.agent, self.manager})
+		# Ruling R9: System Managers see everything, so they get the events too
+		self.assertEqual(users, {self.agent, self.manager} | _system_managers())
 		self.assertNotIn(self.other, users)
 		for c in ours:
 			self.assertTrue(c.kwargs.get("after_commit"))
+
+	def test_realtime_reaches_system_managers_but_not_notification_log(self):
+		sysman = _user("proc-sysman@example.com", "System Manager")
+		frappe.get_doc(
+			{"doctype": "DB Channel", "account_id": "155", "channel_type": "telegram", "allowed_users": [{"user": self.agent}]}
+		).insert(ignore_permissions=True)
+		with patch("frappe.publish_realtime") as pub:
+			_process(INBOUND)
+		users = {c.kwargs["user"] for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")}
+		self.assertIn(sysman, users)
+		self.assertNotIn(self.other, users)
+		# Notification Log recipients are unchanged (no System Manager added)
+		self.assertNotIn(sysman, _logs(_conv_by_thread("1001")))
+		# a disabled System Manager gets nothing
+		frappe.db.set_value("User", sysman, "enabled", 0)
+		with patch("frappe.publish_realtime") as pub:
+			_process(INBOUND, db_id="2", message_id="telegram:2")
+		users = {c.kwargs["user"] for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")}
+		self.assertNotIn(sysman, users)
 
 	def test_notify_unassigned_only_first_inbound(self):
 		_process(INBOUND, db_id="1")

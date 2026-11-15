@@ -1,0 +1,84 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "shortcut",
+  "company",
+  "shared",
+  "text"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "shortcut",
+   "fieldtype": "Data",
+   "label": "Shortcut",
+   "description": "e.g. /price. Unique per owner.",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "shared",
+   "fieldtype": "Check",
+   "label": "Shared",
+   "default": "0"
+  },
+  {
+   "fieldname": "text",
+   "fieldtype": "Text",
+   "label": "Text",
+   "reqd": 1
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DB Quick Reply",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "Chat Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1
+  },
+  {
+   "role": "Chat Agent",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "autoname": "hash"
+}

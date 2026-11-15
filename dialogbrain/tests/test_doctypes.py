@@ -88,3 +88,16 @@ class TestDoctypes(DialogBrainTestCase):
 		for r in mrows:
 			mk.setdefault(r["Key_name"], []).append((r["Seq_in_index"], r["Column_name"]))
 		self.assertIn(("conversation", "sent_at"), {tuple(c for _, c in sorted(v)) for v in mk.values()})
+
+	def _index_keys(self, table):
+		cols = {}
+		for r in frappe.db.sql(f"SHOW INDEX FROM `{table}`", as_dict=True):
+			cols.setdefault(r["Key_name"], []).append((r["Seq_in_index"], r["Column_name"]))
+		return {tuple(c for _, c in sorted(v)) for v in cols.values()}
+
+	def test_party_and_note_indexes(self):
+		# the customer card / party lookups filter conversations by (party_type, party)
+		self.assertIn(("party_type", "party"), self._index_keys("tabDB Conversation"))
+		# notes are listed per conversation
+		self.assertIn(("conversation",), self._index_keys("tabDB Note"))
+		self.assertEqual(frappe.get_meta("DB Note").get_field("conversation").search_index, 1)
