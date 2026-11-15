@@ -198,3 +198,8 @@ def quick_reply_has_permission(doc, ptype=None, user=None, **kwargs):
 	if ptype in ("write", "delete", "submit", "cancel"):
 		return owner in (None, user)
 	return owner in (None, user) or bool(shared)
+
+
+def has_app_permission() -> bool:
+	"""Shows DialogBrain on the apps screen to people who may open the inbox."""
+	return bool(set(frappe.get_roles()) & {"System Manager", "Chat Manager", "Chat Agent"})

@@ -7,6 +7,17 @@ app_license = "mit"
 
 required_apps = ["erpnext"]
 
+app_home = "/app/dialogbrain-inbox"
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"logo": "/assets/dialogbrain/images/dialogbrain-logo.svg",
+		"title": app_title,
+		"route": app_home,
+		"has_permission": "dialogbrain.permissions.has_app_permission",
+	}
+]
+
 after_install = "dialogbrain.install.after_install"
 before_uninstall = "dialogbrain.install.before_uninstall"
 
