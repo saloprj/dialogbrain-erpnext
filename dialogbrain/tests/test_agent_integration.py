@@ -1028,6 +1028,65 @@ class TestInstanceBinding(_AgentIntegrationCase):
 		self._connect(FakeDialogBrain())
 		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "link_source"), "manual")
 
+	def _unstamped_site(self):
+		"""Rows mirrored before instance keys existed, on a site that was disconnected when
+		the stamping patch ran: no key in Settings, none on the rows."""
+		from dialogbrain.tests.test_party_card import _customer
+
+		frappe.get_doc({"doctype": "DB Channel", "account_id": "acc-r2", "channel_type": "telegram"}).insert(
+			ignore_permissions=True)
+		conv = frappe.get_doc({
+			"doctype": "DB Conversation", "thread_id": "7501", "channel": "acc-r2",
+			"party_type": "Customer", "party": _customer("R2 Customer"), "link_source": "manual",
+		}).insert(ignore_permissions=True).name
+		frappe.db.set_single_value(SETTINGS, {"dialogbrain_instance": None, "workspace_id": None,
+											  "base_url": "https://api.new.example.com"})
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
+		self.assertFalse(frappe.db.get_value("DB Conversation", conv, "dialogbrain_instance"))
+		return conv
+
+	def test_unstamped_chats_without_a_stored_key_need_the_confirmation(self):
+		from dialogbrain.setup import connect as mod
+
+		conv = self._unstamped_site()
+		self.assertTrue(mod.check_instance_change()["ask"])
+		fake = FakeDialogBrain()
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._connect(fake)
+		self.assertIn("cannot be mixed into this site", str(cm.exception))
+		self.assertEqual(self._get("connected"), 0)
+		self.assertFalse(self._get("dialogbrain_instance"))
+		with patch.object(mod, "DialogBrainClient", return_value=FakeDialogBrain()), patch("frappe.enqueue"):
+			mod.connect(confirm_same_server=1)
+		new = self._instance("https://api.new.example.com")
+		row = frappe.db.get_value("DB Conversation", conv, ["dialogbrain_instance", "link_source"], as_dict=True)
+		self.assertEqual((row.dialogbrain_instance, row.link_source), (new, "auto_unverified"))
+		self.assertFalse(mod.check_instance_change()["ask"])
+
+	def test_a_new_site_without_chats_connects_without_a_question(self):
+		from dialogbrain.setup import connect as mod
+
+		self.assertFalse(frappe.db.count("DB Conversation"))
+		self.assertFalse(self._get("dialogbrain_instance"))
+		self.assertFalse(mod.check_instance_change()["ask"])
+		self._connect(FakeDialogBrain())
+		self.assertEqual(self._get("connected"), 1)
+		self.assertEqual(self._get("dialogbrain_instance"), self._instance())
+
+	def test_confirmed_restamp_leaves_a_third_instance_alone(self):
+		from dialogbrain.setup import connect as mod
+
+		conv = self._old_chat()
+		third = frappe.get_doc({"doctype": "DB Conversation", "thread_id": "7601",
+								"dialogbrain_instance": "fedcba9876543210", "link_source": "manual"}).insert(
+			ignore_permissions=True).name
+		with patch.object(mod, "DialogBrainClient", return_value=FakeDialogBrain()), patch("frappe.enqueue"):
+			mod.connect(confirm_same_server=1)
+		new = self._instance("https://api.new.example.com")
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "dialogbrain_instance"), new)
+		row = frappe.db.get_value("DB Conversation", third, ["dialogbrain_instance", "link_source"], as_dict=True)
+		self.assertEqual((row.dialogbrain_instance, row.link_source), ("fedcba9876543210", "manual"))
+
 	def test_contact_update_reaches_only_the_connected_instance(self):
 		from dialogbrain.sync.processor import process_event
 		from dialogbrain.sync.upsert import upsert_channel, upsert_conversation

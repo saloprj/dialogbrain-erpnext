@@ -187,7 +187,9 @@ DIFFERENT_SERVER_MESSAGE = (
 
 def _foreign_rows(new_key, old_key) -> bool:
 	"""Mirrored conversations that were not made under ``new_key``: rows stamped with
-	another key, and -- when the stored key changes -- rows never stamped at all."""
+	another key, and -- unless the stored key stays the same -- rows never stamped at all
+	(also when no key is stored: a site disconnected while the stamping patch ran has
+	none in Settings and none on its rows, and may now be pointed at another server)."""
 	if frappe.db.sql(
 		"""select name from `tabDB Conversation`
 		where dialogbrain_instance is not null and dialogbrain_instance != '' and dialogbrain_instance != %s
@@ -195,8 +197,13 @@ def _foreign_rows(new_key, old_key) -> bool:
 		(new_key,),
 	):
 		return True
-	if old_key and old_key != new_key:
-		return bool(frappe.db.sql("select name from `tabDB Conversation` limit 1"))
+	if (old_key or None) != new_key:
+		return bool(
+			frappe.db.sql(
+				"""select name from `tabDB Conversation`
+				where dialogbrain_instance is null or dialogbrain_instance = '' limit 1"""
+			)
+		)
 	return False
 
 
@@ -220,18 +227,19 @@ def _check_same_server(doc, workspace_id, confirm_same_server) -> bool:
 	return True
 
 
-def _restamp_conversations(new_key) -> None:
-	"""The admin confirmed the same server at a new address: existing rows keep matching.
-	Like a never-stamped row (``upsert_conversation``), a verified party link drops to
-	``auto_unverified`` until a person confirms it again (R13)."""
+def _restamp_conversations(new_key, old_key) -> None:
+	"""The admin confirmed the same server at a new address: rows of the old key (and
+	never-stamped ones) keep matching. Rows of any third instance stay as they are (never
+	identified). Like a never-stamped row (``upsert_conversation``), a verified party link
+	drops to ``auto_unverified`` until a person confirms it again (R13)."""
 	from dialogbrain.thread_context import VERIFIED_LINKS
 
 	frappe.db.sql(
 		"""update `tabDB Conversation`
 		set link_source = case when link_source in %(verified)s then 'auto_unverified' else link_source end,
 			dialogbrain_instance = %(key)s
-		where coalesce(dialogbrain_instance, '') != %(key)s""",
-		{"key": new_key, "verified": tuple(VERIFIED_LINKS)},
+		where coalesce(dialogbrain_instance, '') in ('', %(old)s)""",
+		{"key": new_key, "old": old_key or "", "verified": tuple(VERIFIED_LINKS)},
 	)
 
 
@@ -245,7 +253,10 @@ def check_instance_change() -> dict:
 
 	doc = frappe.get_single(SETTINGS)
 	predicted = instance_key(doc.base_url, doc.workspace_id)
-	ask = bool(predicted and _foreign_rows(predicted, doc.dialogbrain_instance))
+	if predicted:
+		ask = _foreign_rows(predicted, doc.dialogbrain_instance)
+	else:  # no workspace stored yet: any mirrored chat is of an unknown instance
+		ask = bool(frappe.db.sql("select name from `tabDB Conversation` limit 1"))
 	return {"ask": ask, "refusal": _(DIFFERENT_SERVER_MESSAGE) if ask else None}
 
 
@@ -264,6 +275,7 @@ def _connect(doc, confirm_same_server=False) -> dict:
 		frappe.throw(_("Invalid API key or DialogBrain unreachable"))
 	workspace_id = str(workspace.get("id") or "") or None
 	_refuse_workspace_switch(doc, workspace, workspace_id)
+	old_key = doc.dialogbrain_instance
 	restamp = _check_same_server(doc, workspace_id, confirm_same_server)
 
 	missing = []
@@ -294,7 +306,7 @@ def _connect(doc, confirm_same_server=False) -> dict:
 	configure_webhook(doc, mode, client, hooks)
 	_bind_instance(doc, workspace_id)
 	if restamp:
-		_restamp_conversations(doc.dialogbrain_instance)
+		_restamp_conversations(doc.dialogbrain_instance, old_key)
 	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
 	agent_tools = agent_integration.on_connect(doc, client, tools)
 	doc.workspace_id = workspace_id
