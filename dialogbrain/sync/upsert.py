@@ -140,6 +140,17 @@ def display_value(value):
 	return value
 
 
+def key_value(value):
+	"""A thread id / ref, phone, email, contact id or avatar URL as sync stores and matches
+	it: these are compared (party linking, thread lookups) and sent back to DialogBrain, so
+	they are never rewritten. A value with markup characters (no real one has them) is
+	refused instead: not stored, not matched -- the desk's Data formatter would inject it
+	as HTML, and Frappe's insert filter would store a different value than lookups use."""
+	if isinstance(value, str) and ("<" in value or ">" in value):
+		return None
+	return value
+
+
 # --- channel ----------------------------------------------------------------
 
 
@@ -200,7 +211,7 @@ def find_conversation(internal=None, ref=None, channel=None, for_update=False):
 	``for_update``: a locking read, which sees rows committed after this transaction's
 	snapshot (needed after losing an insert race).
 	"""
-	internal, ref = _s(internal), _s(ref)
+	internal, ref = key_value(_s(internal)), key_value(_s(ref))
 	if internal:
 		name = frappe.db.get_value("DB Conversation", {"thread_id": internal}, for_update=for_update)
 		if name:
@@ -246,13 +257,15 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	key on create, and on an existing row that has none; a row stamped by another instance
 	keeps its key (the agent tools then do not identify it).
 	"""
-	internal, ref = thread_keys(thread)
+	internal, ref = (key_value(k) for k in thread_keys(thread))
 	if not internal and not (ref and channel):
 		raise ValueError("DialogBrain thread without an internal id or a channel ref + channel")
 	values = {"title": _s(thread.get("title"))}
 	for field in CONTACT_FIELDS:
 		values[field] = _s(thread.get(field))
-	values = {k: _fit(k, display_value(v) if k in DISPLAY_FIELDS else v) for k, v in values.items() if v}
+	values = {
+		k: _fit(k, display_value(v) if k in DISPLAY_FIELDS else key_value(v)) for k, v in values.items() if v
+	}
 	values = {k: v for k, v in values.items() if v}
 
 	name = find_conversation(internal, ref, channel)

@@ -176,3 +176,34 @@ class TestRawText(DialogBrainTestCase):
 			self.assertNotIn("<script", value.lower())
 			self.assertNotIn("onerror", value.lower())
 		json.dumps(row)  # plain strings
+
+	# --- re-review S2/S3: keys and contact fields, the delivery error -----------------
+
+	def test_markup_in_keys_and_contact_fields_is_refused_by_sync(self):
+		"""Phone, email, contact id, avatar URL and thread ref come from the channel; desk
+		views inject Data values as HTML. They are also matched (party linking, thread
+		lookups) and sent back to DialogBrain, so they are never rewritten: a value with
+		markup characters is not stored and not matched."""
+		from dialogbrain.sync.upsert import find_conversation, upsert_conversation
+
+		odd = '<img src=x onerror="alert(1)">'
+		fields = ("phone", "email", "db_contact_id", "avatar_url")
+		name, created = upsert_conversation(
+			{"db_id": "raw-odd-1", "thread_id": "livechat:" + odd, **{f: odd for f in fields}}, CH
+		)
+		self.assertTrue(created)
+		row = frappe.db.get_value("DB Conversation", name, ["thread_ref", *fields], as_dict=True)
+		self.assertEqual(set(row.values()), {None})
+		self.assertIsNone(find_conversation(None, "livechat:" + odd, CH))
+		# the update path (set_value) refuses them too, real values still land
+		upsert_conversation({"db_id": "raw-1", **{f: odd for f in fields}}, CH)
+		row = frappe.db.get_value("DB Conversation", self.conv, list(fields), as_dict=True)
+		self.assertEqual(set(row.values()), {None})
+		upsert_conversation({"db_id": "raw-1", "phone": "+380671234508", "email": "a@b.co"}, CH)
+		row = frappe.db.get_value("DB Conversation", self.conv, ["phone", "email"], as_dict=True)
+		self.assertEqual((row.phone, row.email), ("+380671234508", "a@b.co"))
+
+	def test_delivery_error_is_escaped_in_desk_views(self):
+		df = frappe.get_meta("DB Message").get_field("error")
+		self.assertEqual(df.fieldtype, "Code")
+		self.assertTrue(df.ignore_xss_filter)

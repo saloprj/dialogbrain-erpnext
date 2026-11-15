@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-15 02:00:00.000000",
+ "modified": "2026-11-15 06:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -89,7 +89,8 @@
   },
   {
    "fieldname": "error",
-   "fieldtype": "Small Text",
+   "fieldtype": "Code",
+   "ignore_xss_filter": 1,
    "label": "Error"
   },
   {
