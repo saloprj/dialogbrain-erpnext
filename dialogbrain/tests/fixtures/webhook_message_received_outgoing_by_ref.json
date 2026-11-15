@@ -1,0 +1,45 @@
+{
+  "event": "message.received",
+  "data": {
+    "channel": "livechat",
+    "account_id": "201",
+    "thread_id": "livechat:a07f9d4a-7e2c-4626-b785-13ba088dd210:sim_c91803a9acfe",
+    "message": {
+      "message_id": "livechat:msg_e3a961b3534b",
+      "channel": "livechat",
+      "peer": "a07f9d4a-7e2c-4626-b785-13ba088dd210:sim_c91803a9acfe",
+      "text": "Second test reply sent via the channel ref form.",
+      "html": "Second test reply sent via the channel ref form.",
+      "is_outgoing": true,
+      "sent_at": "2026-11-13T12:06:51.597772+00:00",
+      "media_type": "text",
+      "from_id": "system",
+      "from_name": "You",
+      "attachments": null,
+      "attachment_file_ids": null,
+      "reply_to_message_id": null,
+      "db_id": "27771421",
+      "metadata": null,
+      "is_system_event": false,
+      "action": null,
+      "sender": {
+        "id": "system",
+        "name": "You"
+      }
+    },
+    "thread": {
+      "thread_id": "livechat:8451249",
+      "channel": "livechat",
+      "last_message_preview": "Second test reply sent via the channel ref form.",
+      "last_message_ts": "2026-11-13T12:06:51.597772+00:00",
+      "unread_count": null,
+      "title": null,
+      "account_id": "201",
+      "meta": null
+    },
+    "source": "messages.send",
+    "timestamp": "2026-11-13T12:06:51.752391",
+    "skip_push": false
+  },
+  "delivery_id": "1004"
+}

@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "data": {
+    "message_id": "livechat:msg_e3a961b3534b",
+    "db_message_id": 27771421,
+    "thread_id": 8451249,
+    "channel_ref": "livechat:a07f9d4a-7e2c-4626-b785-13ba088dd210:sim_c91803a9acfe",
+    "channel": "livechat",
+    "text": "Second test reply sent via the channel ref form.",
+    "text_preview": "Second test reply sent via the channel ref form.",
+    "sent_at": "2026-11-13T12:06:51.763965",
+    "contact": "Simulated chat c91803a9",
+    "thread_title": "Simulated chat c91803a9",
+    "recipient_name": null,
+    "account_id": "201",
+    "sent_from": {
+      "id": 201,
+      "channel": "livechat",
+      "name": "Voice Test Widget",
+      "phone": null,
+      "email": null,
+      "workspace_id": 128
+    },
+    "attachments_sent": 0
+  },
+  "error": null,
+  "effects_applied": [
+    "message_sent",
+    "sent_to_livechat"
+  ],
+  "metadata": {
+    "channel_type": "livechat",
+    "text_length": 48,
+    "has_reply": false,
+    "has_attachments": false,
+    "attachment_count": 0,
+    "execution_time_ms": 275
+  },
+  "timestamp": "2026-11-13T12:06:51.765940"
+}

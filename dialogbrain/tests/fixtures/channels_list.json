@@ -1,0 +1,78 @@
+{
+  "success": true,
+  "data": {
+    "total": 8,
+    "broken": 3,
+    "accounts": [
+      {
+        "account_id": "199",
+        "channel": "email",
+        "display_name": "Test Mailbox",
+        "status": "error",
+        "needs_repair": true,
+        "error": "token revoked",
+        "reconnect_url": "/reconnect/199?ws=128"
+      },
+      {
+        "account_id": "678",
+        "channel": "email",
+        "display_name": "Test Mailbox",
+        "status": "error",
+        "needs_repair": true,
+        "error": null,
+        "reconnect_url": "/reconnect/678?ws=128"
+      },
+      {
+        "account_id": "774",
+        "channel": "viber",
+        "display_name": "10000000000",
+        "status": "error",
+        "needs_repair": true,
+        "error": null,
+        "reconnect_url": "/reconnect/774?ws=128"
+      },
+      {
+        "account_id": "312",
+        "channel": "email",
+        "display_name": "Test Mailbox",
+        "status": "active",
+        "needs_repair": false
+      },
+      {
+        "account_id": "201",
+        "channel": "livechat",
+        "display_name": "Voice Test Widget",
+        "status": "active",
+        "needs_repair": false
+      },
+      {
+        "account_id": "155",
+        "channel": "telegram",
+        "display_name": "Test Account",
+        "status": "active",
+        "needs_repair": false
+      },
+      {
+        "account_id": "219",
+        "channel": "telegram",
+        "display_name": "Test Account",
+        "status": "inactive",
+        "needs_repair": false
+      },
+      {
+        "account_id": "242",
+        "channel": "whatsapp",
+        "display_name": "WhatsApp (+10000000000)",
+        "status": "active",
+        "needs_repair": false
+      }
+    ]
+  },
+  "error": null,
+  "effects_applied": [],
+  "metadata": {
+    "execution_time_ms": 36
+  },
+  "trace_id": "df875291-1223-4a13-b71b-5b3933d59403",
+  "timestamp": "2026-11-13T12:07:49.892618"
+}

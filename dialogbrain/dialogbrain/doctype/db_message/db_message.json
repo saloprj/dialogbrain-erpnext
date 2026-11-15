@@ -1,0 +1,138 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 20:30:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "db_id",
+  "message_id",
+  "conversation",
+  "direction",
+  "author_type",
+  "sent_by",
+  "text",
+  "sent_at",
+  "attachments",
+  "delivery_status",
+  "client_ref",
+  "error",
+  "raw"
+ ],
+ "fields": [
+  {
+   "fieldname": "db_id",
+   "fieldtype": "Data",
+   "label": "Db Id",
+   "unique": 1
+  },
+  {
+   "fieldname": "message_id",
+   "fieldtype": "Data",
+   "label": "Message Id"
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "DB Conversation",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "direction",
+   "fieldtype": "Select",
+   "label": "Direction",
+   "options": "in\nout"
+  },
+  {
+   "fieldname": "author_type",
+   "fieldtype": "Select",
+   "label": "Author Type",
+   "options": "customer\nmanager\nagent\nsystem"
+  },
+  {
+   "fieldname": "sent_by",
+   "fieldtype": "Link",
+   "label": "Sent By",
+   "options": "User"
+  },
+  {
+   "fieldname": "text",
+   "fieldtype": "Long Text",
+   "label": "Text"
+  },
+  {
+   "fieldname": "sent_at",
+   "fieldtype": "Datetime",
+   "label": "Sent At"
+  },
+  {
+   "fieldname": "attachments",
+   "fieldtype": "Table",
+   "label": "Attachments",
+   "options": "DB Message Attachment"
+  },
+  {
+   "fieldname": "delivery_status",
+   "fieldtype": "Select",
+   "label": "Delivery Status",
+   "options": "\npending\nsent\nfailed\nunknown\ndeleted"
+  },
+  {
+   "fieldname": "client_ref",
+   "fieldtype": "Data",
+   "label": "Client Ref",
+   "unique": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  },
+  {
+   "fieldname": "raw",
+   "fieldtype": "JSON",
+   "label": "Raw"
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DB Message",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "report": 1,
+   "share": 1,
+   "email": 1,
+   "print": 1
+  },
+  {
+   "role": "Chat Manager",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "Chat Agent",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "autoname": "hash"
+}

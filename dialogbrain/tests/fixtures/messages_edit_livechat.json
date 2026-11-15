@@ -1,0 +1,19 @@
+{
+  "success": true,
+  "data": {
+    "message_id": "livechat:msg_65655640abdc",
+    "thread_id": "8451249",
+    "channel": "livechat",
+    "new_text": "Edited text of the test reply.",
+    "status": "edited",
+    "edited_at": "2026-11-13 12:07:22.692369+00:00"
+  },
+  "error": null,
+  "effects_applied": [
+    "message_edited"
+  ],
+  "metadata": {
+    "execution_time_ms": 53
+  },
+  "timestamp": "2026-11-13T12:07:22.692824"
+}

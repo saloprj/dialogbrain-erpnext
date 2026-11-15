@@ -1,0 +1,56 @@
+{
+  "success": true,
+  "data": {
+    "thread": {
+      "id": 8451249,
+      "title": "Simulated chat c91803a9",
+      "channel": "livechat",
+      "last_message_ts": "2026-11-13 12:06:51.597772+00:00",
+      "account_id": 201,
+      "synced": true
+    },
+    "messages": [
+      {
+        "id": 27771421,
+        "text": "Second test reply sent via the channel ref form.",
+        "sent_at": "2026-11-13 12:06:51.597772+00:00",
+        "is_outgoing": true,
+        "is_edited": false,
+        "message_type": "text",
+        "link": null,
+        "sender": {
+          "id": null,
+          "name": "You",
+          "username": null
+        },
+        "attachment_file_ids": [],
+        "has_media": false,
+        "meta": {
+          "event_type": null,
+          "source": null,
+          "call_id": null,
+          "speaker_display_name": null,
+          "duration_seconds": null,
+          "outcome": null,
+          "direction": null
+        },
+        "channel": "livechat",
+        "reply_to": null
+      }
+    ],
+    "total_returned": 1,
+    "offset": 0,
+    "has_more": true,
+    "next_offset": 1
+  },
+  "error": null,
+  "effects_applied": [
+    "read_message_history"
+  ],
+  "metadata": {
+    "thread_id": 8451249,
+    "message_count": 1,
+    "execution_time_ms": 107
+  },
+  "timestamp": "2026-11-13T12:06:52.408803"
+}

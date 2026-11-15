@@ -1,0 +1,49 @@
+{
+  "event": "message.received",
+  "data": {
+    "channel": "telegram",
+    "account_id": "155",
+    "thread_id": "telegram:-1000000000002",
+    "message": {
+      "message_id": "telegram:7000001",
+      "db_id": "9000002",
+      "channel": "telegram",
+      "peer": "-1000000000002",
+      "text": "Fake group message text",
+      "html": "Fake group message text",
+      "is_outgoing": false,
+      "sent_at": "2026-11-13T12:06:43+00:00",
+      "media_type": "text",
+      "from_id": "100000002",
+      "from_name": "Bob Example",
+      "sender": {
+        "id": "100000002",
+        "name": "Bob Example"
+      },
+      "attachment_file_ids": [],
+      "attachments": [],
+      "metadata": {
+        "id": 7000001,
+        "edit_date": null,
+        "reply_to_msg_id": 7000000,
+        "forum_topic_id": null,
+        "sender_name": "Bob Example"
+      },
+      "is_system_event": false,
+      "forward_from_ref": null
+    },
+    "thread": {
+      "thread_id": "telegram:-1000000000002",
+      "db_id": "1002",
+      "kind": "group",
+      "last_message_preview": "Fake group message text",
+      "last_message_sender_name": "Bob Example",
+      "last_message_ts": "2026-11-13T12:06:43+00:00",
+      "title": "Example Group"
+    },
+    "source": "channel_sync_service",
+    "timestamp": "2026-11-13T12:06:45.565716",
+    "skip_push": false
+  },
+  "delivery_id": "1002"
+}

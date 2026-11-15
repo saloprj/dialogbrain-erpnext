@@ -1,0 +1,109 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "modified": "2026-11-13 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "account_id",
+  "channel_type",
+  "title",
+  "company",
+  "default_manager",
+  "agent_mode",
+  "enabled",
+  "allowed_users"
+ ],
+ "fields": [
+  {
+   "fieldname": "account_id",
+   "fieldtype": "Data",
+   "label": "Account Id",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "channel_type",
+   "fieldtype": "Data",
+   "label": "Channel Type",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "default_manager",
+   "fieldtype": "Link",
+   "label": "Default Manager",
+   "options": "User"
+  },
+  {
+   "fieldname": "agent_mode",
+   "fieldtype": "Select",
+   "label": "Agent Mode",
+   "options": "copilot\nautopilot\noff",
+   "default": "copilot"
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1"
+  },
+  {
+   "fieldname": "allowed_users",
+   "fieldtype": "Table",
+   "label": "Allowed Users",
+   "options": "DB Channel User"
+  }
+ ],
+ "links": [],
+ "module": "DialogBrain",
+ "name": "DB Channel",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "report": 1,
+   "share": 1,
+   "email": 1,
+   "print": 1
+  },
+  {
+   "role": "Chat Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "Chat Agent",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "autoname": "field:account_id",
+ "title_field": "title"
+}

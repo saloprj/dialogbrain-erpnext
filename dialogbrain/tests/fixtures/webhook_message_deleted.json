@@ -1,0 +1,14 @@
+{
+  "event": "message.deleted",
+  "data": {
+    "channel": "telegram",
+    "account_id": "155",
+    "thread_id": "telegram:telegram:-1000000000002",
+    "message_ids": [
+      "telegram:7000001"
+    ],
+    "source": "channel_sync_service",
+    "timestamp": "2026-11-13T12:07:09.454301"
+  },
+  "delivery_id": "1005"
+}

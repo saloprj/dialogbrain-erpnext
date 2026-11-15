@@ -1,0 +1,51 @@
+{
+  "event": "message.received",
+  "data": {
+    "channel": "telegram",
+    "account_id": "155",
+    "thread_id": "telegram:100000001",
+    "message": {
+      "message_id": "telegram:5000001",
+      "db_id": "9000001",
+      "channel": "telegram",
+      "peer": "100000001",
+      "text": "Hi, please send me the offer for the project, thanks.",
+      "html": "Hi, please send me the offer for the project, thanks.",
+      "is_outgoing": false,
+      "sent_at": "2026-11-13T12:06:24+00:00",
+      "media_type": "text",
+      "from_id": "100000001",
+      "from_name": "Alice Example",
+      "sender": {
+        "id": "100000001",
+        "name": "Alice Example"
+      },
+      "attachment_file_ids": [],
+      "attachments": [],
+      "metadata": {
+        "id": 5000001,
+        "edit_date": null,
+        "reply_to_msg_id": null,
+        "forum_topic_id": null,
+        "sender_name": "Alice Example",
+        "username": "alice_example",
+        "phone": "10000000001"
+      },
+      "is_system_event": false,
+      "forward_from_ref": null
+    },
+    "thread": {
+      "thread_id": "telegram:100000001",
+      "db_id": "1001",
+      "kind": "dm",
+      "last_message_preview": "Hi, please send me the offer for the project, thanks.",
+      "last_message_sender_name": "Alice Example",
+      "last_message_ts": "2026-11-13T12:06:24+00:00",
+      "title": "Alice Example"
+    },
+    "source": "channel_sync_service",
+    "timestamp": "2026-11-13T12:06:24.624812",
+    "skip_push": false
+  },
+  "delivery_id": "1001"
+}
