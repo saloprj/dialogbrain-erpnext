@@ -2,6 +2,39 @@
 
 Omnichannel inbox that mirrors DialogBrain conversations into ERPNext.
 
+## Installation
+
+Requirements: a bench with Frappe and ERPNext **v15 or v16** (Python 3.10+), the scheduler
+and background workers running, and a DialogBrain workspace.
+
+```bash
+cd frappe-bench
+bench get-app https://github.com/saloprj/dialogbrain-erpnext
+bench --site your-site install-app dialogbrain
+bench --site your-site migrate
+bench --site your-site clear-cache
+bench restart          # production setups (supervisor/systemd); in docker restart the backend, workers and scheduler
+```
+
+`your-site` is the site's name in `sites/`. `get-app` builds the app's assets; if you build
+them again later, clear the cache afterwards, otherwise the Chats page opens blank.
+
+Then:
+
+1. **Give people access.** The app adds the roles **Chat Agent** (answers chats on channels
+   whose allowed users include them, or that list nobody) and **Chat Manager** (all chats, agent modes, reports).
+   Assign them to users; System Managers see everything.
+2. **Connect.** Open **DialogBrain Settings** (`/app/dialogbrain-settings`) and connect with
+   DialogBrain (OAuth) or with an API key — see [Connecting to DialogBrain](#connecting-to-dialogbrain).
+   For the AI agent to read ERPNext data the key must belong to a workspace admin or owner,
+   and the site must be reachable from the internet over `https`.
+3. **Open the inbox.** Chats are under **DialogBrain → Chats** (`/app/dialogbrain-inbox`). The
+   first sync loads recent history in the background; channels appear as **DB Channel**,
+   where each channel's allowed users and AI agent mode are set.
+
+To update: `bench update --apps dialogbrain` (or `git pull` in `apps/dialogbrain`, then
+`bench --site your-site migrate`, `bench build --app dialogbrain`, `bench --site your-site clear-cache`).
+
 ## Development
 
 From the frappe_docker directory: `bash dialogbrain_erpnext/dev/install.sh`.
