@@ -5,7 +5,22 @@ app_description = "DialogBrain omnichannel inbox for ERPNext"
 app_email = "dev@dialogbrain.com"
 app_license = "mit"
 
+import frappe
+
 required_apps = ["erpnext"]
+
+# v16 serves the desk at /desk; v15 only at /app. Keeping DialogBrain under the same
+# prefix as ERPNext keeps /desk as the landing page after login on v16.
+app_home = "/desk/dialogbrain-inbox" if int(frappe.__version__.split(".")[0]) >= 16 else "/app/dialogbrain-inbox"
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"logo": "/assets/dialogbrain/images/dialogbrain-logo.svg",
+		"title": app_title,
+		"route": app_home,
+		"has_permission": "dialogbrain.permissions.has_app_permission",
+	}
+]
 
 after_install = "dialogbrain.install.after_install"
 before_uninstall = "dialogbrain.install.before_uninstall"

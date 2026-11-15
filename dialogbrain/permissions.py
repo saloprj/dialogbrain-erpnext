@@ -23,6 +23,8 @@ import frappe
 from frappe import _
 
 SEE_ALL_ROLES = ("System Manager", "Chat Manager")
+# Roles that may open the Chats inbox (same list as the dialogbrain-inbox Page).
+INBOX_ROLES = (*SEE_ALL_ROLES, "Chat Agent")
 
 
 def is_manager(user=None) -> bool:
@@ -198,3 +200,8 @@ def quick_reply_has_permission(doc, ptype=None, user=None, **kwargs):
 	if ptype in ("write", "delete", "submit", "cancel"):
 		return owner in (None, user)
 	return owner in (None, user) or bool(shared)
+
+
+def has_app_permission() -> bool:
+	"""Shows DialogBrain on the apps screen to people who may open the inbox."""
+	return bool(set(frappe.get_roles()) & set(INBOX_ROLES))
