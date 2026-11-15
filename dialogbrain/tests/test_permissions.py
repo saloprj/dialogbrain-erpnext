@@ -189,3 +189,65 @@ class TestPermissions(DialogBrainTestCase):
 		self.assertFalse(frappe.has_permission("DB Message", "write", doc=self.msg))
 		with self.assertRaises(frappe.PermissionError):
 			insert({"doctype": "DB Message", "conversation": self.c_open, "direction": "out", "text": "forged"})
+
+
+class TestSetPartyRequiresPartyRead(DialogBrainTestCase):
+	"""Final wave F1 (R12): a manual link releases the party's orders and invoices to the
+	AI agent, so only someone who can read that party in ERPNext may make it."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		frappe.db.delete("DB Message")
+		frappe.db.delete("DB Conversation")
+		frappe.db.delete("DB Channel User")
+		frappe.db.delete("DB Channel")
+		_channel(OPEN)
+		self.conv = _conv("perm-f1", OPEN)
+		group = frappe.db.get_value("Customer Group", {"is_group": 0})
+		territory = frappe.db.get_value("Territory", {"is_group": 0})
+		self.customer = frappe.get_doc(
+			{"doctype": "Customer", "customer_name": "Perm F1 Customer", "customer_type": "Individual",
+			 "customer_group": group, "territory": territory}
+		).insert(ignore_permissions=True).name
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+
+	def _link(self, user):
+		frappe.set_user(user)
+		try:
+			set_party(self.conv, "Customer", self.customer)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_chat_agent_without_customer_read_is_refused(self):
+		user = _user("perm-f1-agent@example.com", "Chat Agent")
+		with self.assertRaises(frappe.PermissionError) as ctx:
+			self._link(user)
+		self.assertIn("You don't have access to this customer", str(ctx.exception))
+		self.assertFalse(frappe.db.get_value("DB Conversation", self.conv, "party"))
+
+	def test_chat_agent_with_customer_read_links(self):
+		user = _user("perm-f1-sales@example.com", "Chat Agent", "Sales User")
+		self._link(user)
+		d = frappe.db.get_value("DB Conversation", self.conv, ["party", "link_source"], as_dict=1)
+		self.assertEqual((d.party, d.link_source), (self.customer, "manual"))
+
+	def test_chat_manager_without_sales_role_is_refused(self):
+		user = _user("perm-f1-manager@example.com", "Chat Manager")
+		with self.assertRaises(frappe.PermissionError):
+			self._link(user)
+		self.assertFalse(frappe.db.get_value("DB Conversation", self.conv, "party"))
+
+	def test_create_lead_still_links_the_lead_it_created(self):
+		"""The chat's own new Lead has no orders to leak; Chat Agent may still create it."""
+		from dialogbrain.party import create_lead
+
+		user = _user("perm-f1-lead@example.com", "Chat Agent")
+		frappe.set_user(user)
+		try:
+			lead = create_lead(self.conv)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("DB Conversation", self.conv, "party"), lead)

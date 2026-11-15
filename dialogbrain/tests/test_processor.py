@@ -66,6 +66,15 @@ def _logs(conversation):
 	)
 
 
+
+def _system_managers():
+	return set(
+		frappe.db.sql_list(
+			"""SELECT u.name FROM `tabUser` u JOIN `tabHas Role` hr ON hr.parent = u.name
+			AND hr.parenttype = 'User' WHERE u.enabled = 1 AND hr.role = 'System Manager'"""
+		)
+	)
+
 class TestProcessor(DialogBrainTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -222,6 +231,27 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertFalse(frappe.db.exists("DB Conversation", ref_row))
 		_process(INBOUND, db_id="9000003")  # later events just land
 		self.assertEqual(frappe.db.count("DB Message", {"conversation": id_row}), 3)
+
+	def test_merge_repoints_agent_call_logs_and_db_conversation_fields(self):
+		"""Final wave F6: the agent's call log and the documents it created (Lead /
+		Sales Order / Quotation ``db_conversation``) follow a merged conversation."""
+		from dialogbrain.sync.upsert import _merge_conversation
+
+		def conv(thread_id, ref=None):
+			return frappe.get_doc({"doctype": "DB Conversation", "thread_id": thread_id, "thread_ref": ref}).insert(
+				ignore_permissions=True
+			).name
+
+		target, source = conv("merge-t1"), conv(None, "telegram:merge")
+		log = frappe.get_doc({"doctype": "DB Agent Call Log", "tool": "get_item", "conversation": source}).insert(
+			ignore_permissions=True
+		).name
+		lead = frappe.get_doc({"doctype": "Lead", "first_name": "Merge Lead", "db_conversation": source}).insert(
+			ignore_permissions=True
+		).name
+		_merge_conversation(target, source)
+		self.assertEqual(frappe.db.get_value("DB Agent Call Log", log, "conversation"), target)
+		self.assertEqual(frappe.db.get_value("Lead", lead, "db_conversation"), target)
 
 	def test_thread_ref_collision_with_other_internal_id_does_not_merge(self):
 		"""Two rows with different internal ids are different DialogBrain threads: keep
@@ -636,6 +666,52 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(_msg("9000002").delivery_status, "deleted")
 		self.assertNotEqual(_msg("9000099").delivery_status, "deleted")
 
+	def test_message_deleted_never_leaves_its_known_conversation(self):
+		"""Telegram message ids are unique per chat: a deletion in a known chat whose
+		message was never mirrored must not hit the same id in another chat."""
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)  # telegram:7000001 in the group (1002)
+		_process(INBOUND)  # the DM (1001)
+		process_event(
+			"message.deleted",
+			{
+				"channel": "telegram",
+				"account_id": "155",
+				"thread_id": "telegram:telegram:100000001",
+				"message_ids": ["telegram:7000001"],
+			},
+		)
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+
+	def test_message_deleted_in_a_named_but_unknown_chat_marks_nothing(self):
+		"""The event names a chat that is not mirrored: its message cannot be here, so a
+		row with the same id belongs to another chat (Telegram counts ids per chat)."""
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)  # telegram:7000001, unique on the account
+		process_event(
+			"message.deleted",
+			{"channel": "telegram", "account_id": "155", "thread_id": "telegram:telegram:999999",
+			 "message_ids": ["telegram:7000001"]},
+		)
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+
+	def test_message_deleted_without_a_thread_falls_back_only_on_unique_id(self):
+		from dialogbrain.sync.processor import process_event
+
+		_process(GROUP)
+		event = {"channel": "telegram", "account_id": "155", "message_ids": ["telegram:7000001"]}
+		# the id exists in a second chat of the same account -> ambiguous, untouched
+		_process(INBOUND, message_id="telegram:7000001")
+		process_event("message.deleted", copy.deepcopy(event))
+		self.assertNotEqual(_msg("9000002").delivery_status, "deleted")
+		self.assertNotEqual(_msg("9000001").delivery_status, "deleted")
+		# unique on the account -> marked
+		frappe.db.delete("DB Message", {"db_id": "9000001"})
+		process_event("message.deleted", copy.deepcopy(event))
+		self.assertEqual(_msg("9000002").delivery_status, "deleted")
+
 	def test_contact_updated_relinks(self):
 		from dialogbrain.sync.processor import process_event
 
@@ -697,10 +773,30 @@ class TestProcessor(DialogBrainTestCase):
 		ours = [c for c in pub.call_args_list if str(c.args[0] if c.args else c.kwargs.get("event")).startswith("dialogbrain:")]
 		self.assertTrue(ours)
 		users = {c.kwargs["user"] for c in ours}
-		self.assertEqual(users, {self.agent, self.manager})
+		# Ruling R9: System Managers see everything, so they get the events too
+		self.assertEqual(users, {self.agent, self.manager} | _system_managers())
 		self.assertNotIn(self.other, users)
 		for c in ours:
 			self.assertTrue(c.kwargs.get("after_commit"))
+
+	def test_realtime_reaches_system_managers_but_not_notification_log(self):
+		sysman = _user("proc-sysman@example.com", "System Manager")
+		frappe.get_doc(
+			{"doctype": "DB Channel", "account_id": "155", "channel_type": "telegram", "allowed_users": [{"user": self.agent}]}
+		).insert(ignore_permissions=True)
+		with patch("frappe.publish_realtime") as pub:
+			_process(INBOUND)
+		users = {c.kwargs["user"] for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")}
+		self.assertIn(sysman, users)
+		self.assertNotIn(self.other, users)
+		# Notification Log recipients are unchanged (no System Manager added)
+		self.assertNotIn(sysman, _logs(_conv_by_thread("1001")))
+		# a disabled System Manager gets nothing
+		frappe.db.set_value("User", sysman, "enabled", 0)
+		with patch("frappe.publish_realtime") as pub:
+			_process(INBOUND, db_id="2", message_id="telegram:2")
+		users = {c.kwargs["user"] for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")}
+		self.assertNotIn(sysman, users)
 
 	def test_notify_unassigned_only_first_inbound(self):
 		_process(INBOUND, db_id="1")
@@ -863,9 +959,11 @@ class TestProcessor(DialogBrainTestCase):
 				retry_webhook_logs()
 			if not enqueue.called:
 				break
-			self.assertEqual(enqueue.call_args.kwargs["log_name"], log)
+			# a queued row is the drain's: the scheduler kicks the lane, not the row
+			self.assertEqual(enqueue.call_args.args[0], processor.DRAIN_JOB)
+			self.assertEqual(enqueue.call_args.kwargs["lane"], "short")
 			with patch.object(processor, "process_event", side_effect=Killed), self.assertRaises(Killed):
-				processor.process_delivery(log_name=log)
+				processor.drain("short")
 			runs += 1
 		self.assertEqual(runs, 5)
 		row = frappe.db.get_value("DB Webhook Log", log, ["status", "attempts"], as_dict=True)

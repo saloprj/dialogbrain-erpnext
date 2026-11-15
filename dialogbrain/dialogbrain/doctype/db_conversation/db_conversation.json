@@ -1,7 +1,7 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 20:00:00.000000",
+ "modified": "2026-11-15 02:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -16,6 +16,7 @@
   "handle",
   "avatar_url",
   "db_contact_id",
+  "dialogbrain_instance",
   "party_type",
   "party",
   "contact",
@@ -100,16 +101,26 @@
    "permlevel": 1
   },
   {
+   "fieldname": "dialogbrain_instance",
+   "fieldtype": "Data",
+   "label": "DialogBrain Instance",
+   "read_only": 1,
+   "permlevel": 1,
+   "search_index": 1,
+   "no_copy": 1,
+   "description": "Which DialogBrain instance + workspace this thread id belongs to (sha1 of base URL | workspace id, 16 hex). Agent tools identify a chat only when it matches the current connection."
+  },
+  {
    "fieldname": "party_type",
    "fieldtype": "Link",
-   "label": "Party Type",
+   "label": "Customer or Lead Type",
    "options": "DocType",
    "permlevel": 1
   },
   {
    "fieldname": "party",
    "fieldtype": "Dynamic Link",
-   "label": "Party",
+   "label": "Customer or Lead",
    "options": "party_type",
    "permlevel": 1
   },
@@ -164,7 +175,8 @@
   },
   {
    "fieldname": "last_message_preview",
-   "fieldtype": "Small Text",
+   "fieldtype": "Code",
+   "ignore_xss_filter": 1,
    "label": "Last Message Preview",
    "permlevel": 1
   },

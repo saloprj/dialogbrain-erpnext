@@ -176,6 +176,11 @@ def link_party(conversation):
 			chosen = of_type[0] if len(of_type) == 1 else None
 			break
 	if not chosen:
+		# The current phone / email no longer supports a verified link (changed, or now
+		# shared by two parties): keep the link for a manager to review, but unverified,
+		# so the agent no longer gets the party's data.
+		if conv.link_source == "auto_verified":
+			frappe.db.set_value("DB Conversation", conversation, "link_source", "auto_unverified")
 		return None
 
 	channel_type = (frappe.db.get_value("DB Channel", conv.channel, "channel_type") or "").lower() if conv.channel else ""
@@ -229,12 +234,25 @@ def _add_channel_details(contact, phone, email):
 
 @frappe.whitelist()
 def set_party(conversation, party_type, party):
+	"""Link the conversation to a party by hand (``link_source = manual``).
+
+	A manual link releases the party's orders and invoices to the AI agent, so the
+	caller must be able to read that party in ERPNext (final wave F1, R12): Chat roles
+	alone are not enough — the permission is ERPNext's own (e.g. Sales User).
+	"""
 	conv = _check_write(conversation)
 	if party_type not in PARTY_TYPES:
 		frappe.throw(_("Party type must be Customer or Lead"))
 	if not frappe.db.exists(party_type, party):
-		frappe.throw(_("{0} {1} not found").format(party_type, party))
+		frappe.throw(_("{0} {1} not found", context="DialogBrain").format(party_type, party))
+	if not frappe.has_permission(party_type, "read", doc=party):
+		label = _("customer") if party_type == "Customer" else _("lead")
+		frappe.throw(_("You don't have access to this {0}").format(label), frappe.PermissionError)
+	_link(conv, party_type, party)
 
+
+def _link(conv, party_type, party):
+	conversation = conv.name
 	contact_name = _primary_contact(party_type, party)
 	if contact_name:
 		contact = frappe.get_doc("Contact", contact_name)
@@ -274,5 +292,6 @@ def create_lead(conversation):
 			"source": "Chat" if frappe.db.exists("Lead Source", "Chat") else None,
 		}
 	).insert(ignore_permissions=True)
-	set_party(conversation, "Lead", lead.name)
+	# The chat's own new Lead has no orders to release, so no Lead read is required.
+	_link(conv, "Lead", lead.name)
 	return lead.name

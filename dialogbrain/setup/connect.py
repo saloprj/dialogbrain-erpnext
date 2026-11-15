@@ -8,9 +8,11 @@ restores them from the database on any other save (R14).
 
 import frappe
 from frappe import _
-from frappe.utils import now_datetime
+from frappe.utils import cint, now_datetime
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.setup import agent_integration, agent_modes
 from dialogbrain.sync.backfill import enqueue_backfill, set_setting
 from dialogbrain.sync.upsert import upsert_channel
 
@@ -49,6 +51,18 @@ SERVER_FIELDS = (
 	"reconcile_status",
 	"backfill_status",
 	"connected",
+	"oauth_client_id",
+	"oauth_redirect_uri",
+	"oauth_base_url",
+	# agent tools (Plan 3); allow_agent_writes is the admin's switch, not server-managed
+	"erpnext_agent_user",
+	"integration_id",
+	"thread_context_secret",
+	"agent_capabilities",
+	"agent_tools_status",
+	"agent_tool_names",
+	# final wave F3: the DialogBrain instance + workspace of the last Connect
+	"dialogbrain_instance",
 )
 DELIVERED = "delivered"
 IN_FLIGHT = ("pending", "queued", "retrying")
@@ -154,9 +168,102 @@ def configure_webhook(doc, mode: str, client=None, hooks=None) -> None:
 
 
 @frappe.whitelist(methods=["POST"])
-def connect() -> dict:
-	frappe.only_for(ROLE)
+def connect(confirm_same_server: "str | int | None" = None) -> dict:
+	"""``confirm_same_server``: the admin confirmed that a changed DialogBrain address is
+	the same server and workspace (see :func:`check_instance_change`)."""
+	compat.only_for(ROLE)
+	return _connect(frappe.get_single(SETTINGS), confirm_same_server=cint(confirm_same_server))
+
+
+# --- another DialogBrain server / workspace (review F2) --------------------------------
+
+DIFFERENT_SERVER_MESSAGE = (
+	"This site holds chats mirrored from another DialogBrain server or workspace. Chats from a"
+	" different server or workspace cannot be mixed into this site: use a new site, or delete"
+	" the mirrored chats (DB Conversation) first. If it is the same DialogBrain server and"
+	" workspace at a new address, confirm that when you connect."
+)
+
+
+def _foreign_rows(new_key, old_key) -> bool:
+	"""Mirrored conversations that were not made under ``new_key``: rows stamped with
+	another key, and -- unless the stored key stays the same -- rows never stamped at all
+	(also when no key is stored: a site disconnected while the stamping patch ran has
+	none in Settings and none on its rows, and may now be pointed at another server)."""
+	if frappe.db.sql(
+		"""select name from `tabDB Conversation`
+		where dialogbrain_instance is not null and dialogbrain_instance != '' and dialogbrain_instance != %s
+		limit 1""",
+		(new_key,),
+	):
+		return True
+	if (old_key or None) != new_key:
+		return bool(
+			frappe.db.sql(
+				"""select name from `tabDB Conversation`
+				where dialogbrain_instance is null or dialogbrain_instance = '' limit 1"""
+			)
+		)
+	return False
+
+
+def _check_same_server(doc, workspace_id, confirm_same_server) -> bool:
+	"""Refuse a Connect that would mix another DialogBrain's chats into this site.
+
+	The instance key is sha1(base URL | workspace id): it also changes when the SAME server
+	is reached at a new address, which the code cannot tell from another server -- only
+	the admin can (``confirm_same_server``). Returns True when the existing rows must be
+	re-stamped with the new key. Throws before anything is written."""
+	from dialogbrain.instance import instance_key
+
+	new_key = instance_key(doc.base_url, workspace_id)
+	if not new_key or not _foreign_rows(new_key, doc.dialogbrain_instance):
+		return False
+	if not confirm_same_server:
+		frappe.throw(_(DIFFERENT_SERVER_MESSAGE), title=_("Another DialogBrain"))
+	if doc.workspace_id and str(doc.workspace_id) != str(workspace_id):
+		# the same workspace on the same server keeps its id: this is another one
+		frappe.throw(_(DIFFERENT_SERVER_MESSAGE), title=_("Another DialogBrain"))
+	return True
+
+
+def _restamp_conversations(new_key, old_key) -> None:
+	"""The admin confirmed the same server at a new address: rows of the old key (and
+	never-stamped ones) keep matching. Rows of any third instance stay as they are (never
+	identified). Like a never-stamped row (``upsert_conversation``), a verified party link
+	drops to ``auto_unverified`` until a person confirms it again (R13)."""
+	from dialogbrain.thread_context import VERIFIED_LINKS
+
+	frappe.db.sql(
+		"""update `tabDB Conversation`
+		set link_source = case when link_source in %(verified)s then 'auto_unverified' else link_source end,
+			dialogbrain_instance = %(key)s
+		where coalesce(dialogbrain_instance, '') in ('', %(old)s)""",
+		{"key": new_key, "old": old_key or "", "verified": tuple(VERIFIED_LINKS)},
+	)
+
+
+@frappe.whitelist()
+def check_instance_change() -> dict:
+	"""Asked by the Settings form before Connect (either way): ``{"ask": True, "refusal"}``
+	when the saved base URL would bind this site to another instance while mirrored chats
+	exist. A prediction from the stored workspace id: Connect checks again with the real one."""
+	compat.only_for(ROLE)
+	from dialogbrain.instance import instance_key
+
 	doc = frappe.get_single(SETTINGS)
+	predicted = instance_key(doc.base_url, doc.workspace_id)
+	if predicted:
+		ask = _foreign_rows(predicted, doc.dialogbrain_instance)
+	else:  # no workspace stored yet: any mirrored chat is of an unknown instance
+		ask = bool(frappe.db.sql("select name from `tabDB Conversation` limit 1"))
+	return {"ask": ask, "refusal": _(DIFFERENT_SERVER_MESSAGE) if ask else None}
+
+
+def _connect(doc, confirm_same_server=False) -> dict:
+	"""Verify the stored key, mirror channels, set up the webhook and start the backfill.
+
+	Shared by ``connect`` (pasted key) and the OAuth callback; the caller checks the role."""
 	mode = doc.network_mode or "public"
 	if mode == "public":
 		webhook_url(doc)
@@ -166,10 +273,16 @@ def connect() -> dict:
 		workspace = client.execute("workspace.current", {}) or {}
 	except DialogBrainError:
 		frappe.throw(_("Invalid API key or DialogBrain unreachable"))
+	workspace_id = str(workspace.get("id") or "") or None
+	_refuse_workspace_switch(doc, workspace, workspace_id)
+	old_key = doc.dialogbrain_instance
+	restamp = _check_same_server(doc, workspace_id, confirm_same_server)
 
 	missing = []
+	tools = set()
 	try:
-		missing += sorted(REQUIRED_TOOLS - set(client.list_tools() or ()))
+		tools = set(client.list_tools() or ())
+		missing += sorted(REQUIRED_TOOLS - tools)
 	except DialogBrainError:
 		missing.append(_("tool catalog (GET /api/tools/catalog)"))
 	try:
@@ -184,8 +297,19 @@ def connect() -> dict:
 	for account in channels:
 		upsert_channel(account.get("account_id"), account.get("channel"), account.get("display_name"))
 
+	# Each channel's agent mode (Plan 4): Connect never fails because of it; the reason
+	# is in every channel's agent_mode_status (sync writes it before raising).
+	try:
+		agent_modes.sync(client)
+	except Exception:
+		frappe.log_error(title="DialogBrain: agent modes not read at Connect")
 	configure_webhook(doc, mode, client, hooks)
-	doc.workspace_id = str(workspace.get("id") or "") or None
+	_bind_instance(doc, workspace_id)
+	if restamp:
+		_restamp_conversations(doc.dialogbrain_instance, old_key)
+	# Agent tools (Plan 3): never fails Connect; the outcome is in agent_tools_status.
+	agent_tools = agent_integration.on_connect(doc, client, tools)
+	doc.workspace_id = workspace_id
 	doc.workspace_name = workspace.get("name")
 	doc.connected = 1
 	doc.last_reconcile_at = now_datetime()
@@ -196,17 +320,56 @@ def connect() -> dict:
 		"channels": len(channels),
 		"network_mode": mode,
 		"warning": scheduler_warning(mode),
+		"agent_tools": agent_tools,
+		"agent_tools_ok": agent_integration.status_flag(doc) != "problems",
 	}
+
+
+def _refuse_workspace_switch(doc, workspace: dict, workspace_id) -> None:
+	"""R13 / final wave F3a: a connected site never moves to another workspace on a
+	reconnect (the OAuth path checks the same before it stores the new key)."""
+	if not doc.connected or not doc.workspace_id or workspace_id == str(doc.workspace_id):
+		return
+	current = str(doc.workspace_name or doc.workspace_id or "")[:100]
+	new = str(workspace.get("name") or workspace_id or "")[:100]
+	frappe.throw(_("This site is connected to {0}. Disconnect first to switch to {1}.").format(current, new))
+
+
+def _bind_instance(doc, workspace_id) -> None:
+	"""Store the instance key (DialogBrain base URL + workspace) on ``doc`` (not saved).
+
+	When it differs from the stored one, the site now talks to another DialogBrain (or
+	workspace): the old integration id, context secret and tool names belong to that one
+	and are cleared before registering (final wave F3d)."""
+	from dialogbrain.instance import instance_key
+
+	key = instance_key(doc.base_url, workspace_id)
+	if doc.dialogbrain_instance and key != doc.dialogbrain_instance:
+		doc.integration_id = None
+		doc.thread_context_secret = None
+		doc.agent_tool_names = None
+	doc.dialogbrain_instance = key
 
 
 @frappe.whitelist(methods=["POST"])
 def disconnect() -> None:
 	"""Stop syncing. The subscription is deleted; mirrored data stays."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
+	try:
+		client = _client(doc)
+	except frappe.ValidationError:
+		client = None
+	# Agent tools: the agent user's key is revoked (local) and the integration is
+	# switched off for every DialogBrain agent (best effort); its endpoints stay.
+	warning = agent_integration.on_disconnect(doc, client)
+	if warning:
+		frappe.msgprint(warning, indicator="orange")
 	if doc.webhook_id:
 		try:
-			_delete_webhook(_client(doc), doc.webhook_id)
+			if client is None:
+				raise frappe.ValidationError(_("DialogBrain Settings: base URL and API key are required"))
+			_delete_webhook(client, doc.webhook_id)
 		except (DialogBrainError, frappe.ValidationError) as exc:
 			# Disconnect anyway: the receiver ignores deliveries while disconnected, and
 			# the next Connect removes a leftover subscription for the same URL.
@@ -226,7 +389,7 @@ def disconnect() -> None:
 @frappe.whitelist(methods=["POST"])
 def resync() -> None:
 	"""Re-run the backfill (dedup'd job; also clears reconcile's failing-thread map)."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	if not frappe.db.get_single_value(SETTINGS, "connected"):
 		frappe.throw(_("Connect to DialogBrain first"))
 	enqueue_backfill()
@@ -237,7 +400,7 @@ def set_network_mode(mode: str) -> dict:
 	"""``private``: delete the webhook (reconcile polls every minute); ``public``: create it.
 	The webhook work happens in ``DialogBrainSettings.validate`` so a plain form save of
 	``network_mode`` behaves the same."""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	if mode not in MODES:
 		frappe.throw(_("Network mode must be one of: {0}").format(", ".join(MODES)))
 	doc = frappe.get_single(SETTINGS)
@@ -267,7 +430,7 @@ def webhook_health() -> dict:
 	``failures`` = consecutive failed deliveries, newest first (DialogBrain pauses a
 	subscription after 3). A paused (or deleted) subscription is absent from the list.
 	"""
-	frappe.only_for(ROLE)
+	compat.only_for(ROLE)
 	doc = frappe.get_single(SETTINGS)
 	if not doc.webhook_id:
 		status = PRIVATE_STATUS if doc.network_mode == "private" else "no webhook: run Connect"

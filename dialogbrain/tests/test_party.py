@@ -126,6 +126,24 @@ class TestPartyLinking(DialogBrainTestCase):
 		d = frappe.db.get_value("DB Conversation", conv, ["party", "link_source"], as_dict=1)
 		self.assertEqual((d.party, d.link_source), (a, "manual"))
 
+	def test_verified_link_downgraded_when_phone_no_longer_matches(self):
+		c = _customer("Pty Cust G", phone="+380 67 123 45 08")
+		conv = _conv("p-8", "whatsapp", phone="380671234508")
+		link_party(conv)
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "link_source"), "auto_verified")
+		frappe.db.set_value("DB Conversation", conv, "phone", "+44 7700 900123")  # matches nobody
+		self.assertIsNone(link_party(conv))
+		d = frappe.db.get_value("DB Conversation", conv, ["party", "link_source"], as_dict=1)
+		self.assertEqual((d.party, d.link_source), (c, "auto_unverified"))
+
+	def test_verified_link_downgraded_when_phone_becomes_ambiguous(self):
+		_customer("Pty Cust H1", phone="380671234508")
+		conv = _conv("p-9", "whatsapp", phone="380671234508")
+		link_party(conv)
+		_customer("Pty Cust H2", phone="380671234508")
+		self.assertIsNone(link_party(conv))
+		self.assertEqual(frappe.db.get_value("DB Conversation", conv, "link_source"), "auto_unverified")
+
 	def test_set_party_adds_phone_to_contact(self):
 		c = _customer("Pty Cust F", phone="+49 151 2345 6789")
 		conv = _conv("p-7", "livechat", phone="380671234508", email="f@example.com")

@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
+# DEV ONLY — do not use in production.
 # Idempotent dev install. Run from /home/denys/projects/erpnext.
 set -euo pipefail
+# containers that run Python and need the editable install
 SERVICES="backend queue-short queue-long scheduler websocket"
+# frontend too, so the D2/D3 mounts (built bundles, nginx template) apply on a fresh setup
+UP_SERVICES="$SERVICES frontend"
+DB_NETWORK=dialogbrain_dialogbrain-network
 B=erpnext-backend-1
 bench() { sudo docker exec -w /home/frappe/frappe-bench "$B" bench "$@"; }
 
-# 1. named services only, never a bare `up`
-sudo docker compose -p erpnext -f pwd.yml -f dialogbrain_erpnext/dev/compose.dialogbrain.yml up -d $SERVICES
+# 0. the dev DialogBrain stack's network (D1) must exist: compose declares it external
+if ! sudo docker network inspect "$DB_NETWORK" >/dev/null 2>&1; then
+  echo "ERROR: docker network '$DB_NETWORK' not found." >&2
+  echo "Start the dev DialogBrain stack first (it creates that network), then re-run this script." >&2
+  exit 1
+fi
+
+# 1. named services only, never a bare `up`; --no-deps so db / redis are never recreated
+sudo docker compose -p erpnext -f pwd.yml -f dialogbrain_erpnext/dev/compose.dialogbrain.yml \
+  up -d --no-deps $UP_SERVICES
 
 # 2. editable install in every container
 for s in $SERVICES; do
@@ -26,6 +39,12 @@ bench --site test.localhost set-config allow_tests true
 # Frappe v16 ticks the scheduler every 4 minutes by default; DialogBrain's reconcile
 # (every minute in private mode) needs a 60 s tick.
 bench set-config -g scheduler_tick_interval 60
+# Browser-facing API host for the OAuth issuer check (containers reach DialogBrain via
+# host.docker.internal, but DialogBrain derives `issuer` from the request Host).
+bench --site frontend set-config dialogbrain_oauth_issuer http://localhost:8000
+# frappe_docker's nginx drops the :8080 port from the Host it forwards, so without this
+# get_url() (the OAuth redirect URI, the webhook address) points at http://localhost.
+bench --site frontend set-config host_name http://localhost:8080
 
 # 5. install app + migrate
 for site in test.localhost frontend; do
@@ -34,3 +53,25 @@ for site in test.localhost frontend; do
   fi
   bench --site "$site" migrate
 done
+
+# 6. assets (a recreated backend loses the dialogbrain entries of assets.json), the
+# sites' cache (it keeps the old assets manifest: the inbox would open blank) and a
+# frontend restart (nginx caches the backend's old address after a recreate)
+bench build --app dialogbrain
+for site in test.localhost frontend; do
+  bench --site "$site" clear-cache
+done
+sudo docker restart erpnext-frontend-1
+
+# 7. DialogBrain reaches this site at http://erpnext-dev:8080 (the frontend's alias on the
+# DialogBrain network, see compose D4). Nothing below is changed by this script.
+cat <<'MSG'
+
+Manual steps for a DialogBrain that must call this ERPNext (integration tools):
+  1. In the DialogBrain stack set  SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev
+     (the variable REPLACES the compose default `minio`: leaving `minio` out breaks
+     DialogBrain's media proxy), then restart its api-gateway.
+  2. In ERPNext set the Public site URL of this dev site to  http://erpnext-dev:8080
+     (host.docker.internal is 10.200.0.1 here and DialogBrain refuses 10/8 for
+     integration calls).
+MSG

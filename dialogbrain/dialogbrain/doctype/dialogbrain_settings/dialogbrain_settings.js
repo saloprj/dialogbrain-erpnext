@@ -9,6 +9,10 @@ frappe.ui.form.on("DialogBrain Settings", {
 	network_mode(frm) {
 		dialogbrain_settings.render_intro(frm);
 	},
+
+	allow_agent_writes(frm) {
+		dialogbrain_settings.set_agent_writes(frm);
+	},
 });
 
 const dialogbrain_settings = {
@@ -16,19 +20,33 @@ const dialogbrain_settings = {
 		const connected = !!frm.doc.connected;
 		const group = __("DialogBrain");
 
-		frm.add_custom_button(connected ? __("Reconnect") : __("Connect"), () =>
-			this.call(frm, "connect", {}, (r) => {
-				const res = r.message || {};
-				frappe.show_alert({
-					message: __("Connected to {0}: {1} channels, history import queued", [
-						res.workspace,
-						res.channels,
-					]),
-					indicator: "green",
-				});
-				this.show_warning(res.warning);
-			})
-		, connected ? group : null);
+		const on_connected = (r) => {
+			const res = r.message || {};
+			this.show_connected(res);
+		};
+
+		const connect_with_key = () =>
+			this.save_first(frm, () =>
+				this.with_same_server((confirm) =>
+					this.call(frm, "connect", { confirm_same_server: confirm }, on_connected)
+				)
+			);
+
+		if (connected) {
+			frm.add_custom_button(__("Reconnect"), connect_with_key, group);
+			frm.add_custom_button(__("Reconnect with DialogBrain"), () => this.oauth_start(frm), group);
+		} else {
+			frm.add_custom_button(__("Connect with DialogBrain"), () => this.oauth_start(frm));
+			frm.change_custom_button_type(__("Connect with DialogBrain"), null, "primary");
+			frm.add_custom_button(__("Connect with API key"), () => {
+				if (!frm.doc.api_key) {
+					frm.fields_dict.api_key_section.collapse(false);
+					frm.fields_dict.api_key.$input && frm.fields_dict.api_key.$input.focus();
+					return;
+				}
+				connect_with_key();
+			});
+		}
 
 		if (connected) {
 			frm.add_custom_button(__("Re-sync"), () =>
@@ -52,7 +70,13 @@ const dialogbrain_settings = {
 				frappe.confirm(
 					__("Stop syncing with DialogBrain? Mirrored conversations stay in ERPNext."),
 					() => this.call(frm, "disconnect", {}, () =>
-						frappe.show_alert({ message: __("Disconnected"), indicator: "orange" })
+						frappe.show_alert({
+							message: __(
+								"Disconnected. To revoke access, delete the keys named \"ERPNext — {0} MCP\" in DialogBrain → Settings → Developer (each reconnect created a new one).",
+								[frappe.utils.escape_html(window.location.hostname)]
+							),
+							indicator: "orange",
+						}, 15)
 					)
 				)
 			, group);
@@ -60,6 +84,193 @@ const dialogbrain_settings = {
 
 		this.render_intro(frm);
 		this.render_health(frm);
+		this.render_agent_tools(frm);
+		this.show_oauth_result(frm);
+		frm._db_snapshot = this.snapshot(frm);
+	},
+
+	// Everything but the writes toggle, to tell whether the form has other unsaved edits.
+	snapshot(frm) {
+		const doc = frm.doc;
+		return JSON.stringify(
+			Object.keys(doc)
+				.filter((k) => !k.startsWith("__") && k !== "allow_agent_writes" && k !== "modified")
+				.sort()
+				.map((k) => [k, doc[k]])
+		);
+	},
+
+	set_agent_writes(frm) {
+		if (frm._db_writes_reverting || !frm.doc.connected) return; // unconnected: saved with the form
+		const allow = frm.doc.allow_agent_writes ? 1 : 0;
+		frappe.call({
+			method: "dialogbrain.setup.agent_integration.set_agent_writes",
+			args: { allow },
+			freeze: true,
+			freeze_message: __("Updating DialogBrain agents…"),
+			callback: (r) => {
+				const res = r.message || {};
+				if (res.warning) {
+					// writes are off in ERPNext (the real guard); DialogBrain lags behind
+					frappe.msgprint({
+						message: frappe.utils.escape_html(String(res.warning)),
+						indicator: "orange",
+						title: __("DialogBrain"),
+					});
+					frm.reload_doc();
+					return;
+				}
+				frappe.show_alert({
+					message: allow
+						? __("AI agents may now create Leads and draft Sales Orders")
+						: __("AI agent write tools switched off"),
+					indicator: allow ? "orange" : "green",
+				});
+				if (this.snapshot(frm) === frm._db_snapshot) frm.reload_doc();
+			},
+			error: () => {
+				frm._db_writes_reverting = true;
+				Promise.resolve(frm.set_value("allow_agent_writes", allow ? 0 : 1)).then(() => {
+					frm._db_writes_reverting = false;
+				});
+			},
+		});
+	},
+
+	render_agent_tools(frm) {
+		const esc = frappe.utils.escape_html;
+		let caps = {};
+		try {
+			caps = JSON.parse(frm.doc.agent_capabilities || "{}") || {};
+		} catch (e) {
+			caps = {};
+		}
+		const labels = [
+			["customer_tools", __("Customer data tools")],
+			["request_id", __("Safe send retries (request_id)")],
+			["agent_pause", __("Take over / give back")],
+			["full_drafts", __("Full draft text")],
+		];
+		const lines = [];
+		if (frm.doc.agent_capabilities) {
+			const items = labels.map(([key, label]) => {
+				const on = !!caps[key];
+				const color = on ? "var(--green-600)" : "var(--gray-600)";
+				return `<span style="color:${color}">${on ? "✓" : "✗"} ${esc(label)}</span>`;
+			});
+			lines.push(items.join(" &nbsp; "));
+		}
+		if (frm.doc.agent_tools_status) {
+			// colour from the server's flag (ok | problems | skipped), not from the wording
+			const flag = caps.status || "problems";
+			const color =
+				flag === "ok" ? "var(--green-600)" : flag === "skipped" ? "var(--gray-600)" : "var(--orange-600)";
+			lines.push(`<span style="color:${color}">${esc(frm.doc.agent_tools_status)}</span>`);
+		}
+		frm.set_df_property("agent_capabilities", "description", lines.join("<br>"));
+	},
+
+	oauth_start(frm) {
+		// start() reads the saved settings (base URL): save edits first.
+		this.save_first(frm, () => this.with_same_server((confirm) => this.oauth_start_call(confirm)));
+	},
+
+	// The saved address would bind the site to another DialogBrain instance while it holds
+	// mirrored chats: only the admin knows whether it is the same server and workspace at a
+	// new address. Yes -> Connect with confirm_same_server = 1; No -> the server's refusal.
+	with_same_server(run) {
+		frappe.call({
+			method: `${DB_CONNECT}.check_instance_change`,
+			callback: (r) => {
+				const res = r.message || {};
+				if (!res.ask) {
+					run(0);
+					return;
+				}
+				frappe.confirm(
+					__(
+						"The DialogBrain address changed and this site holds mirrored chats. Is it the same DialogBrain server and workspace, now at a new address?"
+					),
+					() => run(1),
+					() =>
+						frappe.msgprint({
+							message: frappe.utils.escape_html(res.refusal || ""),
+							indicator: "red",
+							title: __("Another DialogBrain"),
+						})
+				);
+			},
+		});
+	},
+
+	save_first(frm, run) {
+		if (frm.is_dirty()) {
+			frm.save().then(run);
+		} else {
+			run();
+		}
+	},
+
+	oauth_start_call(confirm) {
+		frappe.call({
+			method: "dialogbrain.setup.oauth.start",
+			args: { confirm_same_server: confirm ? 1 : 0 },
+			freeze: true,
+			freeze_message: __("Talking to DialogBrain…"),
+			callback: (r) => {
+				const url = (r.message || {}).authorize_url;
+				if (!url) return;
+				if (/^https?:\/\//i.test(url)) {
+					window.location.href = url;
+				} else {
+					frappe.msgprint({
+						message: __("DialogBrain returned an invalid sign-in address."),
+						indicator: "red",
+						title: __("Connect with DialogBrain failed"),
+					});
+				}
+			},
+		});
+	},
+
+	show_connected(res) {
+		const esc = frappe.utils.escape_html;
+		const tools_bad = res.agent_tools_ok === false;
+		let message = __("Connected to {0}: {1} channels, history import queued", [
+			esc(String(res.workspace)),
+			esc(String(res.channels)),
+		]);
+		if (tools_bad && res.agent_tools) {
+			message += "<br>" + __("AI agent tools: {0}", [esc(String(res.agent_tools))]);
+		}
+		frappe.show_alert({ message, indicator: tools_bad ? "orange" : "green" }, tools_bad ? 15 : 7);
+		this.show_warning(res.warning);
+	},
+
+	show_oauth_result(frm) {
+		const onload = frm.doc.__onload || {};
+		const res = onload.oauth_result;
+		if (!res) return;
+		delete onload.oauth_result; // shown once
+		if (res.ok) {
+			this.show_connected(res);
+			if (res.public_site_url_filled) {
+				frappe.msgprint({
+					message: __(
+						"Webhook address set to {0} — change it if DialogBrain can't reach this address",
+						[frappe.utils.escape_html(String(res.public_site_url_filled))]
+					),
+					indicator: "blue",
+					title: __("DialogBrain"),
+				});
+			}
+		} else {
+			frappe.msgprint({
+				message: frappe.utils.escape_html(res.message || ""),
+				indicator: "red",
+				title: __("Connect with DialogBrain failed"),
+			});
+		}
 	},
 
 	show_warning(text) {
@@ -81,11 +292,7 @@ const dialogbrain_settings = {
 				},
 			});
 		// Connect reads the saved settings (key, mode, site URL): save edits first.
-		if (frm.is_dirty()) {
-			frm.save().then(run);
-		} else {
-			run();
-		}
+		this.save_first(frm, run);
 	},
 
 	render_intro(frm) {
@@ -97,7 +304,7 @@ const dialogbrain_settings = {
 			if (tick_warning) lines.push(frappe.utils.escape_html(tick_warning));
 			frm.set_intro(lines.join("<br><br>"), "orange");
 		} else if (!frm.doc.connected) {
-			frm.set_intro(__("Not connected. Fill in the base URL, API key and public site URL, then press Connect."), "blue");
+			frm.set_intro(__("Not connected. Press Connect with DialogBrain, or open Connect with API key and paste a key."), "blue");
 		}
 	},
 

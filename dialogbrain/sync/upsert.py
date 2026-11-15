@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import frappe
 from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
+from dialogbrain.instance import current_instance
 from dialogbrain.party import contact_keys_from_ref, link_party
 from dialogbrain.sync.notify import notify, publish
 
@@ -114,6 +115,7 @@ def _insert(doc):
 	frappe.db.savepoint(save_point)
 	log_len = len(frappe.local.message_log or [])
 	try:
+		doc.flags.dialogbrain_server_write = True  # identity fields (DBConversation.validate)
 		doc.insert(ignore_permissions=True)
 		return True
 	except DUPLICATE_ERRORS:
@@ -122,6 +124,31 @@ def _insert(doc):
 		if frappe.local.message_log:
 			del frappe.local.message_log[log_len:]
 		return False
+
+
+# Display names from the channel (thread titles, a person's name, a handle) are written
+# with ``frappe.db.set_value``, which skips Frappe's XSS filter, and desk views (form,
+# list, report) inject Data values as HTML: store what ``doc.save`` would have stored.
+DISPLAY_FIELDS = ("title", "contact_name", "handle")
+
+
+def display_value(value):
+	if isinstance(value, str) and ("<" in value or ">" in value):
+		from frappe.utils.html_utils import sanitize_html
+
+		return sanitize_html(value)
+	return value
+
+
+def key_value(value):
+	"""A thread id / ref, phone, email, contact id or avatar URL as sync stores and matches
+	it: these are compared (party linking, thread lookups) and sent back to DialogBrain, so
+	they are never rewritten. A value with markup characters (no real one has them) is
+	refused instead: not stored, not matched -- the desk's Data formatter would inject it
+	as HTML, and Frappe's insert filter would store a different value than lookups use."""
+	if isinstance(value, str) and ("<" in value or ">" in value):
+		return None
+	return value
 
 
 # --- channel ----------------------------------------------------------------
@@ -136,6 +163,7 @@ def upsert_channel(account_id: str, channel_type: str, title: "str | None" = Non
 		updates = {}
 		if channel_type and current.channel_type != channel_type:
 			updates["channel_type"] = channel_type
+		title = display_value(title)
 		if title and current.title != title:
 			updates["title"] = title
 		if updates:
@@ -183,7 +211,7 @@ def find_conversation(internal=None, ref=None, channel=None, for_update=False):
 	``for_update``: a locking read, which sees rows committed after this transaction's
 	snapshot (needed after losing an insert race).
 	"""
-	internal, ref = _s(internal), _s(ref)
+	internal, ref = key_value(_s(internal)), key_value(_s(ref))
 	if internal:
 		name = frappe.db.get_value("DB Conversation", {"thread_id": internal}, for_update=for_update)
 		if name:
@@ -224,14 +252,20 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 	Viber DMs, email DMs) fills a missing one, so backfill and reconcile, which get no
 	contact metadata, link parties too. ``link_party`` runs on create and whenever
 	phone/email change.
+
+	``dialogbrain_instance`` (final wave F3b) is set to the current connection's instance
+	key on create, and on an existing row that has none; a row stamped by another instance
+	keeps its key (the agent tools then do not identify it).
 	"""
-	internal, ref = thread_keys(thread)
+	internal, ref = (key_value(k) for k in thread_keys(thread))
 	if not internal and not (ref and channel):
 		raise ValueError("DialogBrain thread without an internal id or a channel ref + channel")
 	values = {"title": _s(thread.get("title"))}
 	for field in CONTACT_FIELDS:
 		values[field] = _s(thread.get(field))
-	values = {k: _fit(k, v) for k, v in values.items() if v}
+	values = {
+		k: _fit(k, display_value(v) if k in DISPLAY_FIELDS else key_value(v)) for k, v in values.items() if v
+	}
 	values = {k: v for k, v in values.items() if v}
 
 	name = find_conversation(internal, ref, channel)
@@ -247,6 +281,7 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 				"channel": channel,
 				"status": "Open",
 				"unread_count": 0,
+				"dialogbrain_instance": current_instance(),
 				**values,
 			}
 		)
@@ -264,13 +299,26 @@ def upsert_conversation(thread: dict, channel: str) -> "tuple[str, bool]":
 			frappe.db.set_value("DB Conversation", name, "thread_id", internal)
 		return name, False
 
-	fields = {"thread_id", "thread_ref", "channel", "phone", "email", *values.keys()}
+	fields = {
+		"thread_id", "thread_ref", "channel", "phone", "email", "dialogbrain_instance", "link_source",
+		*values.keys(),
+	}
 	current = frappe.db.get_value("DB Conversation", name, sorted(fields), as_dict=True)
 	for field, value in contact_keys_from_ref(ref or current.thread_ref).items():
 		if field not in values and not current.get(field):
 			values[field] = _fit(field, value)
 	values = {k: v for k, v in values.items() if v}
 	updates = {k: v for k, v in values.items() if current.get(k) != v}
+	if not current.dialogbrain_instance and (instance := current_instance()):
+		updates["dialogbrain_instance"] = instance
+		# A row that was never stamped (a site disconnected while the migration ran) may
+		# come from another DialogBrain server or workspace, where this thread id was
+		# someone else's chat. Stamping it must not carry a verified customer link over:
+		# the agent would hand that customer's orders to whoever writes in this thread.
+		from dialogbrain.thread_context import VERIFIED_LINKS
+
+		if current.link_source in VERIFIED_LINKS:
+			updates["link_source"] = "auto_unverified"
 	if internal and current.thread_id != internal:
 		updates["thread_id"] = internal  # fill (or follow a re-created DialogBrain thread)
 	new_ref = ref if ref and not current.thread_ref else None
@@ -302,7 +350,11 @@ CONVERSATION_LINKS = (
 	("Comment", "reference_name", "reference_doctype"),
 	("ToDo", "reference_name", "reference_type"),
 	("File", "attached_to_name", "attached_to_doctype"),
+	("DB Agent Call Log", "conversation", None),
 )
+# Documents the AI agent created point back at their chat (``install.DB_CONVERSATION_DOCTYPES``);
+# the custom field may be absent (e.g. mid-uninstall), so each is checked first.
+DB_CONVERSATION_FIELD_DOCTYPES = ("Sales Order", "Quotation", "Lead")
 MERGE_FIELDS = (
 	"title",
 	*CONTACT_FIELDS,
@@ -344,8 +396,8 @@ def _mergeable(holder, internal):
 
 def _merge_conversation(target, source):
 	"""Fold ``source`` (a ref-only duplicate of the same thread) into ``target`` and delete
-	it, in the caller's transaction. Messages, drafts, notifications, comments, ToDos and
-	files are re-pointed; party link, assignment and contact details are taken from
+	it, in the caller's transaction. Messages, drafts, notifications, comments, ToDos,
+	files, agent call logs and the agent's documents (``db_conversation``) are re-pointed; party link, assignment and contact details are taken from
 	``source`` where ``target`` has none; counters are combined."""
 	for doctype, field, type_field in CONVERSATION_LINKS:
 		where = f"`{field}` = %(source)s"
@@ -355,6 +407,12 @@ def _merge_conversation(target, source):
 			f"update `tab{doctype}` set `{field}` = %(target)s where {where}",
 			{"target": target, "source": source},
 		)
+	for doctype in DB_CONVERSATION_FIELD_DOCTYPES:
+		if frappe.db.has_column(doctype, "db_conversation"):
+			frappe.db.sql(
+				f"update `tab{doctype}` set `db_conversation` = %(target)s where `db_conversation` = %(source)s",
+				{"target": target, "source": source},
+			)
 
 	tgt = frappe.db.get_value("DB Conversation", target, list(MERGE_FIELDS), as_dict=True)
 	src = frappe.db.get_value("DB Conversation", source, list(MERGE_FIELDS), as_dict=True)
@@ -474,15 +532,42 @@ def _find_echo_target(conversation, parsed):
 			"db_id": ["is", "not set"],
 			"delivery_status": ["in", list(ECHO_STATUSES)],
 		},
-		fields=["name", "text", "sent_at"],
+		fields=["name", "text", "sent_at", "raw"],
 		order_by="creation asc",
 	)
 	for row in candidates:
-		if not row.sent_at or not _same_text(row.text, parsed["body"]):
+		if not _same_text(row.text, parsed["body"]):
 			continue
-		if abs((get_datetime(row.sent_at) - sent_at).total_seconds()) <= ECHO_WINDOW_SECONDS:
-			return row.name
+		for at in _echo_anchors(row):
+			if abs((at - sent_at).total_seconds()) <= ECHO_WINDOW_SECONDS:
+				return row.name
 	return None
+
+
+def _echo_anchors(row):
+	"""When the reply may have gone out: ``sent_at`` (written when the reply was created)
+	and, for a retried reply, its attempts (``raw.claimed_at`` / ``raw.send.attempt_at``):
+	the echo of a retry hours later comes near the retry, not near ``sent_at`` (F2d)."""
+	import json
+
+	values = [row.sent_at]
+	raw = row.raw
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except ValueError:
+			raw = None
+	if isinstance(raw, dict):
+		send = raw.get("send") if isinstance(raw.get("send"), dict) else {}
+		values += [raw.get("claimed_at"), send.get("attempt_at")]
+	anchors = []
+	for value in values:
+		try:
+			if value:
+				anchors.append(get_datetime(value))
+		except Exception:  # noqa: BLE001 - unreadable stamp: ignored
+			pass
+	return anchors
 
 
 def upsert_message(conversation: str, message: dict, *, silent: bool = False) -> "tuple[str, bool]":

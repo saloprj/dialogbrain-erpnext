@@ -12,6 +12,11 @@
   "company",
   "default_manager",
   "agent_mode",
+  "agent_id",
+  "agent_name",
+  "agent_trigger_id",
+  "agent_mode_status",
+  "agent_mode_synced_at",
   "enabled",
   "allowed_users"
  ],
@@ -51,8 +56,39 @@
    "fieldname": "agent_mode",
    "fieldtype": "Select",
    "label": "Agent Mode",
-   "options": "copilot\nautopilot\noff",
-   "default": "copilot"
+   "options": "\ncopilot\nautopilot\noff",
+   "default": "",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_id",
+   "fieldtype": "Data",
+   "label": "Agent Id",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_name",
+   "fieldtype": "Data",
+   "label": "Agent Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_trigger_id",
+   "fieldtype": "Data",
+   "label": "Agent Trigger Id",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_mode_status",
+   "fieldtype": "Small Text",
+   "label": "Agent Mode Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_mode_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Agent Mode Synced At",
+   "read_only": 1
   },
   {
    "fieldname": "enabled",
