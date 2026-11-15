@@ -8,3 +8,4 @@ dialogbrain.patches.v0_1.fill_contact_keys_from_refs
 dialogbrain.patches.v0_1.add_agent_api_setup #2026-11-14-custom-field-module
 dialogbrain.patches.v0_1.set_conversation_instance
 dialogbrain.patches.v0_1.clear_unlinked_agent_mode
+dialogbrain.patches.v0_1.set_webhook_log_lane

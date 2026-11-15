@@ -77,3 +77,19 @@ Dev stand notes:
 - Dev stand alias: `erpnext-dev` on `dialogbrain_dialogbrain-network` is now in `dev/compose.dialogbrain.yml` and the documented way; `dev/install.sh` prints the DialogBrain-side steps (`SSRF_ALLOW_HTTP_HOSTS=minio,erpnext-dev`, Public site URL `http://erpnext-dev:8080`).
 - Browser check of the inbox on the dev stand (2026-11-14): done for the list, reports, channel form and Ukrainian UI; Take over / Give back still not seen (dev gateway is not on PR #5382). Details: `2026-11-14-plan-4-followups.md`.
 - Take over / Give back seen in the browser on 2026-11-14 against a gateway run from the PR #5382 branch (see `2026-11-14-plan-4-followups.md`).
+
+## Webhook flood on the dev stand (2026-11-14) — DialogBrain-side follow-ups
+Seen: channel-sync's LWM backfill of ten Telegram groups re-emitted ~5700 history rows in
+30 min as `message.received` with `skip_push: true`; ERPNext queued one RQ job per row,
+hit `frappe.QueueOverloaded` (503), and DialogBrain retried each 503 up to 5 times. Seven
+Connect/Reconnect rounds left deliveries of the deleted subscriptions retrying with their
+old secrets (401 ×5 each) and 628 of them `pending` forever. ERPNext side fixed in
+`fix/webhook-drain` (one drain job per lane, history older than `backfill_days` dropped at
+the door, `QueueOverloaded` never becomes a 503). Still owed in DialogBrain:
+- `webhook_dispatcher._run_attempts`: stop retrying when the subscription is no longer
+  `active` (today only `expires_at` is checked), and treat 401 as final (a wrong secret does
+  not fix itself within 80 s). `_sweep_orphaned_deliveries` leaves `pending` rows of inactive
+  subscriptions forever; mark them `failed`.
+- Backfill rows should not reach webhook subscribers as `message.received`: either a
+  separate `message.imported` event that subscriptions opt into, or skip `skip_push` rows
+  for non-MCP subscriptions. Subscribers that want history take it from `messages.read_history`.
