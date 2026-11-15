@@ -123,11 +123,12 @@ def tick() -> None:
 
 def _sweep_claims() -> None:
 	"""Numbers being connected from ERPNext whose browser tab is gone still get their owner
-	(``dialogbrain.claims``). One indexed lookup when nothing is pending."""
+	(``dialogbrain.claims``). One indexed lookup here; the calls to DialogBrain run in a
+	background job, never in the tick."""
 	try:
 		from dialogbrain import claims
 
-		claims.sweep()
+		claims.tick()
 	except Exception:
 		frappe.log_error(title="DialogBrain: channel claim sweep failed")
 

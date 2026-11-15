@@ -19,7 +19,7 @@ from frappe import _
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from dialogbrain import claims, compat, connect_gate
-from dialogbrain.client import DialogBrainClient, DialogBrainError
+from dialogbrain.client import DialogBrainClient, DialogBrainError, DialogBrainTimeout
 from dialogbrain.permissions import INBOX_ROLES, is_manager
 
 CLAIM = "DB Channel Claim"
@@ -40,9 +40,15 @@ BILLING = "Connecting channels is not included in this DialogBrain workspace's p
 NO_RIGHTS = "The DialogBrain key needs edit rights in the workspace to connect channels"
 BUSY = "Too many attempts. Wait a few minutes and try again"
 FAILED = "DialogBrain did not answer. Try again"
+UNSURE = "DialogBrain did not answer in time. Wait a minute and start again"
 
 
 # --- helpers ----------------------------------------------------------------
+
+
+def _commit() -> None:
+	if not frappe.flags.in_test:  # tests keep their own transaction
+		frappe.db.commit()
 
 
 def _waiting(status) -> bool:
@@ -102,10 +108,14 @@ def _qr(value) -> dict:
 		return {}
 	if value.startswith("data:"):
 		return {"qr_image": value} if _DATA_URL.match(value) else {}
-	import pyqrcode
+	try:
+		import pyqrcode
 
-	buffer = io.BytesIO()
-	pyqrcode.create(value, error="M").svg(
+		buffer = io.BytesIO()
+		code = pyqrcode.create(value, error="M")
+	except Exception:
+		return {}  # a text no QR can hold: the dialog shows "waiting" and the next poll retries
+	code.svg(
 		buffer, scale=5, quiet_zone=3, xmldecl=False, background="#ffffff", omithw=True
 	)  # omithw: a viewBox instead of a fixed size, so the page can scale it
 	return {"qr_svg": buffer.getvalue().decode("utf-8")}
@@ -167,9 +177,9 @@ def _settle(claim, data) -> dict:
 	if status == "connected" and data.get("account_id"):
 		return _state(claim, data, result=claims.resolve(claim.name, data))
 	if status == "expired":
-		claims.close(claim.name, "expired")
+		claims.close(claim.name, "expired", confirmed=True)  # DialogBrain's own answer
 	elif status == "error":
-		claims.close(claim.name, "failed")
+		claims.close(claim.name, "failed", confirmed=True)
 	return _state(claim, data)
 
 
@@ -208,22 +218,30 @@ def start(channel: str, method: str = "qr", owner: "str | None" = None) -> dict:
 		}
 	)
 	doc.insert(ignore_permissions=True)
-	reason = None
+	_commit()  # the claim exists before DialogBrain can connect anything for it
+	reason, unsure, data = None, False, {}
 	try:
 		data = DialogBrainClient.from_settings().execute(
 			connect_gate.START, {"channel": channel, "method": method, "external_ref": doc.name}
 		) or {}
+	except DialogBrainTimeout:
+		# DialogBrain may have started the session all the same. The claim stays open (no
+		# session id): a number that shows up for it is matched by external_ref, or kept
+		# for managers only (dialogbrain.claims).
+		reason, unsure = _(UNSURE), True
 	except DialogBrainError as exc:
 		reason = _explain(exc)
 	if reason is None and not data.get("session_id"):
 		reason = _(FAILED)
 	if reason is not None:
-		frappe.db.set_value(CLAIM, doc.name, {"status": "failed", "resolved_at": now_datetime()})
-		frappe.db.commit()  # the failed claim is kept; frappe.throw rolls nothing else back
+		if not unsure:
+			frappe.db.set_value(CLAIM, doc.name, {"status": "failed", "resolved_at": now_datetime()})
+		_commit()
 		frappe.throw(reason, frappe.ValidationError)
 	doc.session_id = str(data.get("session_id"))
 	doc.expires_at = _expires(data.get("expires_at"))
 	frappe.db.set_value(CLAIM, doc.name, {"session_id": doc.session_id, "expires_at": doc.expires_at})
+	_commit()  # the session id is kept whatever happens while the answer is built
 	return _state(doc, data)
 
 
@@ -234,6 +252,8 @@ def get(claim: str) -> dict:
 		if row.status == "connected":
 			return _state(row, status="connected", result=claims.resolve(row.name, {}))
 		return _state(row, status="expired" if row.status in ("expired", "cancelled") else "error")
+	if not row.session_id:
+		return _state(row, status="expired")  # a start that got no answer: start again
 	try:
 		data = DialogBrainClient.from_settings().execute(connect_gate.GET, {"session_id": row.session_id}) or {}
 	except DialogBrainError as exc:
@@ -253,7 +273,7 @@ def submit(claim: str, kind: str, secret=None) -> dict:
 		frappe.throw(_("Unknown input"), frappe.ValidationError)
 	if not isinstance(secret, str) or not secret.strip() or len(secret) > SECRET_MAX:
 		frappe.throw(_("Enter a value"), frappe.ValidationError)
-	if row.status != "open":
+	if row.status != "open" or not row.session_id:
 		frappe.throw(_(NOT_FOUND), frappe.DoesNotExistError)
 	_limit(f"connect_submit:{row.name}", SUBMIT_LIMIT)
 	secret = secret.strip()
@@ -277,8 +297,8 @@ def cancel(claim: str) -> dict:
 	"""Stop a connection that is still waiting. One that already connected is left alone:
 	closing the dialog must never disconnect a number."""
 	row = _claim(claim)
-	if row.status != "open":
-		return {"ok": True}
+	if row.status != "open" or not row.session_id:
+		return {"ok": True}  # nothing to cancel; an unanswered start is settled by the sweep
 	try:
 		client = DialogBrainClient.from_settings()
 		data = client.execute(connect_gate.GET, {"session_id": row.session_id}) or {}
@@ -288,6 +308,8 @@ def cancel(claim: str) -> dict:
 		if _waiting(str(data.get("status") or "")):
 			client.execute(connect_gate.CANCEL, {"session_id": row.session_id})
 	except DialogBrainError:
-		pass  # the session ends by itself in a few minutes
-	claims.close(row.name, "cancelled")
+		# Not known whether it connected: the claim stays open and the background sweep
+		# settles it. Closing it here could leave a just-connected number without its owner.
+		return {"ok": True}
+	claims.close(row.name, "cancelled", confirmed=True)
 	return {"ok": True}

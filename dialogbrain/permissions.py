@@ -2,7 +2,8 @@
 
 * System Manager (incl. Administrator) and Chat Manager see everything.
 * Chat Agent sees conversations of channels whose ``allowed_users`` is empty or
-  contains the user.
+  contains the user. A channel marked ``restricted`` ("Managers only") with no allowed
+  users is seen by managers only (see ``dialogbrain.claims``).
 * Anyone else sees nothing.
 
 Enforced via ``permission_query_conditions`` (lists) and ``has_permission`` (docs).
@@ -43,8 +44,8 @@ def allowed_channels(user):
 		return []
 	return frappe.db.sql_list(
 		"""SELECT ch.name FROM `tabDB Channel` ch
-		WHERE NOT EXISTS (SELECT 1 FROM `tabDB Channel User` cu
-			WHERE cu.parent = ch.name AND cu.parenttype = 'DB Channel')
+		WHERE (ch.restricted = 0 AND NOT EXISTS (SELECT 1 FROM `tabDB Channel User` cu
+			WHERE cu.parent = ch.name AND cu.parenttype = 'DB Channel'))
 		OR EXISTS (SELECT 1 FROM `tabDB Channel User` cu
 			WHERE cu.parent = ch.name AND cu.parenttype = 'DB Channel' AND cu.user = %s)""",
 		(user,),
@@ -63,7 +64,7 @@ def permitted_users(channel):
 		"SELECT user FROM `tabDB Channel User` WHERE parent = %s AND parenttype = 'DB Channel'",
 		(channel,),
 	)
-	if allowed:
+	if allowed or frappe.db.get_value("DB Channel", channel, "restricted"):
 		agents = [u for u in agents if u in set(allowed)]
 	return sorted(set(managers) | set(agents))
 

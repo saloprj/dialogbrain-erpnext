@@ -14,7 +14,8 @@ SETTINGS = "DialogBrain Settings"
 
 
 class FakeGateClient:
-	def __init__(self, tools, channels=None, fail_catalog=False):
+	def __init__(self, tools, channels=None, fail_catalog=False, fail_options=False):
+		self.fail_options = fail_options
 		self.tools = set(tools)
 		self.channels = channels
 		self.fail_catalog = fail_catalog
@@ -28,6 +29,8 @@ class FakeGateClient:
 	def execute(self, tool_id, params, **kwargs):
 		self.calls.append((tool_id, params))
 		if tool_id == connect_gate.OPTIONS:
+			if self.fail_options:
+				raise DialogBrainError("options down")
 			return {"channels": self.channels}
 		raise AssertionError(tool_id)
 
@@ -64,6 +67,14 @@ class TestConnectGate(DialogBrainTestCase):
 		_set(value=json.dumps({"telegram": ["qr", "phone"]}))
 		connect_gate.refresh(FakeGateClient(set(), fail_catalog=True))
 		self.assertEqual(connect_gate.options(), {"telegram": ["qr", "phone"]})
+
+	def test_options_failure_keeps_previous(self):
+		known = {"whatsapp": ["qr", "pairing_code"], "viber": ["qr"]}
+		_set(value=json.dumps(known))
+		client = FakeGateClient(connect_gate.NEEDED | {connect_gate.OPTIONS}, fail_options=True)
+		connect_gate.refresh(client)
+		self.assertEqual(connect_gate.options(), known)
+		self.assertEqual(json.loads(connect_gate.stored_value(client)), known)  # at Connect too
 
 	def test_off_when_not_connected(self):
 		_set(connected=0, value=json.dumps(connect_gate.DEFAULT))

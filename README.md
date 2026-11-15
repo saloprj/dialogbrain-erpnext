@@ -188,6 +188,14 @@ An employee can link their own WhatsApp or Telegram number without a DialogBrain
   and every agent sees it. A manager can change this later on the DB Channel form. This
   holds even if the browser is closed right after the scan: the assignment is finished on
   the server within about a minute.
+- **Managers only:** a number that shows up while someone is connecting one, before ERPNext
+  knows whose it is, is created with **Managers only** ticked: no agent sees it. It goes to
+  its owner as soon as DialogBrain says which connection it was, and it opens up if
+  DialogBrain says it was nobody's (a number connected in DialogBrain itself). If DialogBrain
+  could not be asked, it stays for managers only: choose its allowed users, or untick the
+  box, on the DB Channel form.
+- A number that is already a shared channel is not taken away from the other agents when
+  one of them scans it again; a manager assigns it.
 - **In DialogBrain** the account belongs to the workspace of the site's API key, not to the
   employee. "Only the owner and managers" is an ERPNext rule.
 - The phone number, the login code and the password are passed to DialogBrain once and are

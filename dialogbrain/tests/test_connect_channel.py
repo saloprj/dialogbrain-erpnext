@@ -6,7 +6,7 @@ import frappe
 
 from dialogbrain import connect_gate
 from dialogbrain.api import connect_channel as api
-from dialogbrain.client import DialogBrainError
+from dialogbrain.client import DialogBrainError, DialogBrainTimeout
 from dialogbrain.tests import connect_fakes as fk
 from dialogbrain.tests.utils import DialogBrainTestCase
 
@@ -228,6 +228,42 @@ class TestConnectChannel(DialogBrainTestCase):
 		self.assertEqual(self.row(waiting).status, "cancelled")
 		api.cancel(waiting)  # again: nothing more
 		self.assertEqual(len(self.fake.of(connect_gate.CANCEL)), 1)
+
+	def test_cancel_when_dialogbrain_is_unreachable_decides_nothing(self):
+		from dialogbrain import claims
+
+		name = api.start("whatsapp")["claim"]
+		self.fake.fail[connect_gate.GET] = DialogBrainTimeout("slow")
+		self.assertEqual(api.cancel(name), {"ok": True})
+		self.assertEqual(self.row(name).status, "open")  # it may have connected just now
+		del self.fake.fail[connect_gate.GET]
+		self.fake.connect("sess-1", A1)
+		claims.sweep()
+		self.assertEqual(fk.allowed(A1), [self.agent])
+
+	def test_start_timeout_keeps_the_claim_open(self):
+		from dialogbrain.sync.upsert import upsert_channel
+
+		self.fake.fail[connect_gate.START] = DialogBrainTimeout("slow")
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			api.start("whatsapp")
+		self.assertIn(api.UNSURE, str(ctx.exception))
+		row = frappe.get_all(CLAIM, fields=["name", "status", "session_id", "owner_user"])[0]
+		self.assertEqual((row.status, row.session_id, row.owner_user), ("open", None, self.agent))
+		# the session did start in DialogBrain and the number connects: never open to all
+		upsert_channel(A1, "whatsapp")
+		self.assertEqual(frappe.db.get_value("DB Channel", A1, "restricted"), 1)
+		upsert_channel(fk.PREFIX + "2", "whatsapp", external_ref=row.name)
+		self.assertEqual(fk.allowed(fk.PREFIX + "2"), [self.agent])
+		# the dialog of that claim: start again, nothing to send or cancel
+		self.assertEqual(api.cancel(row.name), {"ok": True})
+
+	def test_unanswered_start_shows_start_again(self):
+		name = fk.claim(self.agent, session_id=None)
+		self.assertEqual(api.get(name)["status"], "expired")
+		with self.assertRaises(frappe.DoesNotExistError):
+			api.submit(name, "code", "12345")
+		self.assertEqual(self.fake.calls, [])
 
 	def test_cancel_after_connected_keeps_the_number(self):
 		seen = api.start("whatsapp")["claim"]

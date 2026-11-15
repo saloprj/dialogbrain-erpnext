@@ -101,6 +101,18 @@ Each poll holds a gunicorn worker for the round trip to DialogBrain (client time
 ### Translations
 New strings in ru and uk.
 
+### Amendment after the server review (2026-11-16)
+
+The review of PR #10 found that the v2 rules could still open a personal number to every agent. These rules replace the ones above where they differ:
+
+- **Fail closed means "Managers only".** `DB Channel.restricted` (label "Managers only"): with no allowed users, only managers see the channel. A channel that may belong to an open claim and cannot be matched by `external_ref` is created restricted. It is never created with the open claims' owners, so two employees connecting at once do not see each other's number.
+- **No DialogBrain call in the webhook path.** `upsert_channel` only records the channel on the open claims and starts the background sweep.
+- **A channel leaves "Managers only" in two ways.** Either a claim turns out to be that number, and it goes to the owner. Or DialogBrain has answered, for every claim that listed it, that the session did not connect, and it becomes open. A claim that ends without such an answer keeps its channels restricted, for a manager to decide. That covers DialogBrain being unreachable and a start that timed out.
+- **Cancel decides nothing when DialogBrain cannot be asked.** The claim stays open for the sweep.
+- **A start that times out keeps its claim open**, without a session id. The claim and the session id are committed as soon as they exist.
+- **The sweep is a background job** started by the tick and by `upsert_channel`. It uses a 5 s timeout, takes the claims nearest to expiry first, stops after two unanswered calls, and one failing claim does not stop the rest. A claim past its grace period is asked about once more before it is closed.
+- **An existing open (shared) channel is not taken over** by an employee who scans it again. They are told a manager can assign it.
+
 ## Testing
 Unit tests use a fake `DialogBrainClient`.
 - Every status:

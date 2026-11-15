@@ -51,10 +51,9 @@ def read(client, tools=None) -> "dict | None":
 		return None
 	if OPTIONS not in tools:
 		return dict(DEFAULT)
-	try:
-		answer = client.execute(OPTIONS, {}) or {}
-	except DialogBrainError:
-		return dict(DEFAULT)
+	# a failing options call raises: the caller keeps what it knew, it does not fall back
+	# to the defaults and hide a method for an hour
+	answer = client.execute(OPTIONS, {}) or {}
 	return _clean(answer.get("channels")) or dict(DEFAULT)
 
 

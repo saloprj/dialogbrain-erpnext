@@ -101,6 +101,6 @@ def rate_limited(key: str, limit: int, seconds: int) -> bool:
 	cache = frappe.cache()
 	name = cache.make_key(f"dialogbrain_rl:{key}")
 	count = cache.incr(name)
-	if count == 1:
+	if count == 1 or cache.ttl(name) < 0:  # < 0: a counter left without its expiry
 		cache.expire(name, seconds)
 	return count > limit
