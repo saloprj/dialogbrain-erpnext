@@ -117,7 +117,8 @@ class TestClient(DialogBrainTestCase):
 		self.assertEqual(req.call_args[1]["params"], {"limit": 2})
 
 	def test_mask(self):
-		self.assertEqual(mask("db_live_abcdef1234"), "db_live_…1234")
+		self.assertEqual(mask("db_live_abcdef1234"), "db_…1234")
+		self.assertEqual(mask("db_test_abcdef1234"), "db_…1234")
 
 	def test_read_timeout_is_dialogbrain_timeout(self):
 		import requests

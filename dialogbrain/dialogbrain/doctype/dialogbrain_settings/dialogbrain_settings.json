@@ -1,13 +1,18 @@
 {
  "actions": [],
  "creation": "2026-11-13 00:00:00.000000",
- "modified": "2026-11-13 19:00:00.000000",
+ "modified": "2026-11-13 23:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "api_key_section",
   "base_url",
   "api_key",
+  "settings_section",
+  "oauth_client_id",
+  "oauth_redirect_uri",
+  "oauth_base_url",
   "workspace_id",
   "workspace_name",
   "network_mode",
@@ -25,6 +30,12 @@
  ],
  "fields": [
   {
+   "fieldname": "api_key_section",
+   "fieldtype": "Section Break",
+   "label": "Connect with API key",
+   "collapsible": 1
+  },
+  {
    "fieldname": "base_url",
    "fieldtype": "Data",
    "label": "Base Url",
@@ -34,6 +45,30 @@
    "fieldname": "api_key",
    "fieldtype": "Password",
    "label": "Api Key"
+  },
+  {
+   "fieldname": "settings_section",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "oauth_client_id",
+   "fieldtype": "Data",
+   "label": "OAuth Client Id",
+   "read_only": 1
+  },
+  {
+   "fieldname": "oauth_redirect_uri",
+   "fieldtype": "Data",
+   "label": "OAuth Redirect Uri",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "oauth_base_url",
+   "fieldtype": "Data",
+   "label": "OAuth Base Url",
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "workspace_id",

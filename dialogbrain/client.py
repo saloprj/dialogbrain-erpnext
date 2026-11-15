@@ -10,8 +10,8 @@ import requests
 
 
 def mask(secret: str) -> str:
-	"""``db_live_abcdef1234`` -> ``db_live_…1234`` (safe to log)."""
-	return "db_live_…" + (secret or "")[-4:]
+	"""``db_live_abcdef1234`` -> ``db_…1234`` (safe to log; prefix-agnostic)."""
+	return "db_…" + (secret or "")[-4:]
 
 
 class DialogBrainError(Exception):
