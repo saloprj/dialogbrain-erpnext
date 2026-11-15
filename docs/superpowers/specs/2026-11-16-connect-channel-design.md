@@ -1,67 +1,132 @@
 # Connect a channel from ERPNext — short design
 
-Status: draft 2026-11-16, waiting for Denys's approval. Depends on DialogBrain `channels.connect_session.*`, which David is building and which is not on DialogBrain main yet.
+Status: draft v2 2026-11-16, revised after an outside review. Waiting for Denys's approval.
+
+Depends on DialogBrain `channels.connect_session.*`, which David is building and which is not on DialogBrain main yet. The contract items we need from him are listed at the end.
 
 ## Intent
-An employee connects **their own** WhatsApp or Telegram number to the company's DialogBrain workspace without leaving ERPNext and without a DialogBrain login. The number then belongs to that employee: only they (and managers) see its chats. This is the flow UA-Pro asked for in their CRM ("сразу привязали номер к менеджеру"). We want it in our app so partners can sell it.
+An employee connects **their own** WhatsApp or Telegram number to the company's DialogBrain workspace without leaving ERPNext and without a DialogBrain login. In ERPNext the number then belongs to that employee: only they (and managers) see its chats. This is the flow UA-Pro asked for ("сразу привязали номер к менеджеру"), and we want it in our app so partners can sell it.
+
+In DialogBrain itself the account belongs to the user who owns the site's API key, not to the employee. "Only the employee and managers see it" is an ERPNext rule. For employees who never log in to DialogBrain, that is the goal.
 
 ## Goals, non-goals, anti-goals
-- Goal: a Chat Agent connects a number in under a minute, using a QR scan, a WhatsApp pairing code, or a Telegram phone number with code and 2FA password.
-- Goal: the new channel appears in ERPNext right away (a DB Channel row) with `allowed_users` = that employee.
-- Goal: a manager can connect a number on behalf of a chosen employee, or as a shared number.
-- Non-goal: Viber in this step. The screen offers it only when DialogBrain accepts `channel: viber`. David builds Viber as a second stage.
-- Non-goal: disconnecting a number from ERPNext, or re-linking it when an employee leaves. Managers already edit `allowed_users` on DB Channel; disconnecting stays in DialogBrain for now.
-- Anti-goal: one ERPNext user polling or answering another user's session (a QR or code gives access to someone's messenger).
-- Anti-goal: phone numbers, codes or passwords in logs, error logs or the Webhook Log.
+- Goal: a Chat Agent connects a number in under a minute. Methods: QR, WhatsApp pairing code, or Telegram phone number with code and 2FA password.
+- Goal: the channel appears in ERPNext with `allowed_users` set to the owner, **even if the browser is closed right after the scan**.
+- Goal: a manager can connect a number for a chosen employee, or as a shared number.
+- Non-goal: Viber in this step. It is offered only when DialogBrain advertises it (see "Feature gates").
+- Non-goal: disconnecting a number from ERPNext, and re-linking a number when an employee leaves. Managers edit `allowed_users` on DB Channel as today.
+- Anti-goal: a personal number left visible to all agents, i.e. a new DB Channel created with empty `allowed_users` while its claim is pending.
+- Anti-goal: one ERPNext user reading or answering another user's session.
+- Anti-goal: phone numbers, codes or passwords in Error Log, the Webhook Log or any other log.
 - Anti-goal: a duplicate channel when the number is already connected.
+- Anti-goal: a number disconnected because someone closed the dialog after it connected.
 
 ## Approaches
-- **B (chosen by Denys on 2026-11-16): each employee connects their own number, and it is assigned to them automatically.** Managers can also connect for someone else.
-- A (rejected): only managers connect numbers and then assign them. Simpler, but it doesn't match how partners like UA-Pro work.
-- How we talk to DialogBrain:
-  - **Chosen:** ERPNext proxies the four `channels.connect_session.*` tools through the existing `DialogBrainClient.execute` with the site's workspace key. The browser polls ERPNext every 2 s, and ERPNext calls `get`. Nothing new is exposed to the browser, and the key never leaves the server.
-  - Rejected: give the browser a short-lived DialogBrain token and poll DialogBrain directly. That needs a new token type in DialogBrain and exposes more.
+- **B (chosen by Denys on 2026-11-16): each employee connects their own number, and it is assigned to them automatically.** Managers can connect for someone else. A (managers only, then assign) was rejected because it does not match how partners work.
+- **Transport:** ERPNext proxies the four `channels.connect_session.*` tools through `DialogBrainClient.execute` with the site's key. The browser polls ERPNext and the key never leaves the server. Rejected: giving the browser a short-lived DialogBrain token, which needs a new token type and exposes more.
+- **How the owner reaches the channel when the browser is gone** (the review's main point):
+  - **Chosen:** a persistent **DB Channel Claim** row, resolved on the server, plus `external_ref` from DialogBrain when available.
+  - Rejected: binding the owner only in the browser's `get` poll (the v1 draft). A closed tab or an early webhook leaves the channel open to every agent.
+  - Rejected: relying on a channel sync. There is no periodic `channels.list` sync. Channels are created only at Connect/Re-sync and by the first webhook or backfill through `upsert_channel`.
 
 ## Design
-- **Entry points:** a "Connect channel" button in the Chats page menu and on the DB Channel list. It is visible to Chat Agent, Chat Manager and System Manager, and only while the workspace's tool catalog lists `channels.connect_session.start`. Otherwise the button explains that the DialogBrain server does not support it yet.
-- **Dialog (Frappe dialog, no new JS dependencies):**
-  1. Pick a channel: WhatsApp or Telegram. Viber appears only if supported.
-  2. Managers only: pick the owner, either an employee (Chat Agent) or "shared (no owner)".
-  3. Pick a method:
-     - WhatsApp: QR (default) or "pairing code by phone number". That asks for the phone and shows the 8-character code to enter on the phone.
-     - Telegram: QR (default) or phone number, then the code, then the 2FA password if `need_password`.
-  4. Show the live state:
-     - The QR comes from the current `get` and is redrawn whenever it changes.
-     - A countdown runs to `expires_at`. On `expired` there is a "Start again" button.
-     - Errors show `error` as text, including `billing_required` with a clear message.
-     - Closing the dialog calls `cancel`.
-- **Server (`dialogbrain/api/connect_channel.py`, whitelisted, POST):**
-  - `start(channel, method, owner=None)`:
-    - Checks the role and the owner: an agent's owner is always themselves; a manager may pick any enabled user with Chat Agent, or none.
-    - Rate limit: 5 starts per user per 10 minutes.
-    - Calls `channels.connect_session.start`.
-    - Stores `session_id → {user, owner, channel}` in the Frappe cache with a TTL of about 5 minutes. Returns the state.
-  - `get(session_id)` / `submit(session_id, phone|code|password)` / `cancel(session_id)`:
-    - Allowed only for the user who started the session; otherwise "not found".
-    - `submit` is rate-limited (10 per session). Its values are never logged and never stored.
-  - **QR:** drawn on the server as an inline SVG with `pyqrcode`, which Frappe already ships for 2FA.
-  - **On `connected` (in `get`):**
-    - Call `upsert_channel(account_id, channel, name or phone)`.
-    - If the channel is new, or exists with no allowed users, set `allowed_users` to the owner. If it already belongs to someone else, leave it and tell the user who owns it (idempotent: same `account_id` means the same row).
-    - Run `agent_modes` for that channel so its agent mode shows at once.
-    - Publish a realtime update so the channel filter and the inbox refresh.
-  - **Errors:** DialogBrain errors are passed on as text with the key scrubbed (the same `_reason` pattern as `api/channels.py`). Nothing goes to Error Log with request params.
-- **Webhooks:** `channel.connected` / `needs_reauth` are optional for us. Polling `get` is enough for the dialog, and the existing hourly channel sync still picks up channels connected elsewhere. If DialogBrain sends `needs_reauth`, the DB Channel shows a "reconnect needed" status line. That status line is a small follow-up, not part of this step.
-- **Translations:** new strings in ru and uk, as for the rest of the app.
+
+### Data
+New DocType **DB Channel Claim**. It is not visible to agents, and only System Manager can read it in the Desk. Fields:
+- `session_id`
+- `requested_by` (User)
+- `owner_user` (User or empty for shared)
+- `channel_type`
+- `method`
+- `status`: open | connected | expired | cancelled | failed
+- `account_id` (once known)
+- `expires_at` (DialogBrain's `expires_at`, refreshed on every `get`/`submit`)
+- `resolved_at`
+
+No phone, code or password is stored.
+
+### Server, `dialogbrain/api/connect_channel.py`
+All endpoints are whitelisted and POST only.
+- **`start(channel, method, owner=None)`**
+  - Role check: Chat Agent, Chat Manager or System Manager. An agent's owner is always themselves. A manager may choose any enabled user with Chat Agent, or none.
+  - Rate limit with `frappe.rate_limiter.rate_limit` (user based): 10 starts per 10 minutes. "Start again" after `expired` counts as a start, and Telegram QR expires often.
+  - Calls `channels.connect_session.start {channel, method, external_ref: <claim name>}`.
+  - Inserts the claim. Returns the state.
+  - WhatsApp pairing passes the phone through `submit`, not `start`, so the phone never appears in `start`'s parameters.
+- **`get(claim)`, `submit(claim, kind, secret)`, `cancel(claim)`**
+  - Allowed only for the claim's `requested_by`. Anyone else gets "not found".
+  - `submit` has one parameter named `secret`, with `kind` one of phone, code or password. Frappe's Error Log masks parameter names containing "secret", so a crash cannot write the phone or code to the Error Log. Rate limit: 10 submits per claim.
+  - `cancel` is sent to DialogBrain only while the claim is open and DialogBrain's status is a waiting one. After `connected` it only closes the dialog.
+- **QR.** The contract is that `qr` is the raw QR string, which the server draws as inline SVG with `pyqrcode` (already a Frappe dependency, used for 2FA). If DialogBrain sends a `data:` URL, it is passed through as is.
+
+### Resolving a claim
+One function, `claims.resolve(claim, state)`, is called from three places:
+1. `get`, when the browser polls and sees `connected`.
+2. A sweep in the existing every-minute `reconcile.tick`. It calls `connect_session.get` for each open claim until `expires_at` plus a grace period, so a scan whose tab was closed still resolves within about a minute.
+3. `upsert_channel`, when it is about to **create** a new DB Channel. If that `channel_type` has open claims:
+   - It first tries `external_ref`, if DialogBrain supplied it with the account (in `channels.list` or the event).
+   - Otherwise it calls `connect_session.get` on those claims (bounded: at most 3 calls, 5 s each) and binds the claim whose `account_id` matches.
+   - If nothing matches while claims are still open, it **fails closed**: the channel is created with `allowed_users` set to the claim owners of that type, and managers see it as usual. The next sweep sets it right.
+
+`resolve` does the following:
+- Under a row lock on the claim (`SELECT … FOR UPDATE`), it calls `upsert_channel`.
+- If the channel is new or has no allowed users, it sets `allowed_users` to the owner (empty owner means shared).
+- If the channel already belongs to someone else, it leaves it and returns "already assigned to another employee", without naming them.
+- It marks the claim connected.
+- All writes use `ignore_permissions` or `frappe.db`, because Chat Agent has no write permission on DB Channel.
+- It runs `agent_modes` for the channel and publishes a realtime update so the inbox filters refresh.
+
+Idempotency: the same `account_id` always means the same DB Channel row.
+
+### Feature gates
+- The "Connect channel" button reads the stored tool catalog (`agent_tool_names`). That catalog is refreshed at Connect/Re-sync and **also in `agent_modes.hourly`**, so the button appears within an hour of David's deploy without an admin clicking Re-sync. When the tool is missing, the button is hidden.
+- Channels and methods come from the tool's input schema in the catalog: the `channel` enum, and the `method` enum or the `submit` kinds.
+  - Viber is offered only if the enum lists it.
+  - WhatsApp pairing code is offered only if the schema lists it. It is new work for David: DialogBrain has no `requestPairingCode` today.
+  - If no schema is available, only QR for WhatsApp and Telegram is offered.
+
+### Dialog
+It is a Frappe dialog with no new JS dependencies. It is opened from the Chats page menu and from the DB Channel list.
+1. Pick the channel.
+2. Managers only: pick the owner, an employee or "shared".
+3. Pick the method.
+4. Show the live state.
+   - QR or pairing code, plus a countdown to `expires_at`.
+   - Polling every **3 s**, paused while the tab is hidden, with backoff after errors.
+   - "Start again" after `expired`.
+   - Clear messages for `billing_required` and for a key without edit rights. The latter is our own text: "the DialogBrain key needs edit rights in the workspace to connect channels", not the agent-mode wording from `api/channels.py`.
+
+Each poll holds a gunicorn worker for the round trip to DialogBrain (client timeout 20 s). That is fine for a few people connecting at once, and the 3 s interval plus the hidden-tab pause keep it bounded.
+
+### Translations
+New strings in ru and uk.
 
 ## Testing
-- Unit tests with a fake `DialogBrainClient`:
-  - Every status path: waiting_scan, need_code, need_password, need_pairing_code, connected, expired, error/billing_required.
-  - Ownership rules (agent vs. manager, someone else's session).
-  - Rate limits.
-  - No secrets in logs.
-  - The connected → DB Channel + `allowed_users` result, and idempotency.
-- Live e2e against dev DialogBrain once David's branch is on dev. Until then the feature is hidden by the catalog check, so it can ship to prod safely.
+Unit tests use a fake `DialogBrainClient`.
+- Every status:
+  - waiting_scan, need_code, need_password and need_pairing_code;
+  - connected, expired, error and billing_required.
+- Ownership:
+  - agent vs. manager;
+  - another user's claim gets "not found";
+  - "already assigned" names nobody.
+- **The closed-tab path:**
+  - The sweep resolves the claim.
+  - A webhook arriving first for an unknown account is matched through the claim, or fails closed and is never open to all agents.
+- Rate limits.
+- No phone, code or password in Error Log, including for an exception raised inside `submit`.
+- Cancel after connected sends nothing to DialogBrain.
+- Feature gates: no tool means no button, and the enum controls Viber and pairing.
+
+Once David's branch is on dev, a live e2e check against dev DialogBrain. Until then the feature stays hidden by the gate, so it can ship to prod safely.
+
+## Contract items to confirm with David
+1. `start` accepts `external_ref`, stores it with the session and the resulting account, and returns it in `get`, `channels.list` and the `channel.connected` event.
+2. `get` keeps answering `connected` with `account_id` for at least 10 minutes after the connection, so the sweep can catch it.
+3. `cancel` on a connected session does nothing. It never disconnects.
+4. `qr` is the raw QR string.
+5. The tool input schemas list the supported `channel` values and methods (pairing code and phone).
+6. Rejections use clear error types: `billing_required`, `permission_denied` (key lacks EDIT), `unsupported_channel`, and `rate_limited`.
 
 ## Left to the builder
-Exact cache keys, dialog copy and layout, polling backoff after errors, and how the countdown is drawn.
+Dialog copy and layout, the exact grace period, backoff numbers, and the claim retention period.
