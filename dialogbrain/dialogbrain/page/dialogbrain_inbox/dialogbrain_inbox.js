@@ -32,11 +32,11 @@ frappe.pages["dialogbrain-inbox"].on_page_show = function (wrapper) {
 // Menu toggle for the new-message sound (stored per browser in localStorage, see the desk bundle).
 function setupSoundMenu(page) {
 	const db = frappe.dialogbrain || {};
-	if (!db.soundEnabled || !db.setSoundEnabled) return;
 	page.clear_menu();
 	if (db.connect_channel && db.connect_channel.canConnect()) {
 		page.add_menu_item(__("Connect channel"), () => db.connect_channel.open());
 	}
+	if (!db.soundEnabled || !db.setSoundEnabled) return;
 	const on = db.soundEnabled();
 	page.add_menu_item(on ? __("Mute new-message sound") : __("Unmute new-message sound"), () => {
 		db.setSoundEnabled(!on);

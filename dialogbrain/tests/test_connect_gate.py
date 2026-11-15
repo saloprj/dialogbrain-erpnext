@@ -54,7 +54,8 @@ class TestConnectGate(DialogBrainTestCase):
 	def test_options_tool_controls_methods(self):
 		client = FakeGateClient(
 			connect_gate.NEEDED | {connect_gate.OPTIONS},
-			{"whatsapp": ["qr", "pairing_code", "carrier_pigeon"], "viber": ["qr"], "fax": ["smoke"]},
+			{"whatsapp": ["qr", "pairing_code", "carrier_pigeon"], "viber": ["qr"], "fax": ["smoke"],
+			 "<img src=x onerror=alert(1)>": ["qr"]},
 		)
 		connect_gate.refresh(client)
 		self.assertEqual(connect_gate.options(), {"whatsapp": ["qr", "pairing_code"], "viber": ["qr"]})

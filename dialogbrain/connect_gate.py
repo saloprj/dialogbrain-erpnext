@@ -10,6 +10,7 @@ it only the QR flows of WhatsApp and Telegram are offered.
 """
 
 import json
+import re
 
 import frappe
 
@@ -25,6 +26,7 @@ OPTIONS = "channels.connect_session.options"
 NEEDED = {START, GET, SUBMIT, CANCEL}
 METHODS = ("qr", "pairing_code", "phone")
 DEFAULT = {"whatsapp": ["qr"], "telegram": ["qr"]}
+_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
 
 
 def _clean(channels) -> dict:
@@ -35,9 +37,10 @@ def _clean(channels) -> dict:
 	for channel, methods in channels.items():
 		if not isinstance(channel, str) or not isinstance(methods, (list, tuple)):
 			continue
+		channel = channel.strip().lower()
 		known = [m for m in METHODS if m in methods]
-		if known:
-			out[channel.strip().lower()[:40]] = known
+		if known and _NAME.match(channel):  # the name is shown in the dialog and sent back
+			out[channel] = known
 	return out
 
 

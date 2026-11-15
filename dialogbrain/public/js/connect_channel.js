@@ -46,7 +46,7 @@ frappe.provide("frappe.dialogbrain");
 		try {
 			info = await call("options");
 		} catch (e) {
-			frappe.msgprint(errorText(e));
+			frappe.msgprint(frappe.utils.escape_html(errorText(e)));
 			return;
 		}
 		if (!info || !info.channels || !Object.keys(info.channels).length) {
@@ -71,6 +71,8 @@ frappe.provide("frappe.dialogbrain");
 			this.tick = null;
 			this.failures = 0;
 			this.closed = false;
+			this.step = null; // what is drawn now (see render)
+			this.seq = 0; // bumped by every submit: an older poll answer is ignored
 			this.onVisibility = () => {
 				if (!document.hidden && this.claim && this.waiting) this.schedule(0);
 			};
@@ -85,7 +87,7 @@ frappe.provide("frappe.dialogbrain");
 					fieldtype: "Select",
 					label: __("Channel"),
 					reqd: 1,
-					options: channels.map((c) => ({ value: c, label: labels[c] || c })),
+					options: channels.map((c) => ({ value: c, label: labels[c] || frappe.utils.escape_html(c) })),
 					default: channels[0],
 					onchange: () => this.fillMethods(),
 				},
@@ -123,7 +125,7 @@ frappe.provide("frappe.dialogbrain");
 				primary_action: () => this.start(),
 			});
 			this.dialog.onhide = () => this.close();
-			this.live = this.dialog.fields_dict.live.$wrapper;
+			this.live = this.dialog.fields_dict.live.$wrapper.attr("aria-live", "polite");
 			this.fillMethods();
 			this.dialog.show();
 			document.addEventListener("visibilitychange", this.onVisibility);
@@ -156,7 +158,13 @@ frappe.provide("frappe.dialogbrain");
 			this.setup(false);
 			this.message(__("Starting…"));
 			try {
-				this.apply(await call("start", args));
+				const state = await call("start", args);
+				if (this.closed) {
+					// closed while starting: nobody will poll this connection
+					if (state && state.claim) call("cancel", { claim: state.claim }).catch(() => {});
+					return;
+				}
+				this.apply(state);
 			} catch (e) {
 				this.setup(true);
 				this.message(errorText(e), "red");
@@ -188,11 +196,17 @@ frappe.provide("frappe.dialogbrain");
 
 		async poll() {
 			if (this.closed || !this.claim) return;
+			const seq = this.seq;
 			try {
-				this.apply(await call("get", { claim: this.claim }));
+				const state = await call("get", { claim: this.claim });
+				if (seq !== this.seq) return; // a code was sent meanwhile: its answer is newer
+				this.apply(state);
 			} catch (e) {
+				if (seq !== this.seq) return;
 				this.failures += 1;
-				if (this.failures > 5) {
+				const gone = e && (e.status === 404 || e.status === 403);
+				if (gone || this.failures > 5) {
+					if (!gone) call("cancel", { claim: this.claim }).catch(() => {});
 					this.waiting = false;
 					this.again(errorText(e));
 					return;
@@ -202,11 +216,13 @@ frappe.provide("frappe.dialogbrain");
 		}
 
 		message(text, color) {
+			this.step = null;
 			this.stopCountdown();
 			this.live.empty().append($('<p class="dialogbrain-connect-note"></p>').text(text).css("color", color ? "var(--red-600)" : ""));
 		}
 
 		again(text) {
+			this.step = null;
 			this.stop();
 			this.live.empty();
 			if (text) this.live.append($('<p class="dialogbrain-connect-note"></p>').text(text));
@@ -242,8 +258,12 @@ frappe.provide("frappe.dialogbrain");
 
 		input(kind, label, type) {
 			const row = $('<div class="dialogbrain-connect-input"></div>').appendTo(this.live);
-			$('<label class="control-label"></label>').text(label).appendTo(row);
-			const input = $('<input class="form-control" autocomplete="off">').attr("type", type || "text").appendTo(row);
+			const id = "dialogbrain-connect-" + kind;
+			const auto = { password: "new-password", code: "one-time-code", phone: "off" }[kind];
+			$('<label class="control-label"></label>').attr("for", id).text(label).appendTo(row);
+			const input = $('<input class="form-control">')
+				.attr({ id, type: type || "text", autocomplete: auto, inputmode: kind === "code" ? "numeric" : null })
+				.appendTo(row);
 			const button = $('<button class="btn btn-primary btn-sm"></button>').text(__("Send")).appendTo(row);
 			const send = async () => {
 				const secret = input.val();
@@ -251,12 +271,15 @@ frappe.provide("frappe.dialogbrain");
 				input.val("").prop("disabled", true); // never left in the page
 				button.prop("disabled", true);
 				clearTimeout(this.timer);
+				this.seq += 1;
 				try {
-					this.apply(await call("submit", { claim: this.claim, kind, secret }));
+					const state = await call("submit", { claim: this.claim, kind, secret });
+					this.step = null; // the same step again (a wrong code) still gets a fresh input
+					this.apply(state);
 				} catch (e) {
 					input.prop("disabled", false);
 					button.prop("disabled", false);
-					frappe.show_alert({ message: errorText(e), indicator: "red" });
+					frappe.show_alert({ message: frappe.utils.escape_html(errorText(e)), indicator: "red" });
 					this.schedule(POLL_MS);
 				}
 			};
@@ -292,18 +315,27 @@ frappe.provide("frappe.dialogbrain");
 				note(__("This account has two-step verification. Enter its password."));
 				this.input("password", __("Password"), "password");
 			} else if (state.pairing_code) {
-				note(__("On the phone open {0} → Linked devices → Link with phone number, and enter this code:", [name]));
+				note(
+					state.channel_type === "whatsapp"
+						? __("On the phone open WhatsApp → Linked devices → Link a device → Link with phone number, and enter this code:")
+						: __("Enter this code in {0} on the phone:", [name])
+				);
 				$('<div class="dialogbrain-connect-code"></div>').text(state.pairing_code).appendTo(live);
 			} else if (state.status === "need_pairing_code" || state.status === "need_phone" || (this.method !== "qr" && !state.qr_svg && !state.qr_image)) {
 				note(__("Enter the phone number of the account, with the country code."));
 				this.input("phone", __("Phone number"), "tel");
 			} else if (state.qr_svg || state.qr_image) {
+				const how = {
+					whatsapp: __("On the phone open WhatsApp → Linked devices → Link a device, and scan this code."),
+					telegram: __("On the phone open Telegram → Settings → Devices → Link Desktop Device, and scan this code."),
+				};
 				note(
 					state.status === "scanned" || state.status === "waiting_confirm"
 						? __("Scanned. Confirm on the phone.")
-						: __("On the phone open {0} → Linked devices → Link a device, and scan this code.", [name])
+						: how[state.channel_type] || __("Scan this code with {0} on the phone.", [name])
 				);
 				const box = $('<div class="dialogbrain-connect-qr"></div>').appendTo(live);
+				box.attr({ role: "img", "aria-label": __("QR code") });
 				if (state.qr_svg) box.html(state.qr_svg); // drawn by our server from the QR text
 				else $("<img>").attr("src", state.qr_image).attr("alt", __("QR code")).appendTo(box);
 			} else {
