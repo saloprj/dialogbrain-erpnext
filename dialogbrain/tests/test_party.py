@@ -60,6 +60,20 @@ def _conv(thread_id, channel_type="whatsapp", **kw):
 
 
 class TestPartyHelpers(DialogBrainTestCase):
+	def test_digits_sql_accepts_only_known_columns(self):
+		# the column is formatted into SQL, so only the fixed phone columns are accepted
+		from dialogbrain.party import _digits_sql
+
+		self.assertIn("mobile_no", _digits_sql("mobile_no"))
+		for bad in ("phone) OR 1=1 --", "name", "cp.phone'"):
+			with self.assertRaises(ValueError):
+				_digits_sql(bad)
+
+	def test_find_parties_phone_with_sql_text(self):
+		# phone (reduced to digits) and email are bound: SQL text in them matches nothing extra
+		_customer("Quote Tester", phone="+380501112233")
+		self.assertEqual(find_parties(phone="' OR 1=1 --", email="x' OR '1'='1"), [])
+
 	def test_normalize_phone(self):
 		self.assertEqual(normalize_phone("+380 67 123 45 08"), "380671234508")
 		self.assertEqual(normalize_phone("00380671234508"), "380671234508")

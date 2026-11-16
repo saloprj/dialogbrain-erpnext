@@ -615,6 +615,41 @@ class TestInboxApi(DialogBrainTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			lc({"party_type": "User", "party": "Administrator"})
 
+	def test_list_filters_are_bound_not_formatted(self):
+		# Marketplace audit: no request value reaches the SQL text. A quote or an
+		# "' OR 1=1 --" in any filter neither breaks the query nor widens the result.
+		lc = api.list_conversations
+		payloads = ("O'Brien", "' OR 1=1 --", "') OR ('1'='1", '" OR ""="')
+		frappe.db.set_value("DB Conversation", self.a_open_unassigned, "title", "O'Brien")
+		frappe.set_user(self.agent_a)
+		for bad in payloads:
+			with self.subTest(payload=bad):
+				expected = {self.a_open_unassigned} if bad == "O'Brien" else set()
+				self.assertEqual(_names(lc({"search": bad, "status": "All"})), expected)
+				self.assertEqual(_names(lc({"channel_type": bad, "status": "All"})), set())
+				self.assertEqual(
+					_names(lc({"party_type": "Customer", "party": bad, "status": "All"})), set()
+				)
+				self.assertEqual(_names(lc({"name": bad, "status": "All"})), set())
+				self.assertEqual(_names(lc({"name": [bad, self.b_open], "status": "All"})), set())
+				# not a visible channel: refused, never queried
+				with self.assertRaises(frappe.PermissionError):
+					lc({"channel": bad})
+				with self.assertRaises(frappe.ValidationError):
+					lc({"status": bad})
+				with self.assertRaises(frappe.ValidationError):
+					lc({"scope": bad})
+				# the cursor name is bound too: an injected one pages nothing extra
+				cursor = {"key": str(now_datetime() + timedelta(days=1)), "name": bad}
+				self.assertLessEqual(
+					_names(lc({"status": "All"}, cursor=cursor)),
+					{self.a_open_unassigned, self.a_open_mine, self.a_closed},
+				)
+		frappe.set_user(self.mgr)
+		for bad in payloads:
+			with self.subTest(manager_payload=bad):
+				self.assertEqual(_names(lc({"assigned_to": bad, "status": "All"})), set())
+
 	def test_list_name_filter_refreshes_one_row(self):
 		# realtime row refresh: one conversation, under the list's current filters
 		lc = api.list_conversations

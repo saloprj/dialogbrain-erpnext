@@ -52,7 +52,8 @@ def get_data(filters, group_by):
 	if filters.assigned_to:
 		conditions.append("assigned_to = %(assigned_to)s")
 		values["assigned_to"] = filters.assigned_to
-	rows = frappe.db.sql(
+	# Safe: the group expression comes from GROUPS (the filter only picks a key) and the conditions are fixed text; every filter value is a bound parameter.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT {GROUPS[group_by]} AS grp, first_response_seconds
 		FROM `tabDB Conversation`
 		WHERE {" AND ".join(conditions)}

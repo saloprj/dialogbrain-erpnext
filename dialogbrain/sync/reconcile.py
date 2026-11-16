@@ -409,7 +409,8 @@ def _unconfirmed(cutoff, conversation=None):
 	"""``unknown`` replies without ``db_id``, sent before ``cutoff`` and whose last
 	attempt is not recent: ``[(name, conversation, sent_at)]``."""
 	cond = " and conversation = %(conversation)s" if conversation else ""
-	rows = frappe.db.sql(
+	# Safe: `cond` is empty or a fixed string; cutoff and conversation are bound parameters.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""
 		select name, conversation, sent_at, raw from `tabDB Message`
 		where direction = 'out' and delivery_status = 'unknown' and ifnull(db_id, '') = ''

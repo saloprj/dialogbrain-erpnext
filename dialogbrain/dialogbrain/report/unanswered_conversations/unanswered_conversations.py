@@ -40,7 +40,8 @@ def get_data(filters):
 	if min_waiting > 0:
 		conditions.append("TIMESTAMPDIFF(MINUTE, last_inbound_at, %(now)s) >= %(min_waiting)s")
 		values["min_waiting"] = min_waiting
-	return frappe.db.sql(
+	# Safe: the conditions are fixed text of this function; every filter value is a bound parameter.
+	return frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT name AS conversation, title, channel, assigned_to, last_inbound_at,
 			COALESCE(TIMESTAMPDIFF(MINUTE, last_inbound_at, %(now)s), 0) AS waiting_min,
 			unread_count, last_message_preview
