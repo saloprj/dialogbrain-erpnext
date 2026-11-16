@@ -857,6 +857,20 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(len(name), 140)
 		self.assertTrue(name.startswith("report report") and name.endswith(".pdf"))
 
+	def test_attachment_without_name_or_type_is_stored(self):
+		"""Voice notes and stickers come with no filename, some files with no mime or media
+		type: the message must still be stored."""
+		att = [
+			{"file_id": 6},
+			{"file_id": 7, "filename": "", "mime_type": None, "media_type": ""},
+			{"file_id": 8, "filename": "a.png", "mime_type": "image/png", "media_type": "photo"},
+		]
+		_process(INBOUND, db_id="9100003", attachments=att, attachment_file_ids=[6, 7, 8])
+		rows = _msg("9100003").attachments
+		self.assertEqual([r.file_id for r in rows], ["6", "7", "8"])
+		self.assertEqual([(r.filename, r.mime_type, r.media_type) for r in rows[:2]], [(None, None, None)] * 2)
+		self.assertEqual((rows[2].filename, rows[2].mime_type, rows[2].media_type), ("a.png", "image/png", "photo"))
+
 	def test_inbound_has_no_delivery_status(self):
 		"""F4: delivery_status describes our replies; inbound rows leave it empty."""
 		_process(INBOUND)
