@@ -232,19 +232,19 @@ class TestSend(DialogBrainTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			_attachment_path(SimpleNamespace(get_full_path=lambda: root))
 
-	def test_deliver_refuses_a_file_url_with_dotdot(self):
-		# a File row whose file_url was tampered with to climb out of the files folder
-		# (the doc's own validation would refuse it, so it is written directly)
-		url = self._offer_file()
+	def test_deliver_refuses_a_file_path_with_dotdot(self):
+		# a File whose path climbs out of the files folder (patched: Frappe's own File
+		# validation refuses such a file_url, and a stored one would leak into other tests)
+		from frappe.core.doctype.file.file import File
+
+		url = frappe.get_doc(
+			{"doctype": "File", "file_name": "dotdot.txt", "content": b"dotdot", "is_private": 0}
+		).insert(ignore_permissions=True).file_url
 		name = self._send(client_ref="cref-dotdot", file_urls=[url])["name"]
-		file_name = frappe.db.get_value("File", {"file_url": url})
-		bad_url = "/files/../../site_config.json"
-		frappe.db.set_value("File", file_name, "file_url", bad_url, update_modified=False)
-		raw = json.loads(frappe.db.get_value("DB Message", name, "raw"))
-		raw["file_urls"] = [bad_url]
-		frappe.db.set_value("DB Message", name, "raw", json.dumps(raw), update_modified=False)
+		escape = frappe.get_site_path("public", "files", "..", "..", "site_config.json")
 		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 4242)
-		self._deliver(name, client)
+		with patch.object(File, "get_full_path", lambda self: escape):
+			self._deliver(name, client)
 		client.upload_file.assert_not_called()
 		client.execute.assert_not_called()
 		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
