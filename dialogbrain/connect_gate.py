@@ -14,6 +14,7 @@ import re
 
 import frappe
 
+from dialogbrain import compat
 from dialogbrain.client import DialogBrainClient, DialogBrainError
 
 SETTINGS = "DialogBrain Settings"
@@ -82,7 +83,7 @@ def refresh(client=None) -> "dict | None":
 
 def options() -> "dict | None":
 	"""``{channel: [methods]}``, or ``None`` when the feature is off or the site is not connected."""
-	row = frappe.db.get_value(SETTINGS, SETTINGS, ["connected", FIELD], as_dict=True) or {}
+	row = compat.single_values(SETTINGS, ["connected", FIELD])
 	if str(row.get("connected") or "0") in ("0", ""):
 		return None
 	try:

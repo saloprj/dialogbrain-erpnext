@@ -337,7 +337,10 @@ def _restore_key(conn, old_key) -> None:
 	conn._server_save(doc)
 
 
-@frappe.whitelist(allow_guest=True, methods=["GET"])
+# Reviewed: guest by design (the OAuth redirect may arrive after the session expired; it
+# then only redirects to login). It acts only on a single-use, unguessable state issued to
+# a logged-in System Manager, claimed once and checked against that user.
+@frappe.whitelist(allow_guest=True, methods=["GET"])  # nosemgrep: guest-whitelisted-method
 def callback(code=None, state=None, error=None, iss=None, **kwargs) -> None:
 	"""DialogBrain redirects the admin's browser here. Every outcome is a redirect."""
 	from urllib.parse import quote

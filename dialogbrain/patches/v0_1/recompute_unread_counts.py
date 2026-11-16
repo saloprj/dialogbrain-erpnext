@@ -26,7 +26,8 @@ def execute():
 		live = f"m.creation < m.sent_at + interval '{LIVE_WINDOW_SECONDS} seconds'"
 	else:
 		live = f"m.creation < date_add(m.sent_at, interval {LIVE_WINDOW_SECONDS} second)"
-	frappe.db.sql(
+	# Safe: `live` is one of two fixed strings with the integer constant LIVE_WINDOW_SECONDS; no input.
+	frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""
 		update `tabDB Conversation` c
 		set unread_count = least(

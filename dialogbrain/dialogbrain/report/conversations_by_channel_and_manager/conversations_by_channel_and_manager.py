@@ -55,7 +55,8 @@ def get_data(filters, group_by):
 				item[key] += int(row.get(key) or 0)
 
 	# opened / closed in the period, and the current state (not period-bound)
-	merge(frappe.db.sql(
+	# Safe: `grp` is a fixed SQL expression from GROUPS (the filter only picks a key); dates are bound parameters.
+	merge(frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT {grp} AS grp,
 			SUM(c.opened_at >= %(start)s AND c.opened_at < %(end)s) AS opened,
 			SUM(c.closed_at >= %(start)s AND c.closed_at < %(end)s) AS closed,
@@ -67,7 +68,8 @@ def get_data(filters, group_by):
 		as_dict=True,
 	))
 	# messages sent in the period, joined to their conversation
-	merge(frappe.db.sql(
+	# Safe: `grp` is a fixed SQL expression from GROUPS (the filter only picks a key); dates are bound parameters.
+	merge(frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT {grp} AS grp,
 			SUM(m.direction = 'in') AS inbound,
 			SUM(m.direction = 'out') AS outbound,

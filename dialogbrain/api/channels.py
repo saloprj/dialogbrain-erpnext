@@ -132,7 +132,8 @@ def set_agent_mode(channel: str, mode: str) -> dict:
 		# the stored binding is stale (trigger shared, deleted, agent inactive, or ids that
 		# are not DialogBrain's numeric ones): never switch it
 		agent_modes.store_decision(doc, found)
-		frappe.db.commit()  # frappe.throw rolls back; keep the refreshed binding
+		# Commit needed: frappe.throw rolls the request back; the refreshed binding must stay.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		frappe.throw(
 			_("The agent setup of this channel changed in DialogBrain; the channel was refreshed. Nothing was switched.")
 		)
@@ -156,5 +157,7 @@ def refresh_agent_modes() -> dict:
 	try:
 		return agent_modes.sync()
 	except DialogBrainError as exc:
-		frappe.db.commit()  # keep the reason sync() stored on the channels
+		# Commit needed: frappe.throw rolls the request back; keep the reason sync() stored
+		# on the channels.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		frappe.throw(_("Agents could not be read from DialogBrain: {0}").format(_reason(exc)))

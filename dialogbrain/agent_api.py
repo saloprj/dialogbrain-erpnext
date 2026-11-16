@@ -148,7 +148,9 @@ def _log_failure(tool, ctx, exc) -> None:
 	def _after_rollback():
 		_log(tool, ctx, 0, error)
 		# NB: commit() resets after_rollback, so callbacks queued after this one never run.
-		frappe.db.commit()  # nosemgrep: the request already failed; only the log row is written
+		# Commit needed: the request already failed and was rolled back; this writes only
+		# the log row, which must survive that rollback.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	frappe.db.after_rollback.add(_after_rollback)
 
@@ -662,7 +664,7 @@ def _order_lines(items) -> list:
 		unexpected = sorted(set(row) - {"item_code", "qty"})
 		if unexpected:
 			frappe.throw(_("Unexpected item field(s): {0}; only item_code and qty are accepted").format(
-				", ".join(map(str, unexpected))), frappe.ValidationError)
+				", ".join(str(field) for field in unexpected)), frappe.ValidationError)
 		code = row.get("item_code")
 		if not isinstance(code, str) or not code.strip():
 			frappe.throw(_("Each item needs an item_code"), frappe.ValidationError)
@@ -720,7 +722,9 @@ def _insert_elevated(doc) -> None:
 	"""
 	agent = frappe.session.user
 	messages = len(frappe.local.message_log or [])
-	frappe.set_user("Administrator")
+	# Reviewed: elevated only for this one insert of a draft the guards above built (R5);
+	# the agent user is restored in ``finally`` and nothing said inside reaches the caller (R9).
+	frappe.set_user("Administrator")  # nosemgrep: frappe-setuser
 	try:
 		doc.insert(ignore_permissions=True)
 	except Exception as exc:  # noqa: BLE001 - every cause becomes the generic error (R9)
@@ -728,7 +732,7 @@ def _insert_elevated(doc) -> None:
 		failed.log_detail = _error_text(exc)
 		raise failed from None
 	finally:
-		frappe.set_user(agent)
+		frappe.set_user(agent)  # nosemgrep: frappe-setuser - restores the calling agent
 		if frappe.local.message_log:
 			del frappe.local.message_log[messages:]
 	frappe.db.set_value(doc.doctype, doc.name, {"owner": agent, "modified_by": agent}, update_modified=False)

@@ -78,6 +78,7 @@ arriving after the response finds the row by ``db_id``.
 import hashlib
 import json
 import mimetypes
+import os
 import re
 from datetime import timedelta
 
@@ -381,9 +382,12 @@ def _error_text(exc):
 
 def _commit():
 	"""Commit the job's transaction (makes the claim visible and durable, ends the read
-	snapshot). Skipped under tests, which rely on rollback for isolation."""
+	snapshot). Skipped under tests, which rely on rollback for isolation.
+
+	Commit needed: background job; the claim and the send state must be durable before
+	``messages.send`` so a reply is never sent twice."""
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def _claim(name):
@@ -511,11 +515,27 @@ def _store_send_state(name, request_id, params, attachments, previous) -> bool:
 	return True
 
 
+def _attachment_path(file_doc):
+	"""The File's content on disk, only inside this site's ``public/files`` or
+	``private/files``: a ``file_url`` with ``..`` (or a symlink) leading elsewhere is refused.
+
+	The File itself was checked when the reply was created (:func:`_assert_can_read_file`:
+	a File doc the user can read); ``file_urls`` are stored by :func:`create_reply` only."""
+	path = os.path.realpath(file_doc.get_full_path())
+	for root in (frappe.get_site_path("public", "files"), frappe.get_site_path("private", "files")):
+		root = os.path.realpath(root)
+		if os.path.commonpath([root, path]) == root and path != root:
+			return path
+	frappe.throw(_("You cannot attach this file"), frappe.PermissionError)
+
+
 def _upload_files(client, file_urls):
 	attachments = []
 	for url in file_urls:
 		file_doc = frappe.get_doc("File", {"file_url": url, "is_folder": 0})
-		with open(file_doc.get_full_path(), "rb") as f:
+		# Safe: a File doc the sender could read (checked at create_reply), resolved by
+		# _attachment_path inside the site's public or private files folder.
+		with open(_attachment_path(file_doc), "rb") as f:  # nosemgrep: frappe-security-file-traversal
 			content = f.read()
 		filename = file_doc.file_name or url.rsplit("/", 1)[-1]
 		mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"

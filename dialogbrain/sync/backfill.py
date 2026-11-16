@@ -48,9 +48,12 @@ STATUS_LENGTH = 140  # backfill_status is a Data field
 
 
 def commit():
-	"""Commit per thread in long jobs; skipped under tests (rollback isolation)."""
+	"""Commit per thread in long jobs; skipped under tests (rollback isolation).
+
+	Commit needed: background job; each thread's progress is kept before the next long
+	DialogBrain call, and a fresh snapshot is needed for retries."""
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def utc_day(dt) -> str:

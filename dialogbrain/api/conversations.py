@@ -291,7 +291,8 @@ def _list_conditions(filters, user):
 
 def _get_row(name, detail=False):
 	fields = ROW_FIELDS + (DETAIL_FIELDS if detail else ())
-	rows = frappe.db.sql(
+	# Safe: only the fixed column list and FROM of this module are formatted in; the name is a bound parameter.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"SELECT {', '.join(fields)} {FROM} WHERE {C}.`name` = %(name)s", {"name": name}, as_dict=True
 	)
 	return rows[0] if rows else None
@@ -354,7 +355,9 @@ def counters() -> dict:
 	perm = conversation_query(user)
 	if perm:
 		conditions.append(perm)
-	row = frappe.db.sql(
+	# Safe: only the fixed text of this function and the permission condition (channel
+	# names escaped by frappe.db.escape) are formatted in; the user is a bound parameter.
+	row = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT
 			COALESCE(SUM({C}.`unread_count`), 0),
 			COALESCE(SUM(CASE WHEN {C}.`last_message_direction` = 'in' THEN 1 ELSE 0 END), 0),
@@ -599,12 +602,14 @@ def _agent_assign(conversation, me, user):
 	"""Conditional write for an agent: take only if unassigned or already theirs; unassign
 	only if theirs. Re-read under the row lock the UPDATE holds to detect a lost race."""
 	allowed = "('', %(me)s)" if user else "(%(me)s)"
-	frappe.db.sql(
+	# Safe: `allowed` is one of two fixed strings chosen here; every value is a bound parameter.
+	frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""UPDATE {C} SET `assigned_to` = %(user)s, `modified` = %(now)s, `modified_by` = %(me)s
 		WHERE `name` = %(name)s AND COALESCE(`assigned_to`, '') IN {allowed}""",
 		{"user": user, "me": me, "now": now_datetime(), "name": conversation},
 	)
-	after = frappe.db.sql(
+	# Safe: only the table name constant C is formatted in; the name is a bound parameter.
+	after = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"SELECT `assigned_to` FROM {C} WHERE `name` = %(name)s FOR UPDATE", {"name": conversation}
 	)[0][0]
 	if (after or None) != user:

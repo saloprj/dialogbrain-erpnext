@@ -80,7 +80,13 @@ def phones_match(a, b):
 	return len(na) >= 9 and len(nb) >= 9 and na[-9:] == nb[-9:]
 
 
+# The only columns _digits_sql formats into SQL (identifiers cannot be bound parameters).
+DIGIT_COLUMNS = frozenset({"cp.phone", "mobile_no", "phone"})
+
+
 def _digits_sql(column):
+	if column not in DIGIT_COLUMNS:
+		raise ValueError(f"not a phone column: {column!r}")
 	return f"REGEXP_REPLACE({column}, '[^0-9]', '')"
 
 
@@ -109,7 +115,8 @@ def _find(phone, email):
 	norm = normalize_phone(phone)
 	if norm:
 		tail = norm[-9:]
-		rows = frappe.db.sql(
+		# Safe: _digits_sql only accepts the column names in DIGIT_COLUMNS; the phone tail is a bound parameter.
+		rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 			f"""SELECT cp.phone, cp.parent AS contact, dl.link_doctype, dl.link_name
 			FROM `tabContact Phone` cp
 			JOIN `tabDynamic Link` dl ON dl.parent = cp.parent AND dl.parenttype = 'Contact'
@@ -121,7 +128,8 @@ def _find(phone, email):
 		for r in rows:
 			if phones_match(r.phone, phone):
 				add(r.link_doctype, r.link_name, "phone", r.contact, exact=normalize_phone(r.phone) == norm)
-		leads = frappe.db.sql(
+		# Safe: _digits_sql only accepts the column names in DIGIT_COLUMNS; the phone tail is a bound parameter.
+		leads = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 			f"""SELECT name, mobile_no, phone FROM `tabLead`
 			WHERE RIGHT({_digits_sql("mobile_no")}, 9) = %(tail)s
 			OR RIGHT({_digits_sql("phone")}, 9) = %(tail)s""",

@@ -148,9 +148,12 @@ def drain(lane: str = "short", batch_size: int = DRAIN_BATCH, max_batches: int =
 
 
 def _commit():
-	"""Commit (skipped under tests, which rely on rollback for isolation)."""
+	"""Commit (skipped under tests, which rely on rollback for isolation).
+
+	Commit needed: background job; ``attempts`` is durable before a delivery is processed
+	(at most once, never retried forever) and each delivery is committed on its own."""
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def process_delivery(log_name: str) -> None:

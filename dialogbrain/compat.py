@@ -57,16 +57,28 @@ def only_for(roles) -> None:
 
 
 def single_values(doctype: str, fields) -> "frappe._dict":
-	"""``frappe.db.get_value(doctype, doctype, fields, as_dict=True)`` for a Single, typed.
+	"""The Single's ``fields`` as a ``frappe._dict``, typed; a field never stored is absent.
 
-	v16 casts Singles values by field type; v15 returns them as the raw strings stored in
-	``tabSingles`` (a Check of ``"0"`` is truthy there). Empty values stay ``None``."""
-	values = frappe.db.get_value(doctype, doctype, list(fields), as_dict=True) or frappe._dict()
-	if frappe_major() >= 16:
-		return values
+	Read with ``frappe.db.get_singles_dict`` (the Singles API; ``frappe.db.get_value`` on a
+	Single is not type safe on v15), raw, then only the requested fields are cast: on v16
+	exactly as its ``get_value`` did; on v15 (raw strings in ``tabSingles``, a Check of
+	``"0"`` is truthy there) with ``cast``, and empty values stay ``None``."""
+	fields = list(fields)
+	stored = frappe.db.get_singles_dict(doctype)  # raw: a bad unrelated value cannot raise
+	values = frappe._dict({f: stored[f] for f in fields if f in stored})
+	meta = frappe.get_meta(doctype)
 	from frappe.utils.data import cast
 
-	meta = frappe.get_meta(doctype)
+	if frappe_major() >= 16:
+		# as v16's get_value on a Single (its database.py imports frappe.utils.cast as
+		# cast_fieldtype): every stored value cast, None included, get_default_df fallback
+		from frappe.model.meta import get_default_df
+
+		for field, value in values.items():
+			df = meta.get_field(field) or get_default_df(field)
+			if df:
+				values[field] = cast(df.fieldtype, value)
+		return values
 	for field, value in values.items():
 		df = meta.get_field(field)
 		if df and value is not None:

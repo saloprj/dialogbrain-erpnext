@@ -51,3 +51,21 @@ class TestCompat(DialogBrainTestCase):
 			self.assertEqual(str(ctx.exception), "[Not permitted]")
 			frappe.set_user("Administrator")
 			compat.only_for("System Manager")  # no raise
+
+	def test_single_values_typed_on_both_versions(self):
+		# a Check reads as an int (v15 would return the truthy string "0"); a stored Data
+		# field keeps its text; a field never stored is absent (reads as None)
+		import frappe
+
+		settings = "DialogBrain Settings"
+		self.addCleanup(frappe.db.rollback)
+		frappe.db.set_single_value(settings, "connected", 0)
+		frappe.db.set_single_value(settings, "workspace_id", "ws-1")
+		frappe.db.delete("Singles", {"doctype": settings, "field": "dialogbrain_instance"})
+		for version in ("15.80.0", "16.1.0"):
+			with self.subTest(version=version), patch.object(compat.frappe, "__version__", version):
+				values = compat.single_values(settings, ("connected", "workspace_id", "dialogbrain_instance"))
+				self.assertIsInstance(values.connected, int)
+				self.assertEqual(values.connected, 0)
+				self.assertEqual(values.workspace_id, "ws-1")
+				self.assertIsNone(values.dialogbrain_instance)

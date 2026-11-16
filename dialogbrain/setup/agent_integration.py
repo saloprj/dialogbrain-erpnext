@@ -589,7 +589,7 @@ def _tool_names(client, iid, tools, wanted, added_names, problems, stale=False) 
 			listed = client.execute("integrations.get_endpoints", {"integration_id": iid}) or {}
 		except DialogBrainError as exc:
 			listed = None
-			problems.append(_("could not list the integration's endpoints: {0}").format(exc))
+			problems.append(_("could not list the integration's endpoints: {0}").format(str(exc)))
 			if stale:
 				problems.append(stale_problem)
 		if listed is not None:
@@ -609,7 +609,7 @@ def _tool_names(client, iid, tools, wanted, added_names, problems, stale=False) 
 							"integrations.remove_endpoints", {"integration_id": iid, "operation_ids": unwanted}
 						)
 					except DialogBrainError as exc:
-						problems.append(_("old customer tools could not be removed: {0}").format(exc))
+						problems.append(_("old customer tools could not be removed: {0}").format(str(exc)))
 				else:
 					problems.append(_("old customer tools could not be removed (no integrations.remove_endpoints)"))
 			return names
@@ -735,7 +735,8 @@ def set_agent_writes(allow) -> dict:
 		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 0)
 		# R11: durable before DialogBrain is called, so no later exception (ours or an
 		# unexpected one) can roll "writes off" back.
-		frappe.db.commit()  # nosemgrep: deliberate, the fail-safe value must stick
+		# Commit needed: the fail-safe "writes off" must stick before DialogBrain is called.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		try:
 			agents = apply_denied_tools(doc)
 		except (DialogBrainError, frappe.ValidationError) as exc:

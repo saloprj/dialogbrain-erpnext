@@ -425,13 +425,15 @@ def _merge_conversation(target, source):
 		where = f"`{field}` = %(source)s"
 		if type_field:
 			where += f" and `{type_field}` = 'DB Conversation'"
-		frappe.db.sql(
+		# Safe: table and column names come from the CONVERSATION_LINKS constant; the names are bound parameters.
+		frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 			f"update `tab{doctype}` set `{field}` = %(target)s where {where}",
 			{"target": target, "source": source},
 		)
 	for doctype in DB_CONVERSATION_FIELD_DOCTYPES:
 		if frappe.db.has_column(doctype, "db_conversation"):
-			frappe.db.sql(
+			# Safe: the table name comes from the DB_CONVERSATION_FIELD_DOCTYPES constant; the names are bound parameters.
+			frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 				f"update `tab{doctype}` set `db_conversation` = %(target)s where `db_conversation` = %(source)s",
 				{"target": target, "source": source},
 			)

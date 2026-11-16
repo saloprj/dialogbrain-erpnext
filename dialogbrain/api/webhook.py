@@ -18,7 +18,9 @@ def _respond(status_code: int, ok: bool, **extra):
 	return {"ok": ok, **extra}
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+# Reviewed: guest by design (DialogBrain has no Frappe session). POST only; nothing is
+# stored or run before the HMAC signature over the raw body is verified (401 otherwise).
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def receive():
 	"""Receive a signed DialogBrain webhook: verify, dedupe, store, enqueue.
 

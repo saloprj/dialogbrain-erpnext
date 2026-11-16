@@ -208,6 +208,48 @@ class TestSend(DialogBrainTestCase):
 			self._send(file_urls=[private.file_url])
 		self.assertEqual(self._rows(), [])
 
+	def test_attachment_path_stays_in_the_site_files(self):
+		import os
+		from types import SimpleNamespace
+
+		from dialogbrain.sync.sender import _attachment_path
+
+		public = frappe.get_doc(
+			{"doctype": "File", "file_name": "inside.txt", "content": b"in", "is_private": 0}
+		).insert(ignore_permissions=True)
+		private = frappe.get_doc(
+			{"doctype": "File", "file_name": "inside-p.txt", "content": b"in", "is_private": 1}
+		).insert(ignore_permissions=True)
+		for doc in (public, private):
+			self.assertEqual(_attachment_path(doc), os.path.realpath(doc.get_full_path()))
+		# a path that climbs out with ../ is refused, from either folder
+		for folder in ("public", "private"):
+			escape = frappe.get_site_path(folder, "files", "..", "..", "site_config.json")
+			with self.assertRaises(frappe.PermissionError):
+				_attachment_path(SimpleNamespace(get_full_path=lambda p=escape: p))
+		# the files folder itself is not a file
+		root = frappe.get_site_path("private", "files")
+		with self.assertRaises(frappe.PermissionError):
+			_attachment_path(SimpleNamespace(get_full_path=lambda: root))
+
+	def test_deliver_refuses_a_file_path_with_dotdot(self):
+		# a File whose path climbs out of the files folder (patched: Frappe's own File
+		# validation refuses such a file_url, and a stored one would leak into other tests)
+		from frappe.core.doctype.file.file import File
+
+		url = frappe.get_doc(
+			{"doctype": "File", "file_name": "dotdot.txt", "content": b"dotdot", "is_private": 0}
+		).insert(ignore_permissions=True).file_url
+		name = self._send(client_ref="cref-dotdot", file_urls=[url])["name"]
+		escape = frappe.get_site_path("public", "files", "..", "..", "site_config.json")
+		client = _mock_client(execute=lambda *a, **k: copy.deepcopy(SEND), upload_file=lambda *a, **k: 4242)
+		with patch.object(File, "get_full_path", lambda self: escape):
+			self._deliver(name, client)
+		client.upload_file.assert_not_called()
+		client.execute.assert_not_called()
+		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+		self.assertIn("cannot attach", frappe.db.get_value("DB Message", name, "error") or "")
+
 	# --- deliver --------------------------------------------------------------
 
 	def test_deliver_success_sets_db_id(self):
