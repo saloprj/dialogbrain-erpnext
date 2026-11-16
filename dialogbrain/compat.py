@@ -67,18 +67,18 @@ def single_values(doctype: str, fields) -> "frappe._dict":
 	stored = frappe.db.get_singles_dict(doctype)  # raw: a bad unrelated value cannot raise
 	values = frappe._dict({f: stored[f] for f in fields if f in stored})
 	meta = frappe.get_meta(doctype)
+	from frappe.utils.data import cast
+
 	if frappe_major() >= 16:
-		# as v16's get_value on a Single: cast_fieldtype on each stored value, None included
+		# as v16's get_value on a Single (its database.py imports frappe.utils.cast as
+		# cast_fieldtype): every stored value cast, None included, get_default_df fallback
 		from frappe.model.meta import get_default_df
-		from frappe.utils.data import cast_fieldtype
 
 		for field, value in values.items():
 			df = meta.get_field(field) or get_default_df(field)
 			if df:
-				values[field] = cast_fieldtype(df.fieldtype, value, show_warning=False)
+				values[field] = cast(df.fieldtype, value)
 		return values
-	from frappe.utils.data import cast
-
 	for field, value in values.items():
 		df = meta.get_field(field)
 		if df and value is not None:
