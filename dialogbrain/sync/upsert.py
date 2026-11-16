@@ -488,16 +488,21 @@ def _attachments(message):
 				# what the sender named the file: a long name is cut (extension kept), it must
 				# not make the whole message fail
 				"filename": _short_name(_s(item.get("filename") or item.get("name"))),
-				"mime_type": _s(item.get("mime_type"))[:DATA_LENGTH],
-				"media_type": _s(item.get("media_type"))[:DATA_LENGTH],
+				"mime_type": _cut(_s(item.get("mime_type"))),
+				"media_type": _cut(_s(item.get("media_type"))),
 				"size": item.get("size") if isinstance(item.get("size"), int) else None,
 			}
 		)
 	return rows
 
 
-def _short_name(name: str) -> str:
-	if len(name) <= DATA_LENGTH:
+def _cut(value: "str | None") -> "str | None":
+	"""``value`` within a Data column; None stays None (``_s`` gives None for an empty one)."""
+	return value[:DATA_LENGTH] if value else value
+
+
+def _short_name(name: "str | None") -> "str | None":
+	if not name or len(name) <= DATA_LENGTH:
 		return name
 	stem, dot, ext = name.rpartition(".")
 	if not dot or len(ext) > 10:
