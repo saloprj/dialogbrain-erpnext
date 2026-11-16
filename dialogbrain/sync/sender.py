@@ -381,9 +381,12 @@ def _error_text(exc):
 
 def _commit():
 	"""Commit the job's transaction (makes the claim visible and durable, ends the read
-	snapshot). Skipped under tests, which rely on rollback for isolation."""
+	snapshot). Skipped under tests, which rely on rollback for isolation.
+
+	Commit needed: background job; the claim and the send state must be durable before
+	``messages.send`` so a reply is never sent twice."""
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def _claim(name):

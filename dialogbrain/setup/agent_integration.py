@@ -735,7 +735,8 @@ def set_agent_writes(allow) -> dict:
 		frappe.db.set_single_value(SETTINGS, "allow_agent_writes", 0)
 		# R11: durable before DialogBrain is called, so no later exception (ours or an
 		# unexpected one) can roll "writes off" back.
-		frappe.db.commit()  # nosemgrep: deliberate, the fail-safe value must stick
+		# Commit needed: the fail-safe "writes off" must stick before DialogBrain is called.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		try:
 			agents = apply_denied_tools(doc)
 		except (DialogBrainError, frappe.ValidationError) as exc:

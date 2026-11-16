@@ -47,8 +47,11 @@ UNSURE = "DialogBrain did not answer in time. Wait a minute and start again"
 
 
 def _commit() -> None:
+	"""Commit needed: the claim and the DialogBrain session id must be durable as soon as
+	they exist (spec 2026-11-16-connect-channel), before DialogBrain is called or the answer
+	is built, so a later error or timeout cannot roll them back."""
 	if not frappe.flags.in_test:  # tests keep their own transaction
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def _waiting(status) -> bool:

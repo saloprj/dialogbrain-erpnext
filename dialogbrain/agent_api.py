@@ -148,7 +148,9 @@ def _log_failure(tool, ctx, exc) -> None:
 	def _after_rollback():
 		_log(tool, ctx, 0, error)
 		# NB: commit() resets after_rollback, so callbacks queued after this one never run.
-		frappe.db.commit()  # nosemgrep: the request already failed; only the log row is written
+		# Commit needed: the request already failed and was rolled back; this writes only
+		# the log row, which must survive that rollback.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	frappe.db.after_rollback.add(_after_rollback)
 
