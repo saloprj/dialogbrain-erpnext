@@ -248,6 +248,7 @@ class TestSend(DialogBrainTestCase):
 		client.upload_file.assert_not_called()
 		client.execute.assert_not_called()
 		self.assertEqual(frappe.db.get_value("DB Message", name, "delivery_status"), "failed")
+		self.assertIn("cannot attach", frappe.db.get_value("DB Message", name, "error") or "")
 
 	# --- deliver --------------------------------------------------------------
 
