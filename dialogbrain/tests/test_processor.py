@@ -850,6 +850,13 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(frappe.db.get_value("DB Message", {"db_id": "9100001"}, "message_id"), long_id)
 		self.assertEqual(frappe.db.count("DB Message", {"message_id": long_id}), 1)
 
+	def test_long_attachment_filename_does_not_lose_the_message(self):
+		att = [{"file_id": 5, "filename": "report " * 40 + ".pdf", "mime_type": "application/pdf", "media_type": "document"}]
+		_process(INBOUND, db_id="9100002", attachments=att, attachment_file_ids=[5])
+		name = _msg("9100002").attachments[0].filename
+		self.assertEqual(len(name), 140)
+		self.assertTrue(name.startswith("report report") and name.endswith(".pdf"))
+
 	def test_inbound_has_no_delivery_status(self):
 		"""F4: delivery_status describes our replies; inbound rows leave it empty."""
 		_process(INBOUND)

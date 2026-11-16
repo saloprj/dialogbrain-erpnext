@@ -485,13 +485,24 @@ def _attachments(message):
 		rows.append(
 			{
 				"file_id": _s(item.get("file_id") or item.get("id")),
-				"filename": _s(item.get("filename") or item.get("name")),
-				"mime_type": _s(item.get("mime_type")),
-				"media_type": _s(item.get("media_type")),
+				# what the sender named the file: a long name is cut (extension kept), it must
+				# not make the whole message fail
+				"filename": _short_name(_s(item.get("filename") or item.get("name"))),
+				"mime_type": _s(item.get("mime_type"))[:DATA_LENGTH],
+				"media_type": _s(item.get("media_type"))[:DATA_LENGTH],
 				"size": item.get("size") if isinstance(item.get("size"), int) else None,
 			}
 		)
 	return rows
+
+
+def _short_name(name: str) -> str:
+	if len(name) <= DATA_LENGTH:
+		return name
+	stem, dot, ext = name.rpartition(".")
+	if not dot or len(ext) > 10:
+		return name[:DATA_LENGTH]
+	return stem[: DATA_LENGTH - len(ext) - 1] + "." + ext
 
 
 def _raw(message):
