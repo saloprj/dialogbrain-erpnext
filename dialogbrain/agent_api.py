@@ -662,7 +662,7 @@ def _order_lines(items) -> list:
 		unexpected = sorted(set(row) - {"item_code", "qty"})
 		if unexpected:
 			frappe.throw(_("Unexpected item field(s): {0}; only item_code and qty are accepted").format(
-				", ".join(map(str, unexpected))), frappe.ValidationError)
+				", ".join(str(field) for field in unexpected)), frappe.ValidationError)
 		code = row.get("item_code")
 		if not isinstance(code, str) or not code.strip():
 			frappe.throw(_("Each item needs an item_code"), frappe.ValidationError)
