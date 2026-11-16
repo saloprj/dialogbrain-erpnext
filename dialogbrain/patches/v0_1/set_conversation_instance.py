@@ -8,12 +8,13 @@ it when sync next touches it (``upsert_conversation`` fills an empty one).
 
 import frappe
 
+from dialogbrain import compat
 from dialogbrain.instance import SETTINGS, instance_key
 
 
 def execute():
-	settings = frappe.db.get_value(
-		SETTINGS, SETTINGS, ["connected", "base_url", "workspace_id", "dialogbrain_instance"], as_dict=True
+	settings = compat.single_values(
+		SETTINGS, ["connected", "base_url", "workspace_id", "dialogbrain_instance"]
 	)
 	if not settings or not frappe.utils.cint(settings.connected):
 		return

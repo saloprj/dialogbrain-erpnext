@@ -57,13 +57,18 @@ def only_for(roles) -> None:
 
 
 def single_values(doctype: str, fields) -> "frappe._dict":
-	"""``frappe.db.get_value(doctype, doctype, fields, as_dict=True)`` for a Single, typed.
+	"""The Single's ``fields`` as a ``frappe._dict``, typed; a field never stored is absent.
 
-	v16 casts Singles values by field type; v15 returns them as the raw strings stored in
-	``tabSingles`` (a Check of ``"0"`` is truthy there). Empty values stay ``None``."""
-	values = frappe.db.get_value(doctype, doctype, list(fields), as_dict=True) or frappe._dict()
+	Read with ``frappe.db.get_singles_dict`` (the Singles API; ``frappe.db.get_value`` on a
+	Single is not type safe on v15). v16 casts by field type, as its ``get_value`` did; v15
+	stores raw strings in ``tabSingles`` (a Check of ``"0"`` is truthy there), so they are
+	cast here. On v15 empty values stay ``None``."""
+	fields = list(fields)
 	if frappe_major() >= 16:
-		return values
+		stored = frappe.db.get_singles_dict(doctype, cast=True)
+		return frappe._dict({f: stored[f] for f in fields if f in stored})
+	stored = frappe.db.get_singles_dict(doctype)
+	values = frappe._dict({f: stored[f] for f in fields if f in stored})
 	from frappe.utils.data import cast
 
 	meta = frappe.get_meta(doctype)
