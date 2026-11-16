@@ -11,6 +11,7 @@ from time import monotonic
 
 import frappe
 from frappe.utils.background_jobs import get_job, get_workers
+from rq.exceptions import InvalidJobOperation
 
 from dialogbrain.instance import current_instance
 from dialogbrain.party import link_party
@@ -78,6 +79,10 @@ def _drain_in_flight(job_id: str) -> bool:
 	return False
 
 
+def _enqueue_drain(lane: str, job_id: str) -> None:
+	frappe.enqueue(DRAIN_JOB, queue=lane, timeout=DRAIN_TIMEOUT, job_id=job_id, deduplicate=True, lane=lane)
+
+
 def kick_drain(lane: str) -> None:
 	"""Enqueue the lane's drain unless one is in flight (checked here first:
 	``frappe.enqueue``'s own dedupe logs an error line per skipped kick, and a burst is
@@ -88,9 +93,13 @@ def kick_drain(lane: str) -> None:
 	try:
 		if _drain_in_flight(job_id):
 			return
-		frappe.enqueue(
-			DRAIN_JOB, queue=lane, timeout=DRAIN_TIMEOUT, job_id=job_id, deduplicate=True, lane=lane
-		)
+		try:
+			_enqueue_drain(lane, job_id)
+		except InvalidJobOperation:
+			# frappe.enqueue deletes a finished job with the same id before queueing; when
+			# Redis expired that job in between, the delete fails and nothing was queued.
+			# The job is gone now, so the second try queues.
+			_enqueue_drain(lane, job_id)
 	except Exception:  # noqa: BLE001 - see docstring
 		key = f"dialogbrain_drain_kick_error_{lane}"
 		if frappe.cache.get_value(key, expires=True):

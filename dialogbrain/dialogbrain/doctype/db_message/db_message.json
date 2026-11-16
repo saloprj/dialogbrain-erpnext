@@ -30,7 +30,9 @@
   {
    "fieldname": "message_id",
    "fieldtype": "Data",
-   "label": "Message Id"
+   "label": "Message Id",
+   "length": 1000,
+   "description": "The channel's own id of the message. Some channels (Instagram, Google Calendar) use ids of several hundred characters."
   },
   {
    "fieldname": "conversation",

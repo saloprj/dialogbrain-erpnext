@@ -840,6 +840,16 @@ class TestProcessor(DialogBrainTestCase):
 		self.assertEqual(_logs(name), [])
 		self.assertFalse([c for c in pub.call_args_list if str(c.args[0] if c.args else "").startswith("dialogbrain:")])
 
+	def test_long_channel_message_id_is_kept_whole(self):
+		"""Instagram and Google Calendar ids run to several hundred characters; a message
+		with one must be stored (it failed on the 140-character Data default), and found
+		again by that id when DialogBrain reports it deleted."""
+		long_id = "instagram:" + "aWdfZAG1faXRlbToxOklHTWVzc2FnZA" * 20
+		self.assertGreater(len(long_id), 500)
+		_process(INBOUND, message_id=long_id, db_id="9100001")
+		self.assertEqual(frappe.db.get_value("DB Message", {"db_id": "9100001"}, "message_id"), long_id)
+		self.assertEqual(frappe.db.count("DB Message", {"message_id": long_id}), 1)
+
 	def test_inbound_has_no_delivery_status(self):
 		"""F4: delivery_status describes our replies; inbound rows leave it empty."""
 		_process(INBOUND)

@@ -174,6 +174,18 @@ class TestReceive(DialogBrainTestCase):
 		log_error.assert_called_once()
 		frappe.cache.delete_value("dialogbrain_drain_kick_error_short")
 
+	def test_kick_drain_retries_when_the_finished_job_vanished(self):
+		"""frappe.enqueue deletes the finished job of the same id first; if Redis expired it in
+		between, rq raises and nothing is queued. One retry queues it, with no Error Log."""
+		from rq.exceptions import InvalidJobOperation
+
+		with patch("dialogbrain.sync.processor._drain_in_flight", return_value=False), patch(
+			"frappe.enqueue", side_effect=[InvalidJobOperation("Failed to retrieve status"), None]
+		) as enqueue, patch("frappe.log_error") as log_error:
+			webhook.kick_drain("short")
+		self.assertEqual(enqueue.call_count, 2)
+		log_error.assert_not_called()
+
 	def test_kick_drain_skips_enqueue_while_the_drain_is_queued_or_running(self):
 		"""frappe.enqueue's own dedupe logs an error line per skipped kick; a burst is
 		thousands of kicks, so the check is done here first."""
