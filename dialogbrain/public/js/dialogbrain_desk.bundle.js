@@ -2,10 +2,12 @@
 //   * a "Chats" item with the unread badge in the sidebar band and the dock,
 //   * a short sound on a new inbound message while the inbox is not in focus,
 //   * the "Chats" section of the Customer and Lead forms (see public/js/party_chats.js),
-//   * the "Connect channel" dialog (public/js/connect_channel.js).
+//   * the "Connect channel" dialog (public/js/connect_channel.js),
+//   * the first column of query reports kept in view while scrolling (public/js/report_freeze.js).
 // Badge and sound only for Chat Agent / Chat Manager / System Manager.
 
 import "./connect_channel.js";
+import "./report_freeze.js";
 
 frappe.provide("frappe.dialogbrain");
 
