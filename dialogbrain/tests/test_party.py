@@ -4,6 +4,7 @@ from dialogbrain.party import (
 	contact_keys_from_ref,
 	create_lead,
 	find_parties,
+	lead_source_for,
 	link_party,
 	normalize_phone,
 	phones_match,
@@ -184,6 +185,20 @@ class TestPartyLinking(DialogBrainTestCase):
 		d = frappe.db.get_value("DB Conversation", conv, ["party_type", "party", "link_source"], as_dict=1)
 		self.assertEqual((d.party_type, d.party, d.link_source), ("Lead", lead, "manual"))
 		self.assertEqual(frappe.db.get_value("Lead", lead, "mobile_no"), "380671234508")
+
+	def test_create_lead_sets_source_from_channel(self):
+		for name in ("Website / livechat", "DialogBrain inbox"):
+			if not frappe.db.exists("UTM Source", name):
+				frappe.get_doc({"doctype": "UTM Source"}).insert(ignore_permissions=True, set_name=name)
+		conv = _conv("p-9s", "livechat", phone="380671234519", contact_name="Source Person")
+		lead = create_lead(conv)
+		self.assertEqual(frappe.db.get_value("Lead", lead, ["utm_source", "db_conversation"]), ("Website / livechat", conv))
+
+	def test_lead_source_falls_back_for_unknown_channel(self):
+		if not frappe.db.exists("UTM Source", "DialogBrain inbox"):
+			frappe.get_doc({"doctype": "UTM Source"}).insert(ignore_permissions=True, set_name="DialogBrain inbox")
+		conv = _conv("p-9t", "zoom", phone="380671234520")
+		self.assertEqual(lead_source_for(conv), "DialogBrain inbox")
 
 	def test_tail_match_on_verified_channel_is_unverified(self):
 		c = _customer("Pty Cust H", phone="0671234508")

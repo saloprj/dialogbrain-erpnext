@@ -20,6 +20,31 @@ WHATSAPP_PHONE_SUFFIXES = ("@s.whatsapp.net", "@c.us")
 PHONE_DIGITS = (7, 15)  # E.164 has at most 15 digits
 EMAIL_RE = re.compile(r"^[^@\s:]+@[^@\s:]+\.[^@\s:]+$")
 
+# Chat channel type -> UTM Source of a Lead created from that chat (ERPNext v16 renamed Lead.source to
+# utm_source, a Link to "UTM Source"). Only an existing UTM Source is set.
+CHANNEL_LEAD_SOURCES = {
+	"instagram": "Facebook / Instagram",
+	"facebook": "Facebook / Instagram",
+	"whatsapp": "WhatsApp",
+	"whatsapp_business": "WhatsApp",
+	"telegram": "Telegram",
+	"telegram_bot": "Telegram",
+	"linkedin": "LinkedIn",
+	"livechat": "Website / livechat",
+	"email": "Email",
+}
+FALLBACK_LEAD_SOURCE = "DialogBrain inbox"
+
+
+def lead_source_for(conversation):
+	"""UTM Source for a Lead created from this chat, or None when no matching UTM Source exists."""
+	channel = frappe.db.get_value("DB Conversation", conversation, "channel") if conversation else None
+	channel_type = (frappe.db.get_value("DB Channel", channel, "channel_type") or "").lower() if channel else ""
+	for source in (CHANNEL_LEAD_SOURCES.get(channel_type), FALLBACK_LEAD_SOURCE):
+		if source and frappe.db.exists("UTM Source", source):
+			return source
+	return None
+
 
 def normalize_phone(raw):
 	digits = re.sub(r"\D", "", raw or "")
@@ -297,7 +322,8 @@ def create_lead(conversation):
 			"first_name": name,
 			"mobile_no": conv.phone,
 			"email_id": conv.email,
-			"source": "Chat" if frappe.db.exists("Lead Source", "Chat") else None,
+			"utm_source": lead_source_for(conversation),
+			"db_conversation": conversation,
 		}
 	).insert(ignore_permissions=True)
 	# The chat's own new Lead has no orders to release, so no Lead read is required.

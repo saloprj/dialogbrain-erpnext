@@ -31,6 +31,7 @@ from frappe.utils import cint, escape_html, flt, getdate, today
 
 from dialogbrain.compat import sum_field
 from dialogbrain.install import AGENT_ROLE, create_roles
+from dialogbrain.party import lead_source_for
 from dialogbrain.thread_context import Context, query_string, resolve
 
 SETTINGS = "DialogBrain Settings"
@@ -360,7 +361,7 @@ def _create_lead(ctx, name, phone, email, note):
 			"first_name": name[:140],
 			"mobile_no": (phone or "").strip() or None,
 			"email_id": (email or "").strip() or None,
-			"source": "Chat" if frappe.db.exists("Lead Source", "Chat") else None,
+			"utm_source": lead_source_for(ctx.conversation if ctx else None),
 			"db_conversation": ctx.conversation if ctx else None,
 		}
 	)
